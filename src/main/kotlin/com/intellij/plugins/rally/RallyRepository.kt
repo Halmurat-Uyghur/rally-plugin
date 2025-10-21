@@ -212,6 +212,18 @@ class RallyRepository : BaseRepositoryImpl {
     }
 
     /**
+     * Escape a string for safe use in Rally query language
+     * Rally uses double quotes for string literals, so we need to escape:
+     * - Backslashes (must be first to avoid double-escaping)
+     * - Double quotes
+     */
+    private fun escapeRallyQueryString(input: String): String {
+        return input
+            .replace("\\", "\\\\")  // Escape backslashes first
+            .replace("\"", "\\\"")  // Escape double quotes
+    }
+
+    /**
      * Build Rally query string from user input and filters
      */
     private fun buildRallyQuery(userQuery: String?, projectFilter: String?, withClosed: Boolean): String? {
@@ -219,18 +231,23 @@ class RallyRepository : BaseRepositoryImpl {
 
         // Add user query if provided
         if (!userQuery.isNullOrBlank()) {
+            // Escape user input to prevent query injection
+            val escapedQuery = escapeRallyQueryString(userQuery)
+
             // If user query looks like a FormattedID, search by that
             if (userQuery.matches(Regex("^(S-|US|DE|TA)\\d+", RegexOption.IGNORE_CASE))) {
-                conditions.add("(FormattedID = \"$userQuery\")")
+                conditions.add("(FormattedID = \"$escapedQuery\")")
             } else {
                 // Otherwise search in Name
-                conditions.add("(Name contains \"$userQuery\")")
+                conditions.add("(Name contains \"$escapedQuery\")")
             }
         }
 
         // Add project filter if provided
         if (!projectFilter.isNullOrBlank()) {
-            conditions.add("(Project.Name contains \"$projectFilter\")")
+            // Escape project filter to prevent query injection
+            val escapedProjectFilter = escapeRallyQueryString(projectFilter)
+            conditions.add("(Project.Name contains \"$escapedProjectFilter\")")
         }
 
         // Add state filter if closed items should be excluded
