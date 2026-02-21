@@ -1,38 +1,47 @@
 <idea-plugin>
-    <id>com.intellij.rally</id>
+    <id>com.github.rally</id>
     <name>Rally Integration</name>
     <vendor>Rally Plugin Contributors</vendor>
 
     <description><![CDATA[
-        <p>Integrates Rally (Broadcom Agile Central) with IntelliJ IDEA's task management system.</p>
+        <p>Rally (Broadcom Agile Central) tool window for IntelliJ IDEA.</p>
         <br/>
         <p><b>Features:</b></p>
         <ul>
-            <li>Connect to Rally server using API Key authentication</li>
-            <li>Browse User Stories, Defects, and Tasks from Rally</li>
-            <li>Open tasks with automatic context switching</li>
-            <li>Quick access to Rally web interface</li>
-            <li>Search and filter Rally work items</li>
-            <li>View task details including status, owner, and description</li>
+            <li>View My Tickets, Active Tickets, and In-Progress tickets</li>
+            <li>Search by name or FormattedID</li>
+            <li>Change ticket state (In-Progress, Completed, Defined)</li>
+            <li>Sprint summary with ticket counts and points</li>
+            <li>Open tickets in Rally web interface</li>
         </ul>
         <br/>
         <p><b>Setup:</b></p>
         <ol>
-            <li>Open Settings → Tools → Tasks → Servers</li>
-            <li>Click '+' and select 'Rally'</li>
+            <li>Open Settings → Tools → Rally</li>
             <li>Enter your Rally server URL (e.g., https://rally1.rallydev.com)</li>
             <li>Enter your Rally API Key (get it from Rally Profile → API Keys)</li>
-            <li>Click 'Test' to verify connection</li>
+            <li>Enter your workspace ref, project ref, and username</li>
+            <li>Click 'Test Connection' to verify</li>
         </ol>
     ]]></description>
 
-    <!-- Product and plugin compatibility requirements -->
     <depends>com.intellij.modules.platform</depends>
-    <depends>com.intellij.tasks</depends>
 
     <extensions defaultExtensionNs="com.intellij">
-        <!-- Register Rally as a task repository type -->
-        <tasks.repositoryType implementation="com.intellij.plugins.rally.RallyRepositoryType"/>
+        <toolWindow
+            id="Rally"
+            anchor="bottom"
+            icon="/icons/rally.svg"
+            factoryClass="com.intellij.plugins.rally.ui.RallyToolWindowFactory"/>
+
+        <applicationConfigurable
+            parentId="tools"
+            id="com.intellij.plugins.rally.settings"
+            displayName="Rally"
+            instance="com.intellij.plugins.rally.settings.RallySettingsConfigurable"/>
+
+        <applicationService
+            serviceImplementation="com.intellij.plugins.rally.settings.RallySettings"/>
     </extensions>
 
 </idea-plugin>

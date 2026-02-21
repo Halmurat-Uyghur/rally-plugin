@@ -15,8 +15,8 @@ import java.time.Duration
  * Client for interacting with Rally WSAPI 2.0
  */
 class RallyApiClient(
-    private val serverUrl: String,
-    private val apiKey: String
+    val serverUrl: String,
+    val apiKey: String
 ) {
     private val httpClient: HttpClient = HttpClient.newBuilder()
         .connectTimeout(Duration.ofSeconds(30))
@@ -41,7 +41,8 @@ class RallyApiClient(
             "ScheduleState",
             "State",
             "Project",
-            "Iteration"
+            "Iteration",
+            "PlanEstimate"
         )
     }
 
@@ -279,5 +280,102 @@ class RallyApiClient(
         }
 
         return "$baseUrl/#/detail/$detailPage/$objectId"
+    }
+
+    /**
+     * Execute HTTP POST request
+     */
+    private fun executePost(url: String, jsonBody: String): HttpResponse<String> {
+        val request = HttpRequest.newBuilder()
+            .uri(URI.create(url))
+            .header(ZSESSION_HEADER, apiKey)
+            .header("Content-Type", "application/json")
+            .header("Accept", "application/json")
+            .timeout(Duration.ofSeconds(60))
+            .POST(HttpRequest.BodyPublishers.ofString(jsonBody))
+            .build()
+
+        return try {
+            httpClient.send(request, HttpResponse.BodyHandlers.ofString())
+        } catch (e: Exception) {
+            throw RallyConnectionException("Failed to connect to Rally server: ${e.message}", e)
+        }
+    }
+
+    /**
+     * Update the state of an artifact.
+     * User Stories/Defects use ScheduleState, Tasks use State.
+     */
+    fun updateArtifactState(artifactRef: String, artifactType: String, newState: String) {
+        val stateField = if (artifactType == "Task") "State" else "ScheduleState"
+        val body = """{"$artifactType":{"$stateField":"$newState"}}"""
+        val response = executePost(artifactRef, body)
+        handleResponse(response)
+
+        val json = JsonParser.parseString(response.body()).asJsonObject
+        val result = json.getAsJsonObject("OperationResult")
+        if (result != null) {
+            val errors = result.getAsJsonArray("Errors")
+            if (errors != null && errors.size() > 0) {
+                throw RallyApiException("Failed to update state: ${errors.joinToString()}")
+            }
+        }
+    }
+
+    /**
+     * Get the current iteration (sprint) by today's date.
+     */
+    fun queryCurrentIteration(workspaceRef: String? = null, projectRef: String? = null): RallyIteration? {
+        val today = java.time.LocalDate.now().toString()
+        val query = "((StartDate <= \"$today\") AND (EndDate >= \"$today\"))"
+        val encodedQuery = URLEncoder.encode(query, StandardCharsets.UTF_8)
+
+        var url = buildApiUrl("iteration") +
+                "?query=$encodedQuery&fetch=Name,StartDate,EndDate,PlannedVelocity,ObjectID,_ref&pagesize=1"
+
+        if (!workspaceRef.isNullOrBlank()) {
+            url += "&workspace=${URLEncoder.encode(workspaceRef, StandardCharsets.UTF_8)}"
+        }
+        if (!projectRef.isNullOrBlank()) {
+            url += "&project=${URLEncoder.encode(projectRef, StandardCharsets.UTF_8)}"
+        }
+
+        val response = executeGet(url)
+        handleResponse(response)
+
+        val type = object : TypeToken<RallyQueryResult<RallyIteration>>() {}.type
+        val result: RallyQueryResult<RallyIteration> = gson.fromJson(response.body(), type)
+        return result.queryResult.results.firstOrNull()
+    }
+
+    /**
+     * Get all artifacts in a specific iteration by name.
+     */
+    fun queryIterationArtifacts(iterationName: String, pageSize: Int = DEFAULT_PAGE_SIZE): List<RallyArtifact> {
+        val query = "(Iteration.Name = \"$iterationName\")"
+        return queryAllArtifacts(query, pageSize)
+    }
+
+    /**
+     * Create a new User Story.
+     */
+    fun createUserStory(name: String, projectRef: String?, ownerRef: String? = null): RallyUserStory {
+        val url = buildApiUrl("hierarchicalrequirement/create")
+        val fields = mutableMapOf<String, Any>("Name" to name, "ScheduleState" to "Defined")
+        if (!projectRef.isNullOrBlank()) fields["Project"] = projectRef
+        if (!ownerRef.isNullOrBlank()) fields["Owner"] = ownerRef
+
+        val body = """{"HierarchicalRequirement":${gson.toJson(fields)}}"""
+        val response = executePost(url, body)
+        handleResponse(response)
+
+        val json = JsonParser.parseString(response.body()).asJsonObject
+        val createResult = json.getAsJsonObject("CreateResult")
+        val errors = createResult?.getAsJsonArray("Errors")
+        if (errors != null && errors.size() > 0) {
+            throw RallyApiException("Failed to create user story: ${errors.joinToString()}")
+        }
+        val obj = createResult.getAsJsonObject("Object")
+        return gson.fromJson(obj, RallyUserStory::class.java)
     }
 }

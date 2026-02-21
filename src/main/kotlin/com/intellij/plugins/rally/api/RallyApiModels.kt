@@ -144,7 +144,10 @@ data class RallyDefect(
     val priority: String? = null,
 
     @SerializedName("Environment")
-    val environment: String? = null
+    val environment: String? = null,
+
+    @SerializedName("PlanEstimate")
+    val planEstimate: Double? = null
 ) : RallyArtifact
 
 /**
@@ -260,4 +263,27 @@ data class RallyProject(
 
     @SerializedName("State")
     val state: String? = null
+)
+
+/**
+ * Rally Iteration (Sprint)
+ */
+data class RallyIteration(
+    @SerializedName("_ref")
+    val ref: String? = null,
+
+    @SerializedName("ObjectID")
+    val objectID: String? = null,
+
+    @SerializedName("Name")
+    val name: String? = null,
+
+    @SerializedName("StartDate")
+    val startDate: String? = null,
+
+    @SerializedName("EndDate")
+    val endDate: String? = null,
+
+    @SerializedName("PlannedVelocity")
+    val plannedVelocity: Double? = null
 )
