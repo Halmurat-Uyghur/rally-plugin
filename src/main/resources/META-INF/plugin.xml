@@ -35,4 +35,13 @@
         <tasks.repositoryType implementation="com.intellij.plugins.rally.RallyRepositoryType"/>
     </extensions>
 
+    <actions>
+        <action id="Rally.ExportTestCases"
+                class="com.intellij.plugins.rally.actions.ExportTestCasesAction"
+                text="Export Rally Test Cases"
+                description="Export test cases for the active Rally user story to Markdown or JSON">
+            <add-to-group group-id="ToolsMenu" anchor="last"/>
+        </action>
+    </actions>
+
 </idea-plugin>

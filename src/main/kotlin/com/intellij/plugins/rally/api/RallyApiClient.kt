@@ -85,6 +85,26 @@ class RallyApiClient(
     }
 
     /**
+     * Execute HTTP PUT request
+     */
+    private fun executePut(url: String, jsonBody: String): HttpResponse<String> {
+        val request = HttpRequest.newBuilder()
+            .uri(URI.create(url))
+            .header(ZSESSION_HEADER, apiKey)
+            .header("Content-Type", "application/json")
+            .header("Accept", "application/json")
+            .timeout(Duration.ofSeconds(60))
+            .PUT(HttpRequest.BodyPublishers.ofString(jsonBody))
+            .build()
+
+        return try {
+            httpClient.send(request, HttpResponse.BodyHandlers.ofString())
+        } catch (e: Exception) {
+            throw RallyConnectionException("Failed to connect to Rally server: ${e.message}", e)
+        }
+    }
+
+    /**
      * Handle HTTP response and check for errors
      */
     private fun handleResponse(response: HttpResponse<String>) {
@@ -127,6 +147,29 @@ class RallyApiClient(
         params.add("pagesize=${pageSize.coerceIn(1, MAX_PAGE_SIZE)}")
         params.add("start=$start")
         params.add("fetch=${COMMON_FIELDS.joinToString(",")}")
+
+        return params.joinToString("&")
+    }
+
+    /**
+     * Build query string with custom fetch fields
+     */
+    private fun buildQueryWithFetch(
+        query: String?,
+        fetchFields: List<String>,
+        pageSize: Int = DEFAULT_PAGE_SIZE,
+        start: Int = 1
+    ): String {
+        val params = mutableListOf<String>()
+
+        if (query != null && query.isNotBlank()) {
+            val encodedQuery = URLEncoder.encode(query, StandardCharsets.UTF_8)
+            params.add("query=$encodedQuery")
+        }
+
+        params.add("pagesize=${pageSize.coerceIn(1, MAX_PAGE_SIZE)}")
+        params.add("start=$start")
+        params.add("fetch=${fetchFields.joinToString(",")}")
 
         return params.joinToString("&")
     }
@@ -265,6 +308,39 @@ class RallyApiClient(
     }
 
     /**
+     * Query test cases linked to a user story by its ObjectID
+     */
+    fun queryTestCasesByUserStory(userStoryObjectID: String): List<RallyTestCase> {
+        val query = "(WorkProduct = /hierarchicalrequirement/$userStoryObjectID)"
+        val url = buildApiUrl("testcase") + "?" + buildQueryWithFetch(
+            query,
+            listOf("FormattedID", "Name", "Description", "Type", "Priority",
+                   "Method", "PreConditions", "PostConditions", "WorkProduct", "Steps"),
+            DEFAULT_PAGE_SIZE
+        )
+        val response = executeGet(url)
+        handleResponse(response)
+
+        val type = object : TypeToken<RallyQueryResult<RallyTestCase>>() {}.type
+        val result: RallyQueryResult<RallyTestCase> = gson.fromJson(response.body(), type)
+        return result.queryResult.results
+    }
+
+    /**
+     * Fetch test case steps by following the Steps collection ref URL
+     */
+    fun fetchTestCaseSteps(stepsRef: String): List<RallyTestCaseStep> {
+        // stepsRef is already a full URL like "https://rally1.../testcase/123/Steps"
+        val url = "$stepsRef?fetch=StepIndex,Input,ExpectedResult&pagesize=200"
+        val response = executeGet(url)
+        handleResponse(response)
+
+        val type = object : TypeToken<RallyQueryResult<RallyTestCaseStep>>() {}.type
+        val result: RallyQueryResult<RallyTestCaseStep> = gson.fromJson(response.body(), type)
+        return result.queryResult.results.sortedBy { it.stepIndex }
+    }
+
+    /**
      * Build web URL for viewing an artifact in Rally
      */
     fun buildWebUrl(artifact: RallyArtifact): String {
@@ -279,5 +355,30 @@ class RallyApiClient(
         }
 
         return "$baseUrl/#/detail/$detailPage/$objectId"
+    }
+
+    /**
+     * Update the state of a Rally artifact.
+     *
+     * For User Stories: sets ScheduleState (Defined, In-Progress, Completed, Accepted)
+     * For Defects: sets State (Submitted, Open, Fixed, Closed)
+     *
+     * @param objectID The Rally ObjectID of the artifact
+     * @param artifactType The _type field value (e.g., "HierarchicalRequirement", "Defect")
+     * @param newState The new state value
+     */
+    fun updateArtifactState(objectID: String, artifactType: String, newState: String) {
+        val (endpoint, wrapperKey, fieldName) = when (artifactType) {
+            "HierarchicalRequirement" -> Triple("hierarchicalrequirement", "HierarchicalRequirement", "ScheduleState")
+            "Defect" -> Triple("defect", "Defect", "State")
+            "Task" -> Triple("task", "Task", "State")
+            else -> throw RallyApiException("Unsupported artifact type for state update: $artifactType")
+        }
+
+        val url = buildApiUrl("$endpoint/$objectID")
+        val body = gson.toJson(mapOf(wrapperKey to mapOf(fieldName to newState)))
+
+        val response = executePut(url, body)
+        handleResponse(response)
     }
 }

@@ -261,3 +261,75 @@ data class RallyProject(
     @SerializedName("State")
     val state: String? = null
 )
+
+/**
+ * Rally Test Case
+ */
+data class RallyTestCase(
+    @SerializedName("_ref")
+    val ref: String? = null,
+
+    @SerializedName("ObjectID")
+    val objectID: String? = null,
+
+    @SerializedName("FormattedID")
+    val formattedID: String? = null,
+
+    @SerializedName("Name")
+    val name: String? = null,
+
+    @SerializedName("Description")
+    val description: String? = null,
+
+    @SerializedName("Type")
+    val testCaseType: String? = null,
+
+    @SerializedName("Priority")
+    val priority: String? = null,
+
+    @SerializedName("Method")
+    val method: String? = null,
+
+    @SerializedName("PreConditions")
+    val preConditions: String? = null,
+
+    @SerializedName("PostConditions")
+    val postConditions: String? = null,
+
+    @SerializedName("WorkProduct")
+    val workProduct: RallyRef? = null,
+
+    @SerializedName("Steps")
+    val steps: RallyCollectionRef? = null
+)
+
+/**
+ * Rally Test Case Step
+ */
+data class RallyTestCaseStep(
+    @SerializedName("_ref")
+    val ref: String? = null,
+
+    @SerializedName("ObjectID")
+    val objectID: String? = null,
+
+    @SerializedName("StepIndex")
+    val stepIndex: Int? = null,
+
+    @SerializedName("Input")
+    val input: String? = null,
+
+    @SerializedName("ExpectedResult")
+    val expectedResult: String? = null
+)
+
+/**
+ * Reference to a Rally sub-collection (e.g., Steps within a TestCase)
+ */
+data class RallyCollectionRef(
+    @SerializedName("_ref")
+    val ref: String? = null,
+
+    @SerializedName("Count")
+    val count: Int? = null
+)

@@ -9,6 +9,7 @@ import com.intellij.plugins.rally.api.RallyAuthenticationException
 import com.intellij.plugins.rally.api.RallyConnectionException
 import com.intellij.tasks.Task
 import com.intellij.tasks.TaskRepositoryType
+import com.intellij.tasks.TaskState
 import com.intellij.tasks.impl.BaseRepository
 import com.intellij.tasks.impl.BaseRepositoryImpl
 import com.intellij.util.xmlb.annotations.Tag
@@ -81,6 +82,11 @@ class RallyRepository : BaseRepositoryImpl {
         }
         return apiClient!!
     }
+
+    /**
+     * Get the API client for use by actions.
+     */
+    fun getApiClient(): RallyApiClient = getClient()
 
     /**
      * Create a clone of this repository
@@ -208,6 +214,49 @@ class RallyRepository : BaseRepositoryImpl {
         } catch (e: Exception) {
             LOG.error("Failed to find task $id", e)
             null
+        }
+    }
+
+    /**
+     * Update the state of a Rally task.
+     * Called by IntelliJ when the user selects a new state from the task dropdown.
+     */
+    override fun setTaskState(task: Task, state: TaskState) {
+        val rallyTask = task as? RallyTask ?: return
+        val artifact = rallyTask.getArtifact()
+        val objectID = artifact.objectID ?: return
+        val artifactType = artifact.type ?: return
+
+        val newRallyState = mapTaskStateToRallyState(state, artifactType)
+
+        try {
+            val client = getClient()
+            client.updateArtifactState(objectID, artifactType, newRallyState)
+            LOG.info("Updated ${artifact.formattedID} state to $newRallyState")
+        } catch (e: Exception) {
+            LOG.error("Failed to update state for ${artifact.formattedID}", e)
+            throw Exception("Failed to update Rally state: ${e.message}")
+        }
+    }
+
+    /**
+     * Map IntelliJ TaskState to Rally-specific state string
+     */
+    private fun mapTaskStateToRallyState(state: TaskState, artifactType: String): String {
+        return when (artifactType) {
+            "HierarchicalRequirement" -> when (state) {
+                TaskState.OPEN -> "Defined"
+                TaskState.IN_PROGRESS -> "In-Progress"
+                TaskState.RESOLVED -> "Completed"
+                else -> "Defined"
+            }
+            "Defect" -> when (state) {
+                TaskState.OPEN -> "Open"
+                TaskState.IN_PROGRESS -> "Open"  // Defects don't have an "In-Progress"; Open is active work
+                TaskState.RESOLVED -> "Fixed"
+                else -> "Submitted"
+            }
+            else -> throw RallyApiException("Unsupported artifact type: $artifactType")
         }
     }
 

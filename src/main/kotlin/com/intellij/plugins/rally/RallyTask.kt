@@ -140,8 +140,10 @@ class RallyTask(
     override fun getProject(): String? {
         // Access project from specific artifact types if needed
         return when (artifact) {
-            is com.intellij.plugins.rally.api.RallyUserStory -> artifact.project?.name
-            is com.intellij.plugins.rally.api.RallyDefect -> artifact.project?.name
+            is com.intellij.plugins.rally.api.RallyUserStory ->
+                artifact.project?.refObjectName ?: artifact.project?.name
+            is com.intellij.plugins.rally.api.RallyDefect ->
+                artifact.project?.refObjectName ?: artifact.project?.name
             else -> null
         }
     }
@@ -154,18 +156,28 @@ class RallyTask(
     }
 
     /**
-     * Strip HTML tags from description
+     * Get the underlying Rally artifact (used by repository for state updates)
+     */
+    fun getArtifact(): RallyArtifact = artifact
+
+    /**
+     * Strip HTML tags from description while preserving line breaks
      */
     private fun stripHtml(html: String): String {
         return html
+            .replace(Regex("<br\\s*/?>", RegexOption.IGNORE_CASE), "\n")
+            .replace(Regex("</p>", RegexOption.IGNORE_CASE), "\n\n")
+            .replace(Regex("</li>", RegexOption.IGNORE_CASE), "\n")
+            .replace(Regex("</div>", RegexOption.IGNORE_CASE), "\n")
             .replace(Regex("<[^>]*>"), "") // Remove HTML tags
-            .replace(Regex("&nbsp;"), " ") // Replace non-breaking spaces
-            .replace(Regex("&lt;"), "<")
-            .replace(Regex("&gt;"), ">")
-            .replace(Regex("&amp;"), "&")
-            .replace(Regex("&quot;"), "\"")
-            .replace(Regex("&#39;"), "'")
-            .replace(Regex("\\s+"), " ") // Normalize whitespace
+            .replace("&nbsp;", " ") // Replace non-breaking spaces
+            .replace("&lt;", "<")
+            .replace("&gt;", ">")
+            .replace("&amp;", "&")
+            .replace("&quot;", "\"")
+            .replace("&#39;", "'")
+            .replace(Regex("[ \\t]+"), " ") // Collapse horizontal whitespace only
+            .replace(Regex("\\n{3,}"), "\n\n") // Cap consecutive newlines at 2
             .trim()
     }
 }
