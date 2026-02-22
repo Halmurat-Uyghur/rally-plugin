@@ -117,7 +117,14 @@ class RallyApiClient(
     /**
      * Build query string for Rally API
      */
-    private fun buildQuery(query: String?, pageSize: Int = DEFAULT_PAGE_SIZE, start: Int = 1): String {
+    private fun buildQuery(
+        query: String?,
+        pageSize: Int = DEFAULT_PAGE_SIZE,
+        start: Int = 1,
+        workspace: String? = null,
+        project: String? = null,
+        order: String? = null
+    ): String {
         val params = mutableListOf<String>()
 
         if (query != null && query.isNotBlank()) {
@@ -129,7 +136,37 @@ class RallyApiClient(
         params.add("start=$start")
         params.add("fetch=${COMMON_FIELDS.joinToString(",")}")
 
+        if (!workspace.isNullOrBlank()) {
+            params.add("workspace=${URLEncoder.encode(normalizeRef("workspace", workspace), StandardCharsets.UTF_8)}")
+        }
+        if (!project.isNullOrBlank()) {
+            params.add("project=${URLEncoder.encode(normalizeRef("project", project), StandardCharsets.UTF_8)}")
+        }
+        if (!order.isNullOrBlank()) {
+            params.add("order=${URLEncoder.encode(order, StandardCharsets.UTF_8)}")
+        }
+
         return params.joinToString("&")
+    }
+
+    // Stored workspace/project refs, set by the caller
+    var workspaceRef: String? = null
+    var projectRef: String? = null
+
+    /**
+     * Normalize a ref to full Rally API URL.
+     * Accepts: "12345", "/workspace/12345", or full URL.
+     */
+    private fun normalizeRef(type: String, ref: String): String {
+        val trimmed = ref.trim()
+        // Already a full URL
+        if (trimmed.startsWith("http")) return trimmed
+        // Already a ref path like /workspace/12345
+        if (trimmed.startsWith("/")) {
+            return "${normalizeServerUrl()}/slm/webservice/$API_VERSION$trimmed"
+        }
+        // Just a number
+        return "${normalizeServerUrl()}/slm/webservice/$API_VERSION/$type/$trimmed"
     }
 
     /**
@@ -152,27 +189,37 @@ class RallyApiClient(
      * Get current authenticated user
      */
     fun getCurrentUser(): RallyUser {
-        val url = buildApiUrl("user") + "?fetch=UserName,DisplayName,EmailAddress&pagesize=1"
-        val response = executeGet(url)
+        // Try the direct /user endpoint first (returns User object for API key auth)
+        val directUrl = buildApiUrl("user")
+        val response = executeGet(directUrl)
         handleResponse(response)
 
-        val jsonElement = JsonParser.parseString(response.body())
-        val queryResult = jsonElement.asJsonObject
-            .getAsJsonObject("QueryResult")
+        val root = JsonParser.parseString(response.body()).asJsonObject
 
-        val results = queryResult.getAsJsonArray("Results")
-        if (results.size() == 0) {
-            throw RallyApiException("No user found for the provided API key")
+        // Rally may return {"User": {...}} for direct access
+        val userObj = root.getAsJsonObject("User")
+        if (userObj != null) {
+            return gson.fromJson(userObj, RallyUser::class.java)
         }
 
-        return gson.fromJson(results.get(0), RallyUser::class.java)
+        // Or it may return {"QueryResult": {"Results": [...]}} for query access
+        val queryResult = root.getAsJsonObject("QueryResult")
+        if (queryResult != null) {
+            val results = queryResult.getAsJsonArray("Results")
+            if (results != null && results.size() > 0) {
+                return gson.fromJson(results.get(0), RallyUser::class.java)
+            }
+        }
+
+        throw RallyApiException("No user found for the provided API key")
     }
 
     /**
      * Query User Stories (HierarchicalRequirement)
      */
     fun queryUserStories(query: String? = null, pageSize: Int = DEFAULT_PAGE_SIZE): List<RallyUserStory> {
-        val url = buildApiUrl("hierarchicalrequirement") + "?" + buildQuery(query, pageSize)
+        val url = buildApiUrl("hierarchicalrequirement") + "?" +
+                buildQuery(query, pageSize, workspace = workspaceRef, project = projectRef, order = "LastUpdateDate DESC")
         val response = executeGet(url)
         handleResponse(response)
 
@@ -185,7 +232,8 @@ class RallyApiClient(
      * Query Defects
      */
     fun queryDefects(query: String? = null, pageSize: Int = DEFAULT_PAGE_SIZE): List<RallyDefect> {
-        val url = buildApiUrl("defect") + "?" + buildQuery(query, pageSize)
+        val url = buildApiUrl("defect") + "?" +
+                buildQuery(query, pageSize, workspace = workspaceRef, project = projectRef, order = "LastUpdateDate DESC")
         val response = executeGet(url)
         handleResponse(response)
 
@@ -198,7 +246,8 @@ class RallyApiClient(
      * Query Tasks
      */
     fun queryTasks(query: String? = null, pageSize: Int = DEFAULT_PAGE_SIZE): List<RallyTaskItem> {
-        val url = buildApiUrl("task") + "?" + buildQuery(query, pageSize)
+        val url = buildApiUrl("task") + "?" +
+                buildQuery(query, pageSize, workspace = workspaceRef, project = projectRef, order = "LastUpdateDate DESC")
         val response = executeGet(url)
         handleResponse(response)
 
@@ -246,19 +295,25 @@ class RallyApiClient(
      */
     fun queryAllArtifacts(query: String? = null, pageSize: Int = DEFAULT_PAGE_SIZE): List<RallyArtifact> {
         val results = mutableListOf<RallyArtifact>()
+        val errors = mutableListOf<String>()
 
         // Query user stories
         try {
             results.addAll(queryUserStories(query, pageSize))
-        } catch (e: RallyApiException) {
-            // Log but continue
+        } catch (e: Exception) {
+            errors.add("UserStories: ${e.message}")
         }
 
         // Query defects
         try {
             results.addAll(queryDefects(query, pageSize))
-        } catch (e: RallyApiException) {
-            // Log but continue
+        } catch (e: Exception) {
+            errors.add("Defects: ${e.message}")
+        }
+
+        // If both queries failed, throw so the UI can show the error
+        if (results.isEmpty() && errors.isNotEmpty()) {
+            throw RallyApiException("Query failed - ${errors.joinToString("; ")}")
         }
 
         // Sort by last update date (most recent first)
@@ -334,10 +389,10 @@ class RallyApiClient(
                 "?query=$encodedQuery&fetch=Name,StartDate,EndDate,PlannedVelocity,ObjectID,_ref&pagesize=1"
 
         if (!workspaceRef.isNullOrBlank()) {
-            url += "&workspace=${URLEncoder.encode(workspaceRef, StandardCharsets.UTF_8)}"
+            url += "&workspace=${URLEncoder.encode(normalizeRef("workspace", workspaceRef), StandardCharsets.UTF_8)}"
         }
         if (!projectRef.isNullOrBlank()) {
-            url += "&project=${URLEncoder.encode(projectRef, StandardCharsets.UTF_8)}"
+            url += "&project=${URLEncoder.encode(normalizeRef("project", projectRef), StandardCharsets.UTF_8)}"
         }
 
         val response = executeGet(url)

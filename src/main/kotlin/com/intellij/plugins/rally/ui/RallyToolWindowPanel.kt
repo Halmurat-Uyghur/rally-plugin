@@ -32,9 +32,17 @@ class RallyToolWindowPanel(private val project: Project) {
     companion object {
         private val LOG = Logger.getInstance(RallyToolWindowPanel::class.java)
         private val FILTER_OPTIONS = arrayOf(
-            "My Tickets", "Active Tickets", "In-Progress", "All Tickets", "Recent Activity"
+            "All Tickets",
+            "My Tickets",
+            "My In-Progress",
+            "My Defined",
+            "My Idea",
+            "My Completed",
+            "Active Tickets",
+            "My User Stories",
+            "My Defects",
+            "Recent Activity"
         )
-        private val EXCLUDE_STATES = setOf("Accepted", "Completed", "Deployed", "Idea")
     }
 
     private val mainPanel = JPanel(BorderLayout())
@@ -180,22 +188,18 @@ class RallyToolWindowPanel(private val project: Project) {
 
                 val artifacts = client.queryAllArtifacts(query, pageSize)
 
-                // Client-side filtering for "Active Tickets"
-                val filtered = if (filter == "Active Tickets") {
-                    artifacts.filter { artifact ->
-                        val state = artifact.scheduleState ?: artifact.state ?: ""
-                        !EXCLUDE_STATES.contains(state)
-                    }
-                } else {
-                    artifacts
-                }
+                // Client-side filtering for state/type-based filters
+                val filtered = applyClientFilter(filter, artifacts)
 
                 ApplicationManager.getApplication().invokeLater {
                     if (project.isDisposed) return@invokeLater
                     allArtifacts = filtered
                     applySearchFilter()
                     loading = false
-                    statusLabel.text = "Ready"
+                    statusLabel.text = "${filtered.size} loaded"
+                    if (filtered.isEmpty()) {
+                        artifactList.emptyText.text = "No tickets found for filter: $filter"
+                    }
                 }
 
                 // Also load sprint summary
@@ -214,37 +218,47 @@ class RallyToolWindowPanel(private val project: Project) {
     }
 
     private fun buildQuery(filter: String, settings: RallySettings): String? {
-        val conditions = mutableListOf<String>()
-
-        when (filter) {
-            "My Tickets" -> {
-                if (settings.username.isNotBlank()) {
-                    conditions.add("(Owner.UserName = \"${settings.username}\")")
-                }
-            }
-            "In-Progress" -> {
-                conditions.add("(ScheduleState = \"In-Progress\")")
-                if (settings.username.isNotBlank()) {
-                    conditions.add("(Owner.UserName = \"${settings.username}\")")
-                }
-            }
-            "Active Tickets" -> {
-                if (settings.username.isNotBlank()) {
-                    conditions.add("(Owner.UserName = \"${settings.username}\")")
-                }
-                // State filtering done client-side after fetching
-            }
-            // "All Tickets", "Recent Activity" -> no filter
+        // workspace/project are passed as URL params by the API client, not as query conditions
+        // State/type filtering is done client-side since ScheduleState vs State differs by type
+        val isMyFilter = filter.startsWith("My ")
+        if (isMyFilter && settings.username.isNotBlank()) {
+            return "(Owner.UserName = \"${settings.username}\")"
         }
-
-        if (settings.projectRef.isNotBlank()) {
-            conditions.add("(Project = \"${settings.projectRef}\")")
+        if (filter == "Active Tickets" && settings.username.isNotBlank()) {
+            return "(Owner.UserName = \"${settings.username}\")"
         }
+        return null
+    }
 
-        return if (conditions.isNotEmpty()) {
-            conditions.joinToString(" AND ")
-        } else {
-            null
+    private fun applyClientFilter(filter: String, artifacts: List<RallyArtifact>): List<RallyArtifact> {
+        return when (filter) {
+            "Active Tickets" -> artifacts.filter {
+                val state = it.scheduleState ?: it.state ?: ""
+                state !in setOf("Accepted", "Completed", "Deployed", "Idea")
+            }
+            "My In-Progress" -> artifacts.filter {
+                val state = it.scheduleState ?: it.state ?: ""
+                state.equals("In-Progress", ignoreCase = true)
+            }
+            "My Defined" -> artifacts.filter {
+                val state = it.scheduleState ?: it.state ?: ""
+                state.equals("Defined", ignoreCase = true)
+            }
+            "My Idea" -> artifacts.filter {
+                val state = it.scheduleState ?: it.state ?: ""
+                state.equals("Idea", ignoreCase = true)
+            }
+            "My Completed" -> artifacts.filter {
+                val state = it.scheduleState ?: it.state ?: ""
+                state.equals("Completed", ignoreCase = true)
+            }
+            "My User Stories" -> artifacts.filter {
+                it.type == "HierarchicalRequirement"
+            }
+            "My Defects" -> artifacts.filter {
+                it.type == "Defect"
+            }
+            else -> artifacts
         }
     }
 
@@ -328,13 +342,14 @@ class RallyToolWindowPanel(private val project: Project) {
     // ── Actions ──────────────────────────────────────────────────
 
     private fun openInBrowser() {
-        val selected = artifactList.selectedValue ?: return
-        try {
-            val url = getClient().buildWebUrl(selected)
-            BrowserUtil.browse(url)
-        } catch (e: Exception) {
-            LOG.error("Failed to open in browser", e)
+        val selected = artifactList.selectedValue
+        if (selected == null) {
+            Messages.showInfoMessage(project, "Select a ticket first.", "Rally")
+            return
         }
+        val url = getClient().buildWebUrl(selected)
+        LOG.info("Opening Rally URL: $url")
+        BrowserUtil.browse(url)
     }
 
     private fun copyFormattedId() {
@@ -403,6 +418,9 @@ class RallyToolWindowPanel(private val project: Project) {
         ) {
             currentClient = RallyApiClient(settings.serverUrl, settings.apiKey)
         }
+        // Always update workspace/project refs from settings
+        currentClient!!.workspaceRef = settings.workspaceRef.ifBlank { null }
+        currentClient!!.projectRef = settings.projectRef.ifBlank { null }
         return currentClient!!
     }
 
