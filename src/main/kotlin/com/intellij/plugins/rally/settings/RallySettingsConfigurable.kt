@@ -17,7 +17,6 @@ class RallySettingsConfigurable : Configurable {
     private var serverUrlField: JBTextField? = null
     private var apiKeyField: JPasswordField? = null
     private var workspaceRefField: JBTextField? = null
-    private var projectRefField: JBTextField? = null
     private var usernameField: JBTextField? = null
 
     override fun getDisplayName(): String = "Rally"
@@ -32,9 +31,6 @@ class RallySettingsConfigurable : Configurable {
         workspaceRefField = JBTextField().apply {
             toolTipText = "Workspace reference (e.g., /workspace/12345)"
         }
-        projectRefField = JBTextField().apply {
-            toolTipText = "Project reference (e.g., /project/67890)"
-        }
         usernameField = JBTextField().apply {
             toolTipText = "Your Rally username/email for 'My Tickets' filter"
         }
@@ -47,14 +43,12 @@ class RallySettingsConfigurable : Configurable {
         serverUrlField!!.text = settings.serverUrl
         apiKeyField!!.text = settings.apiKey
         workspaceRefField!!.text = settings.workspaceRef
-        projectRefField!!.text = settings.projectRef
         usernameField!!.text = settings.username
 
         return FormBuilder.createFormBuilder()
             .addLabeledComponent(JBLabel("Server URL:"), serverUrlField!!)
             .addLabeledComponent(JBLabel("API Key:"), apiKeyField!!)
             .addLabeledComponent(JBLabel("Workspace Ref:"), workspaceRefField!!)
-            .addLabeledComponent(JBLabel("Project Ref:"), projectRefField!!)
             .addLabeledComponent(JBLabel("Username:"), usernameField!!)
             .addComponent(testButton)
             .addComponentFillVertically(JPanel(), 0)
@@ -66,7 +60,6 @@ class RallySettingsConfigurable : Configurable {
         return serverUrlField?.text != settings.serverUrl ||
                 String(apiKeyField?.password ?: charArrayOf()) != settings.apiKey ||
                 workspaceRefField?.text != settings.workspaceRef ||
-                projectRefField?.text != settings.projectRef ||
                 usernameField?.text != settings.username
     }
 
@@ -75,7 +68,6 @@ class RallySettingsConfigurable : Configurable {
         state.serverUrl = serverUrlField?.text?.trim() ?: ""
         state.apiKey = String(apiKeyField?.password ?: charArrayOf()).trim()
         state.workspaceRef = workspaceRefField?.text?.trim() ?: ""
-        state.projectRef = projectRefField?.text?.trim() ?: ""
         state.username = usernameField?.text?.trim() ?: ""
     }
 
@@ -84,7 +76,6 @@ class RallySettingsConfigurable : Configurable {
         serverUrlField?.text = settings.serverUrl
         apiKeyField?.text = settings.apiKey
         workspaceRefField?.text = settings.workspaceRef
-        projectRefField?.text = settings.projectRef
         usernameField?.text = settings.username
     }
 
@@ -92,7 +83,6 @@ class RallySettingsConfigurable : Configurable {
         serverUrlField = null
         apiKeyField = null
         workspaceRefField = null
-        projectRefField = null
         usernameField = null
     }
 

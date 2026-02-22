@@ -10,6 +10,8 @@ import com.intellij.openapi.ui.Messages
 import com.intellij.plugins.rally.api.RallyApiClient
 import com.intellij.plugins.rally.api.RallyArtifact
 import com.intellij.plugins.rally.api.RallyDefect
+import com.intellij.plugins.rally.api.RallyIteration
+import com.intellij.plugins.rally.api.RallyProject
 import com.intellij.plugins.rally.api.RallyUserStory
 import com.intellij.plugins.rally.settings.RallySettings
 import com.intellij.ui.JBColor
@@ -31,24 +33,32 @@ class RallyToolWindowPanel(private val project: Project) {
 
     companion object {
         private val LOG = Logger.getInstance(RallyToolWindowPanel::class.java)
-        private val FILTER_OPTIONS = arrayOf(
+        private val SCOPE_OPTIONS = arrayOf(
             "All Tickets",
             "My Tickets",
-            "My In-Progress",
-            "My Defined",
-            "My Idea",
-            "My Completed",
-            "Active Tickets",
-            "My User Stories",
-            "My Defects",
+            "User Stories",
+            "Defects",
             "Recent Activity"
+        )
+        private val STATE_OPTIONS = arrayOf(
+            "Any State",
+            "Idea",
+            "Defined",
+            "In-Progress",
+            "Completed",
+            "Accepted",
+            "Deployed",
+            "Active"
         )
     }
 
     private val mainPanel = JPanel(BorderLayout())
     private val listModel = DefaultListModel<RallyArtifact>()
     private val artifactList = JBList(listModel)
-    private val filterCombo = ComboBox(FILTER_OPTIONS)
+    private val scopeCombo = ComboBox(SCOPE_OPTIONS)
+    private val stateCombo = ComboBox(STATE_OPTIONS)
+    private val projectCombo = ComboBox<String>().apply { isEnabled = false }
+    private val iterationCombo = ComboBox<String>().apply { isEnabled = false }
     private val searchField = SearchTextField()
     private val statsLabel = JBLabel("0 items")
     private val sprintLabel = JBLabel("")
@@ -57,10 +67,32 @@ class RallyToolWindowPanel(private val project: Project) {
     private var allArtifacts: List<RallyArtifact> = emptyList()
     private var currentClient: RallyApiClient? = null
     private var loading = false
+    private var cachedProjects: List<RallyProject> = emptyList()
+    private var cachedIterations: List<RallyIteration> = emptyList()
+    private var projectsLoaded = false
+    private var iterationsLoaded = false
+    private var lastSettingsSnapshot: String = ""
 
     init {
         setupUI()
         setupListeners()
+        checkInitialConfiguration()
+    }
+
+    private fun checkInitialConfiguration() {
+        if (!RallySettings.getInstance().isConfigured()) {
+            showNotConfigured()
+        }
+    }
+
+    private fun showNotConfigured() {
+        statusLabel.icon = AllIcons.General.Error
+        statusLabel.text = "Not configured"
+        artifactList.emptyText.text = "Configure Rally in Settings → Tools → Rally"
+    }
+
+    private fun clearStatusIcon() {
+        statusLabel.icon = null
     }
 
     fun getContent(): JComponent = mainPanel
@@ -81,10 +113,45 @@ class RallyToolWindowPanel(private val project: Project) {
 
         // Filter row
         val filterPanel = JPanel(FlowLayout(FlowLayout.LEFT, 4, 2))
-        filterPanel.add(JBLabel("Filter:"))
-        filterPanel.add(filterCombo)
+        filterPanel.add(JBLabel("Scope:"))
+        filterPanel.add(scopeCombo)
+        filterPanel.add(JBLabel("State:"))
+        filterPanel.add(stateCombo)
+        filterPanel.add(JBLabel("Project:"))
+        projectCombo.apply {
+            preferredSize = java.awt.Dimension(250, preferredSize.height)
+            renderer = object : DefaultListCellRenderer() {
+                override fun getListCellRendererComponent(
+                    list: JList<*>?, value: Any?, index: Int,
+                    isSelected: Boolean, cellHasFocus: Boolean
+                ): Component {
+                    val comp = super.getListCellRendererComponent(list, value, index, isSelected, cellHasFocus)
+                    toolTipText = value?.toString()
+                    return comp
+                }
+            }
+            // Show full-width popup regardless of combo box width
+            isSwingPopup = false
+        }
+        filterPanel.add(projectCombo)
+        filterPanel.add(JBLabel("Sprint:"))
+        iterationCombo.apply {
+            preferredSize = java.awt.Dimension(250, preferredSize.height)
+            renderer = object : DefaultListCellRenderer() {
+                override fun getListCellRendererComponent(
+                    list: JList<*>?, value: Any?, index: Int,
+                    isSelected: Boolean, cellHasFocus: Boolean
+                ): Component {
+                    val comp = super.getListCellRendererComponent(list, value, index, isSelected, cellHasFocus)
+                    toolTipText = value?.toString()
+                    return comp
+                }
+            }
+            isSwingPopup = false
+        }
+        filterPanel.add(iterationCombo)
         filterPanel.add(JBLabel("Search:"))
-        searchField.preferredSize = java.awt.Dimension(250, searchField.preferredSize.height)
+        searchField.preferredSize = java.awt.Dimension(200, searchField.preferredSize.height)
         filterPanel.add(searchField)
 
         // Top section
@@ -118,8 +185,29 @@ class RallyToolWindowPanel(private val project: Project) {
     }
 
     private fun setupListeners() {
-        // Filter change
-        filterCombo.addActionListener { loadTickets() }
+        // Scope/state change
+        scopeCombo.addActionListener { loadTickets() }
+        stateCombo.addActionListener { loadTickets() }
+
+        // Project change — also reset iteration cache since iterations are project-scoped
+        projectCombo.addActionListener {
+            if (projectsLoaded) {
+                updateClientProjectRef()
+                RallySettings.getInstance().selectedProject =
+                    projectCombo.selectedItem as? String ?: ""
+                iterationsLoaded = false
+                loadTickets()
+            }
+        }
+
+        // Iteration change
+        iterationCombo.addActionListener {
+            if (iterationsLoaded) {
+                RallySettings.getInstance().selectedIteration =
+                    iterationCombo.selectedItem as? String ?: ""
+                loadTickets()
+            }
+        }
 
         // Search as you type
         searchField.addDocumentListener(object : com.intellij.ui.DocumentAdapter() {
@@ -170,26 +258,44 @@ class RallyToolWindowPanel(private val project: Project) {
     fun loadTickets() {
         val settings = RallySettings.getInstance()
         if (!settings.isConfigured()) {
-            statusLabel.text = "Not configured"
-            artifactList.emptyText.text = "Configure Rally in Settings → Tools → Rally"
+            showNotConfigured()
             return
         }
 
         if (loading) return
         loading = true
+        clearStatusIcon()
         statusLabel.text = "Loading..."
 
         ApplicationManager.getApplication().executeOnPooledThread {
             try {
                 val client = getClient()
-                val filter = filterCombo.selectedItem as? String ?: "My Tickets"
-                val query = buildQuery(filter, settings)
-                val pageSize = if (filter == "Recent Activity") 20 else settings.pageSize
+
+                // Load projects if not yet loaded or settings changed
+                val snapshot = "${settings.serverUrl}|${settings.apiKey}|${settings.workspaceRef}"
+                if (!projectsLoaded || snapshot != lastSettingsSnapshot) {
+                    lastSettingsSnapshot = snapshot
+                    loadProjects(client)
+                    iterationsLoaded = false
+                }
+
+                // Ensure projectRef is set from dropdown before querying iterations or artifacts
+                updateClientProjectRef()
+
+                // Load iterations if not yet loaded (or reset after project change)
+                if (!iterationsLoaded) {
+                    loadIterations(client)
+                }
+
+                val scope = scopeCombo.selectedItem as? String ?: "My Tickets"
+                val stateFilter = stateCombo.selectedItem as? String ?: "Any State"
+                val query = buildQuery(scope, settings)
+                val pageSize = if (scope == "Recent Activity") 20 else settings.pageSize
 
                 val artifacts = client.queryAllArtifacts(query, pageSize)
 
-                // Client-side filtering for state/type-based filters
-                val filtered = applyClientFilter(filter, artifacts)
+                // Client-side filtering for state and type
+                val filtered = applyClientFilter(scope, stateFilter, artifacts)
 
                 ApplicationManager.getApplication().invokeLater {
                     if (project.isDisposed) return@invokeLater
@@ -198,7 +304,9 @@ class RallyToolWindowPanel(private val project: Project) {
                     loading = false
                     statusLabel.text = "${filtered.size} loaded"
                     if (filtered.isEmpty()) {
-                        artifactList.emptyText.text = "No tickets found for filter: $filter"
+                        val projectName = projectCombo.selectedItem as? String ?: "All Projects"
+                        val filterDesc = if (stateFilter == "Any State") scope else "$scope / $stateFilter"
+                        artifactList.emptyText.text = "No tickets found for $filterDesc in project: $projectName"
                     }
                 }
 
@@ -210,6 +318,7 @@ class RallyToolWindowPanel(private val project: Project) {
                 ApplicationManager.getApplication().invokeLater {
                     if (project.isDisposed) return@invokeLater
                     loading = false
+                    statusLabel.icon = AllIcons.General.Error
                     statusLabel.text = "Error"
                     artifactList.emptyText.text = "Error: ${e.message}"
                 }
@@ -217,57 +326,176 @@ class RallyToolWindowPanel(private val project: Project) {
         }
     }
 
-    private fun buildQuery(filter: String, settings: RallySettings): String? {
-        // workspace/project are passed as URL params by the API client, not as query conditions
-        // State/type filtering is done client-side since ScheduleState vs State differs by type
-        val isMyFilter = filter.startsWith("My ")
-        if (isMyFilter && settings.username.isNotBlank()) {
-            return "(Owner.UserName = \"${settings.username}\")"
+    private fun loadProjects(client: RallyApiClient) {
+        try {
+            val projects = client.queryProjects()
+            cachedProjects = projects
+
+            ApplicationManager.getApplication().invokeAndWait {
+                if (project.isDisposed) return@invokeAndWait
+
+                // Temporarily remove listener to avoid triggering loadTickets during population
+                val listeners = projectCombo.actionListeners
+                listeners.forEach { projectCombo.removeActionListener(it) }
+
+                projectCombo.removeAllItems()
+                projectCombo.addItem("All Projects")
+                projects.forEach { projectCombo.addItem(it.name ?: "Unnamed") }
+                projectCombo.isEnabled = true
+
+                // Restore saved project selection
+                val saved = RallySettings.getInstance().selectedProject
+                if (saved.isNotBlank() && saved != "All Projects") {
+                    val stillExists = projects.any { it.name == saved }
+                    if (stillExists) {
+                        projectCombo.selectedItem = saved
+                    } else {
+                        projectCombo.selectedIndex = 0
+                    }
+                } else {
+                    projectCombo.selectedIndex = 0
+                }
+
+                projectsLoaded = true
+
+                // Re-attach listeners
+                listeners.forEach { projectCombo.addActionListener(it) }
+            }
+        } catch (e: Exception) {
+            LOG.warn("Failed to load projects", e)
+            ApplicationManager.getApplication().invokeAndWait {
+                if (project.isDisposed) return@invokeAndWait
+                projectCombo.removeAllItems()
+                projectCombo.addItem("All Projects")
+                projectCombo.isEnabled = false
+                projectsLoaded = true
+            }
         }
-        if (filter == "Active Tickets" && settings.username.isNotBlank()) {
-            return "(Owner.UserName = \"${settings.username}\")"
-        }
-        return null
     }
 
-    private fun applyClientFilter(filter: String, artifacts: List<RallyArtifact>): List<RallyArtifact> {
-        return when (filter) {
-            "Active Tickets" -> artifacts.filter {
+    private fun loadIterations(client: RallyApiClient) {
+        try {
+            val iterations = client.queryIterations()
+            cachedIterations = iterations
+
+            // Use invokeAndWait so the combo is fully populated before
+            // loadTickets() continues to build the query from the selection
+            ApplicationManager.getApplication().invokeAndWait {
+                if (project.isDisposed) return@invokeAndWait
+
+                val listeners = iterationCombo.actionListeners
+                listeners.forEach { iterationCombo.removeActionListener(it) }
+
+                iterationCombo.removeAllItems()
+                iterationCombo.addItem("All Sprints")
+                iterations.forEach { iterationCombo.addItem(it.name ?: "Unnamed") }
+                iterationCombo.isEnabled = true
+
+                // Restore saved iteration selection
+                val saved = RallySettings.getInstance().selectedIteration
+                if (saved.isNotBlank() && saved != "All Sprints") {
+                    val stillExists = iterations.any { it.name == saved }
+                    if (stillExists) {
+                        iterationCombo.selectedItem = saved
+                    } else {
+                        iterationCombo.selectedIndex = 0
+                    }
+                } else {
+                    iterationCombo.selectedIndex = 0
+                }
+
+                iterationsLoaded = true
+
+                listeners.forEach { iterationCombo.addActionListener(it) }
+            }
+        } catch (e: Exception) {
+            LOG.warn("Failed to load iterations", e)
+            ApplicationManager.getApplication().invokeAndWait {
+                if (project.isDisposed) return@invokeAndWait
+                iterationCombo.removeAllItems()
+                iterationCombo.addItem("All Sprints")
+                iterationCombo.isEnabled = false
+                iterationsLoaded = true
+            }
+        }
+    }
+
+    private fun updateClientProjectRef() {
+        val client = currentClient ?: return
+        val selectedIndex = projectCombo.selectedIndex
+        if (selectedIndex <= 0) {
+            // "All Projects" or nothing selected — no project filter
+            client.projectRef = null
+        } else {
+            val projectIndex = selectedIndex - 1 // offset for "All Projects"
+            if (projectIndex < cachedProjects.size) {
+                client.projectRef = cachedProjects[projectIndex].ref
+            }
+        }
+    }
+
+    private fun buildQuery(scope: String, settings: RallySettings): String? {
+        // workspace/project are passed as URL params by the API client, not as query conditions
+        // State/type filtering is done client-side since ScheduleState vs State differs by type
+        val conditions = mutableListOf<String>()
+
+        if (scope == "My Tickets" && settings.username.isNotBlank()) {
+            conditions.add("(Owner.UserName = \"${settings.username}\")")
+        }
+
+        val selectedIter = iterationCombo.selectedItem as? String ?: ""
+        if (selectedIter.isNotBlank() && selectedIter != "All Sprints") {
+            conditions.add("(Iteration.Name = \"$selectedIter\")")
+        }
+
+        return when (conditions.size) {
+            0 -> null
+            1 -> conditions[0]
+            else -> conditions.reduce { acc, cond -> "(($acc) AND ($cond))" }
+        }
+    }
+
+    private fun applyClientFilter(scope: String, stateFilter: String, artifacts: List<RallyArtifact>): List<RallyArtifact> {
+        // First apply scope (type) filter
+        val scopeFiltered = when (scope) {
+            "User Stories" -> artifacts.filter { it.type == "HierarchicalRequirement" }
+            "Defects" -> artifacts.filter { it.type == "Defect" }
+            else -> artifacts
+        }
+
+        // Then apply state filter
+        return when (stateFilter) {
+            "Active" -> scopeFiltered.filter {
                 val state = it.scheduleState ?: it.state ?: ""
                 state !in setOf("Accepted", "Completed", "Deployed", "Idea")
             }
-            "My In-Progress" -> artifacts.filter {
+            "Any State" -> scopeFiltered
+            else -> scopeFiltered.filter {
                 val state = it.scheduleState ?: it.state ?: ""
-                state.equals("In-Progress", ignoreCase = true)
+                state.equals(stateFilter, ignoreCase = true)
             }
-            "My Defined" -> artifacts.filter {
-                val state = it.scheduleState ?: it.state ?: ""
-                state.equals("Defined", ignoreCase = true)
-            }
-            "My Idea" -> artifacts.filter {
-                val state = it.scheduleState ?: it.state ?: ""
-                state.equals("Idea", ignoreCase = true)
-            }
-            "My Completed" -> artifacts.filter {
-                val state = it.scheduleState ?: it.state ?: ""
-                state.equals("Completed", ignoreCase = true)
-            }
-            "My User Stories" -> artifacts.filter {
-                it.type == "HierarchicalRequirement"
-            }
-            "My Defects" -> artifacts.filter {
-                it.type == "Defect"
-            }
-            else -> artifacts
         }
+    }
+
+    private fun getSelectedProjectRef(): String? {
+        val selectedIndex = projectCombo.selectedIndex
+        if (selectedIndex <= 0) return null
+        val projectIndex = selectedIndex - 1
+        return if (projectIndex < cachedProjects.size) cachedProjects[projectIndex].ref else null
     }
 
     private fun loadSprintSummary(client: RallyApiClient, settings: RallySettings) {
         try {
-            val iteration = client.queryCurrentIteration(
-                if (settings.workspaceRef.isNotBlank()) settings.workspaceRef else null,
-                if (settings.projectRef.isNotBlank()) settings.projectRef else null
-            )
+            // Use selected iteration if one is picked, otherwise fall back to current date-based iteration
+            val selectedIter = iterationCombo.selectedItem as? String ?: ""
+            val iteration = if (selectedIter.isNotBlank() && selectedIter != "All Sprints") {
+                cachedIterations.firstOrNull { it.name == selectedIter }
+            } else {
+                client.queryCurrentIteration(
+                    if (settings.workspaceRef.isNotBlank()) settings.workspaceRef else null,
+                    getSelectedProjectRef()
+                )
+            }
 
             if (iteration == null) {
                 ApplicationManager.getApplication().invokeLater {
@@ -417,10 +645,13 @@ class RallyToolWindowPanel(private val project: Project) {
             currentClient?.apiKey != settings.apiKey
         ) {
             currentClient = RallyApiClient(settings.serverUrl, settings.apiKey)
+            // Reset caches when client changes
+            projectsLoaded = false
+            iterationsLoaded = false
         }
-        // Always update workspace/project refs from settings
+        // Workspace always comes from settings
         currentClient!!.workspaceRef = settings.workspaceRef.ifBlank { null }
-        currentClient!!.projectRef = settings.projectRef.ifBlank { null }
+        // projectRef is managed by the project dropdown (updateClientProjectRef)
         return currentClient!!
     }
 

@@ -25,13 +25,14 @@ src/main/kotlin/com/intellij/plugins/rally/
 │   └── RallySettingsConfigurable.kt  # Settings UI (Settings > Tools > Rally)
 └── ui/
     ├── RallyToolWindowFactory.kt  # ToolWindowFactory + DumbAware
-    ├── RallyToolWindowPanel.kt    # Main UI: toolbar, filters, ticket list, sprint summary
+    ├── RallyToolWindowPanel.kt    # Main UI: toolbar, filters, project switcher, ticket list, sprint summary
     └── RallyIcons.kt             # Icon loader for /icons/rally.svg
 ```
 
 ## Key Design Decisions
 
-- **Application-level settings** — Rally credentials are per-user, not per-project
+- **Application-level settings** — Rally credentials are per-user, not per-project. Settings: Server URL, API Key, Workspace Ref, Username
+- **Project switcher in tool window** — Projects are fetched from Rally API (`queryProjects()`) and shown in a dropdown in the toolbar. Selection is persisted in `selectedProject` setting and restored on next launch. "All Projects" queries across the entire workspace
 - **Threading**: `executeOnPooledThread` for API calls, `invokeLater` for UI updates
 - **No external Rally SDK** — uses Java's built-in `HttpClient` with `zsessionid` header for API key auth
 - **State field logic**: User Stories and Defects use `ScheduleState`, Tasks use `State`
@@ -64,7 +65,8 @@ All Tickets, My Tickets, My In-Progress, My Defined, My Idea, My Completed, Acti
 ## What's Implemented
 
 - Tool window with ticket list, search, filters, and sprint summary
-- Settings page with Test Connection
+- Project switcher dropdown — fetches projects from Rally, persists selection across sessions
+- Settings page (Server URL, API Key, Workspace Ref, Username) with Test Connection
 - State change actions (In-Progress, Completed, Defined) via toolbar and context menu
 - Open in Browser, Copy FormattedID via context menu
 - Create User Story API method (not yet wired to UI)

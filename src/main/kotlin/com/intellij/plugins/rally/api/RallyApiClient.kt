@@ -412,6 +412,53 @@ class RallyApiClient(
     }
 
     /**
+     * Query projects in the configured workspace.
+     * Returns only Open (active) projects, sorted alphabetically by name.
+     */
+    fun queryProjects(pageSize: Int = MAX_PAGE_SIZE): List<RallyProject> {
+        val query = "(State = \"Open\")"
+        val encodedQuery = URLEncoder.encode(query, StandardCharsets.UTF_8)
+
+        var url = buildApiUrl("project") +
+                "?query=$encodedQuery&fetch=Name,ObjectID,_ref,State&pagesize=$pageSize&order=Name"
+
+        if (!workspaceRef.isNullOrBlank()) {
+            url += "&workspace=${URLEncoder.encode(normalizeRef("workspace", workspaceRef!!), StandardCharsets.UTF_8)}"
+        }
+
+        val response = executeGet(url)
+        handleResponse(response)
+
+        val type = object : TypeToken<RallyQueryResult<RallyProject>>() {}.type
+        val result: RallyQueryResult<RallyProject> = gson.fromJson(response.body(), type)
+        return result.queryResult.results.sortedBy { it.name?.lowercase() }
+    }
+
+    /**
+     * Query iterations (sprints) in the configured workspace/project.
+     * Returns iterations sorted by StartDate descending (most recent first).
+     */
+    fun queryIterations(pageSize: Int = MAX_PAGE_SIZE): List<RallyIteration> {
+        var url = buildApiUrl("iteration") +
+                "?fetch=Name,ObjectID,_ref,StartDate,EndDate&pagesize=$pageSize" +
+                "&order=${URLEncoder.encode("StartDate desc", StandardCharsets.UTF_8)}"
+
+        if (!workspaceRef.isNullOrBlank()) {
+            url += "&workspace=${URLEncoder.encode(normalizeRef("workspace", workspaceRef!!), StandardCharsets.UTF_8)}"
+        }
+        if (!projectRef.isNullOrBlank()) {
+            url += "&project=${URLEncoder.encode(normalizeRef("project", projectRef!!), StandardCharsets.UTF_8)}"
+        }
+
+        val response = executeGet(url)
+        handleResponse(response)
+
+        val type = object : TypeToken<RallyQueryResult<RallyIteration>>() {}.type
+        val result: RallyQueryResult<RallyIteration> = gson.fromJson(response.body(), type)
+        return result.queryResult.results
+    }
+
+    /**
      * Create a new User Story.
      */
     fun createUserStory(name: String, projectRef: String?, ownerRef: String? = null): RallyUserStory {

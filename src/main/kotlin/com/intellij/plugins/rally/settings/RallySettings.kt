@@ -15,9 +15,10 @@ class RallySettings : PersistentStateComponent<RallySettings.State> {
         var serverUrl: String = "https://rally1.rallydev.com",
         var apiKey: String = "",
         var workspaceRef: String = "",
-        var projectRef: String = "",
         var username: String = "",
-        var pageSize: Int = 200
+        var pageSize: Int = 200,
+        var selectedProject: String = "",
+        var selectedIteration: String = ""
     )
 
     private var myState = State()
@@ -31,9 +32,14 @@ class RallySettings : PersistentStateComponent<RallySettings.State> {
     val serverUrl: String get() = myState.serverUrl
     val apiKey: String get() = myState.apiKey
     val workspaceRef: String get() = myState.workspaceRef
-    val projectRef: String get() = myState.projectRef
     val username: String get() = myState.username
     val pageSize: Int get() = myState.pageSize
+    var selectedProject: String
+        get() = myState.selectedProject
+        set(value) { myState.selectedProject = value }
+    var selectedIteration: String
+        get() = myState.selectedIteration
+        set(value) { myState.selectedIteration = value }
 
     fun isConfigured(): Boolean = myState.serverUrl.isNotBlank() && myState.apiKey.isNotBlank()
 
