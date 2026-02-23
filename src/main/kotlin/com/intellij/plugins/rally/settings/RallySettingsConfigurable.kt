@@ -1,8 +1,10 @@
 package com.intellij.plugins.rally.settings
 
 import com.intellij.openapi.application.ApplicationManager
+import com.intellij.openapi.fileChooser.FileChooserDescriptorFactory
 import com.intellij.openapi.options.Configurable
 import com.intellij.openapi.ui.Messages
+import com.intellij.openapi.ui.TextFieldWithBrowseButton
 import com.intellij.plugins.rally.api.RallyApiClient
 import com.intellij.ui.components.JBLabel
 import com.intellij.ui.components.JBTextField
@@ -18,6 +20,7 @@ class RallySettingsConfigurable : Configurable {
     private var apiKeyField: JPasswordField? = null
     private var workspaceRefField: JBTextField? = null
     private var usernameField: JBTextField? = null
+    private var exportDirField: TextFieldWithBrowseButton? = null
 
     override fun getDisplayName(): String = "Rally"
 
@@ -32,7 +35,16 @@ class RallySettingsConfigurable : Configurable {
             toolTipText = "Workspace reference (e.g., /workspace/12345)"
         }
         usernameField = JBTextField().apply {
-            toolTipText = "Your Rally username/email for 'My Tickets' filter"
+            toolTipText = "Rally UserName (shown in Test Connection result). Used for 'My Tickets' filter. Can be any user's username."
+        }
+        exportDirField = TextFieldWithBrowseButton().apply {
+            addBrowseFolderListener(
+                "Select Export Directory",
+                "Directory where Rally exports (JSON/Markdown) will be saved",
+                null,
+                FileChooserDescriptorFactory.createSingleFolderDescriptor()
+            )
+            textField.toolTipText = "Export directory (leave empty for project_root/rally_testcases)"
         }
 
         val testButton = JButton("Test Connection").apply {
@@ -44,12 +56,14 @@ class RallySettingsConfigurable : Configurable {
         apiKeyField!!.text = settings.apiKey
         workspaceRefField!!.text = settings.workspaceRef
         usernameField!!.text = settings.username
+        exportDirField!!.text = settings.exportDirectory
 
         return FormBuilder.createFormBuilder()
             .addLabeledComponent(JBLabel("Server URL:"), serverUrlField!!)
             .addLabeledComponent(JBLabel("API Key:"), apiKeyField!!)
             .addLabeledComponent(JBLabel("Workspace Ref:"), workspaceRefField!!)
             .addLabeledComponent(JBLabel("Username:"), usernameField!!)
+            .addLabeledComponent(JBLabel("Export Directory:"), exportDirField!!)
             .addComponent(testButton)
             .addComponentFillVertically(JPanel(), 0)
             .panel
@@ -60,7 +74,8 @@ class RallySettingsConfigurable : Configurable {
         return serverUrlField?.text != settings.serverUrl ||
                 String(apiKeyField?.password ?: charArrayOf()) != settings.apiKey ||
                 workspaceRefField?.text != settings.workspaceRef ||
-                usernameField?.text != settings.username
+                usernameField?.text != settings.username ||
+                exportDirField?.text != settings.exportDirectory
     }
 
     override fun apply() {
@@ -69,6 +84,7 @@ class RallySettingsConfigurable : Configurable {
         state.apiKey = String(apiKeyField?.password ?: charArrayOf()).trim()
         state.workspaceRef = workspaceRefField?.text?.trim() ?: ""
         state.username = usernameField?.text?.trim() ?: ""
+        state.exportDirectory = exportDirField?.text?.trim() ?: ""
     }
 
     override fun reset() {
@@ -77,6 +93,7 @@ class RallySettingsConfigurable : Configurable {
         apiKeyField?.text = settings.apiKey
         workspaceRefField?.text = settings.workspaceRef
         usernameField?.text = settings.username
+        exportDirField?.text = settings.exportDirectory
     }
 
     override fun disposeUIResources() {
@@ -84,6 +101,7 @@ class RallySettingsConfigurable : Configurable {
         apiKeyField = null
         workspaceRefField = null
         usernameField = null
+        exportDirField = null
     }
 
     private fun testConnection() {
@@ -99,9 +117,11 @@ class RallySettingsConfigurable : Configurable {
             try {
                 val client = RallyApiClient(url, key)
                 val user = client.getCurrentUser()
+                val displayName = user.displayName ?: "Unknown"
+                val userName = user.userName ?: "Unknown"
                 ApplicationManager.getApplication().invokeLater {
                     Messages.showInfoMessage(
-                        "Connected successfully as: ${user.displayName ?: user.userName ?: "Unknown"}",
+                        "Connected successfully!\n\nDisplay Name: $displayName\nUserName (for queries): $userName\n\nUse the UserName value above in the Username field for 'My Tickets' filter.",
                         "Rally Connection"
                     )
                 }

@@ -18,7 +18,8 @@ class RallySettings : PersistentStateComponent<RallySettings.State> {
         var username: String = "",
         var pageSize: Int = 200,
         var selectedProject: String = "",
-        var selectedIteration: String = ""
+        var selectedIteration: String = "",
+        var exportDirectory: String = ""
     )
 
     private var myState = State()
@@ -40,6 +41,9 @@ class RallySettings : PersistentStateComponent<RallySettings.State> {
     var selectedIteration: String
         get() = myState.selectedIteration
         set(value) { myState.selectedIteration = value }
+    var exportDirectory: String
+        get() = myState.exportDirectory
+        set(value) { myState.exportDirectory = value }
 
     fun isConfigured(): Boolean = myState.serverUrl.isNotBlank() && myState.apiKey.isNotBlank()
 
