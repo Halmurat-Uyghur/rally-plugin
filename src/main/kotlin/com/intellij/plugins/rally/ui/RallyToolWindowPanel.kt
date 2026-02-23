@@ -105,9 +105,9 @@ class RallyToolWindowPanel(private val project: Project) {
         toolbar.add(createButton("Refresh", AllIcons.Actions.Refresh) { loadTickets() })
         toolbar.add(createButton("Open in Browser", AllIcons.General.Web) { openInBrowser() })
         toolbar.add(JSeparator(SwingConstants.VERTICAL).apply { preferredSize = java.awt.Dimension(2, 24) })
+        toolbar.add(createButton("Defined", AllIcons.Actions.MoveToButton) { changeState("Defined") })
         toolbar.add(createButton("In-Progress", AllIcons.Actions.Execute) { changeState("In-Progress") })
         toolbar.add(createButton("Completed", AllIcons.Actions.Checked) { changeState("Completed") })
-        toolbar.add(createButton("Defined", AllIcons.Actions.MoveToButton) { changeState("Defined") })
         toolbar.add(Box.createHorizontalGlue())
         toolbar.add(statsLabel)
 
