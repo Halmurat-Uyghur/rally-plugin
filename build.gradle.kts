@@ -21,6 +21,7 @@ intellij {
     version.set("2024.1")
     type.set("IC") // IntelliJ IDEA Community Edition
     plugins.set(listOf<String>())
+    sandboxDir.set(layout.projectDirectory.dir(".sandbox").toString())
 }
 
 tasks {
