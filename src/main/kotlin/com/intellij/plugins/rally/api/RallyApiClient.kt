@@ -459,6 +459,200 @@ class RallyApiClient(
     }
 
     /**
+     * Query tasks linked to a work product (user story/defect).
+     */
+    fun queryTasksForWorkProduct(workProductRef: String, pageSize: Int = DEFAULT_PAGE_SIZE): List<RallyTaskItem> {
+        val query = "(WorkProduct = \"$workProductRef\")"
+        val encodedQuery = URLEncoder.encode(query, StandardCharsets.UTF_8)
+
+        var url = buildApiUrl("task") +
+                "?query=$encodedQuery&fetch=FormattedID,Name,State,Owner,Estimate,Actuals,ToDo,ObjectID,_ref" +
+                "&pagesize=$pageSize&order=${URLEncoder.encode("FormattedID ASC", StandardCharsets.UTF_8)}"
+
+        if (!workspaceRef.isNullOrBlank()) {
+            url += "&workspace=${URLEncoder.encode(normalizeRef("workspace", workspaceRef!!), StandardCharsets.UTF_8)}"
+        }
+
+        val response = executeGet(url)
+        handleResponse(response)
+
+        val type = object : TypeToken<RallyQueryResult<RallyTaskItem>>() {}.type
+        val result: RallyQueryResult<RallyTaskItem> = gson.fromJson(response.body(), type)
+        return result.queryResult.results
+    }
+
+    /**
+     * Query test cases linked to a work product (user story/defect).
+     */
+    fun queryTestCases(workProductRef: String, pageSize: Int = DEFAULT_PAGE_SIZE): List<RallyTestCase> {
+        val query = "(WorkProduct = \"$workProductRef\")"
+        val encodedQuery = URLEncoder.encode(query, StandardCharsets.UTF_8)
+
+        var url = buildApiUrl("testcase") +
+                "?query=$encodedQuery&fetch=FormattedID,Name,Method,Type,LastVerdict,LastRun,Owner,WorkProduct,Description,Priority,ObjectID,_ref" +
+                "&pagesize=$pageSize&order=${URLEncoder.encode("FormattedID ASC", StandardCharsets.UTF_8)}"
+
+        if (!workspaceRef.isNullOrBlank()) {
+            url += "&workspace=${URLEncoder.encode(normalizeRef("workspace", workspaceRef!!), StandardCharsets.UTF_8)}"
+        }
+
+        val response = executeGet(url)
+        handleResponse(response)
+
+        val type = object : TypeToken<RallyQueryResult<RallyTestCase>>() {}.type
+        val result: RallyQueryResult<RallyTestCase> = gson.fromJson(response.body(), type)
+        return result.queryResult.results
+    }
+
+    /**
+     * Query test case steps for a given test case FormattedID.
+     */
+    fun queryTestSteps(testCaseFormattedId: String): List<RallyTestCaseStep> {
+        val query = "(TestCase.FormattedID = \"$testCaseFormattedId\")"
+        val encodedQuery = URLEncoder.encode(query, StandardCharsets.UTF_8)
+
+        val url = buildApiUrl("testcasestep") +
+                "?query=$encodedQuery&fetch=StepIndex,Input,ExpectedResult,_ref" +
+                "&pagesize=$DEFAULT_PAGE_SIZE&order=${URLEncoder.encode("StepIndex ASC", StandardCharsets.UTF_8)}"
+
+        val response = executeGet(url)
+        handleResponse(response)
+
+        val type = object : TypeToken<RallyQueryResult<RallyTestCaseStep>>() {}.type
+        val result: RallyQueryResult<RallyTestCaseStep> = gson.fromJson(response.body(), type)
+        return result.queryResult.results
+    }
+
+    /**
+     * Query attachments for a given artifact FormattedID.
+     */
+    fun queryAttachments(artifactFormattedId: String): List<RallyAttachment> {
+        val query = "(Artifact.FormattedID = \"$artifactFormattedId\")"
+        val encodedQuery = URLEncoder.encode(query, StandardCharsets.UTF_8)
+
+        var url = buildApiUrl("attachment") +
+                "?query=$encodedQuery&fetch=Name,ContentType,Size,Description,Content,ObjectID,_ref" +
+                "&pagesize=$DEFAULT_PAGE_SIZE"
+
+        if (!workspaceRef.isNullOrBlank()) {
+            url += "&workspace=${URLEncoder.encode(normalizeRef("workspace", workspaceRef!!), StandardCharsets.UTF_8)}"
+        }
+
+        val response = executeGet(url)
+        handleResponse(response)
+
+        val type = object : TypeToken<RallyQueryResult<RallyAttachment>>() {}.type
+        val result: RallyQueryResult<RallyAttachment> = gson.fromJson(response.body(), type)
+        return result.queryResult.results
+    }
+
+    /**
+     * Query a single test case by FormattedID.
+     */
+    fun queryTestCaseByFormattedId(formattedId: String): RallyTestCase? {
+        val query = "(FormattedID = \"$formattedId\")"
+        val encodedQuery = URLEncoder.encode(query, StandardCharsets.UTF_8)
+
+        var url = buildApiUrl("testcase") +
+                "?query=$encodedQuery&fetch=FormattedID,Name,Method,Type,LastVerdict,LastRun,Owner,WorkProduct,Description,Priority,ObjectID,_ref" +
+                "&pagesize=1"
+
+        if (!workspaceRef.isNullOrBlank()) {
+            url += "&workspace=${URLEncoder.encode(normalizeRef("workspace", workspaceRef!!), StandardCharsets.UTF_8)}"
+        }
+
+        val response = executeGet(url)
+        handleResponse(response)
+
+        val type = object : TypeToken<RallyQueryResult<RallyTestCase>>() {}.type
+        val result: RallyQueryResult<RallyTestCase> = gson.fromJson(response.body(), type)
+        return result.queryResult.results.firstOrNull()
+    }
+
+    /**
+     * Query all non-automated test cases.
+     */
+    fun queryUnautomatedTestCases(pageSize: Int = DEFAULT_PAGE_SIZE): List<RallyTestCase> {
+        val query = "(Method != \"Automated\")"
+        val encodedQuery = URLEncoder.encode(query, StandardCharsets.UTF_8)
+
+        var url = buildApiUrl("testcase") +
+                "?query=$encodedQuery&fetch=FormattedID,Name,Method,Type,LastVerdict,Owner,WorkProduct,ObjectID,_ref" +
+                "&pagesize=$pageSize&order=${URLEncoder.encode("FormattedID ASC", StandardCharsets.UTF_8)}"
+
+        if (!workspaceRef.isNullOrBlank()) {
+            url += "&workspace=${URLEncoder.encode(normalizeRef("workspace", workspaceRef!!), StandardCharsets.UTF_8)}"
+        }
+        if (!projectRef.isNullOrBlank()) {
+            url += "&project=${URLEncoder.encode(normalizeRef("project", projectRef!!), StandardCharsets.UTF_8)}"
+        }
+
+        val response = executeGet(url)
+        handleResponse(response)
+
+        val type = object : TypeToken<RallyQueryResult<RallyTestCase>>() {}.type
+        val result: RallyQueryResult<RallyTestCase> = gson.fromJson(response.body(), type)
+        return result.queryResult.results
+    }
+
+    /**
+     * Update a field on a test case.
+     */
+    fun updateTestCaseField(testCaseRef: String, field: String, value: String) {
+        val body = """{"TestCase":{"$field":"$value"}}"""
+        val response = executePost(testCaseRef, body)
+        handleResponse(response)
+
+        val json = JsonParser.parseString(response.body()).asJsonObject
+        val result = json.getAsJsonObject("OperationResult")
+        if (result != null) {
+            val errors = result.getAsJsonArray("Errors")
+            if (errors != null && errors.size() > 0) {
+                throw RallyApiException("Failed to update test case field: ${errors.joinToString()}")
+            }
+        }
+    }
+
+    /**
+     * Get attachment content (base64) by fetching the Content ref.
+     */
+    fun getAttachmentContent(contentRef: String): String {
+        val response = executeGet(contentRef)
+        handleResponse(response)
+
+        val json = JsonParser.parseString(response.body()).asJsonObject
+        val contentObj = json.getAsJsonObject("AttachmentContent")
+            ?: throw RallyApiException("No AttachmentContent in response")
+        return contentObj.get("Content")?.asString
+            ?: throw RallyApiException("No Content field in AttachmentContent")
+    }
+
+    /**
+     * Download a Rally attachment by URL using zsessionid auth.
+     * Returns raw bytes.
+     */
+    fun downloadAttachment(url: String): ByteArray {
+        val request = HttpRequest.newBuilder()
+            .uri(URI.create(url))
+            .header(ZSESSION_HEADER, apiKey)
+            .timeout(Duration.ofSeconds(60))
+            .GET()
+            .build()
+
+        val response = try {
+            httpClient.send(request, HttpResponse.BodyHandlers.ofByteArray())
+        } catch (e: Exception) {
+            throw RallyConnectionException("Failed to download attachment: ${e.message}", e)
+        }
+
+        if (response.statusCode() != 200) {
+            throw RallyApiException("Download failed with status ${response.statusCode()}", response.statusCode(), null)
+        }
+
+        return response.body()
+    }
+
+    /**
      * Create a new User Story.
      */
     fun createUserStory(name: String, projectRef: String?, ownerRef: String? = null): RallyUserStory {
