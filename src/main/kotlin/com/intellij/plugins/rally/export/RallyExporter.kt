@@ -111,11 +111,16 @@ class RallyExporter(private val client: RallyApiClient) {
         for (artifact in artifacts) {
             val id = artifact.formattedID ?: continue
             try {
+                // Fetch description on demand if not present (list queries omit it for speed)
+                val desc = artifact.description
+                    ?: artifact.ref?.let { client.fetchDescription(it) }
+                    ?: ""
+
                 val obj = JsonObject().apply {
                     addProperty("formattedID", id)
                     addProperty("type", artifact.type ?: "")
                     addProperty("name", artifact.name ?: "")
-                    addProperty("description", stripHtml(artifact.description ?: ""))
+                    addProperty("description", stripHtml(desc))
                     addProperty("state", artifact.scheduleState ?: artifact.state ?: "")
                     addProperty("owner", artifact.owner?.displayName ?: artifact.owner?.refObjectName ?: "")
                     addProperty("creationDate", artifact.creationDate ?: "")
@@ -205,7 +210,11 @@ class RallyExporter(private val client: RallyApiClient) {
                     md.appendLine("- **Iteration:** ${artifact.iteration?.refObjectName ?: artifact.iteration?.name ?: ""}")
                 }
 
-                val desc = stripHtml(artifact.description ?: "")
+                // Fetch description on demand if not present (list queries omit it for speed)
+                val rawDesc = artifact.description
+                    ?: artifact.ref?.let { client.fetchDescription(it) }
+                    ?: ""
+                val desc = stripHtml(rawDesc)
                 if (desc.isNotBlank()) {
                     md.appendLine()
                     md.appendLine("### Description")
