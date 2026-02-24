@@ -22,6 +22,7 @@ import java.awt.event.MouseAdapter
 import java.awt.event.MouseEvent
 import java.io.File
 import java.util.Base64
+import java.util.concurrent.CompletableFuture
 import java.util.regex.Pattern
 import javax.swing.*
 
@@ -190,13 +191,13 @@ class RallyDetailPanel(private val project: Project) {
         stateBadge.text = state
         stateBadge.foreground = stateColor(state)
 
-        // Update description — show text immediately, resolve images in background
+        // Show description if already available, otherwise show loading state
         val desc = artifact.description
         if (!desc.isNullOrBlank()) {
             descriptionPane.text = wrapHtml(desc)
             descriptionPane.caretPosition = 0
         } else {
-            descriptionPane.text = wrapHtml("<i>No description</i>")
+            descriptionPane.text = wrapHtml("<i>Loading description...</i>")
         }
 
         // Clear all lists and set loading state
@@ -206,75 +207,100 @@ class RallyDetailPanel(private val project: Project) {
         attachmentListModel.clear()
         updateTabTitles(0, 0, 0)
 
-        // Load test cases, tasks, and attachments in parallel on pooled thread
+        // Load description, test cases, tasks, and attachments in parallel
         ApplicationManager.getApplication().executeOnPooledThread {
-            // Resolve inline images in description
-            if (!desc.isNullOrBlank()) {
-                try {
-                    val resolvedDesc = resolveInlineImages(desc, client)
-                    if (resolvedDesc != desc) {
-                        ApplicationManager.getApplication().invokeLater {
-                            if (currentArtifactRef != artifactRef) return@invokeLater
-                            descriptionPane.text = wrapHtml(resolvedDesc)
-                            descriptionPane.caretPosition = 0
-                        }
+            // Launch all four queries concurrently
+            val descFuture = CompletableFuture.supplyAsync {
+                // Fetch description on demand if not included in list query
+                var resolved = desc
+                if (resolved.isNullOrBlank()) {
+                    resolved = try { client.fetchDescription(artifactRef) } catch (e: Exception) {
+                        LOG.warn("Failed to fetch description for $id", e)
+                        null
                     }
-                } catch (e: Exception) {
-                    LOG.warn("Failed to resolve inline images for $id", e)
+                }
+                // Resolve inline images
+                if (!resolved.isNullOrBlank()) {
+                    try { resolveInlineImages(resolved, client) } catch (e: Exception) {
+                        LOG.warn("Failed to resolve inline images for $id", e)
+                        resolved
+                    }
+                } else null
+            }
+
+            val tcFuture = CompletableFuture.supplyAsync {
+                try { client.queryTestCases(artifactRef) } catch (e: Exception) {
+                    LOG.warn("Failed to load test cases for $id", e)
+                    null
                 }
             }
 
-            // Load test cases
-            try {
-                val testCases = client.queryTestCases(artifactRef)
+            val taskFuture = CompletableFuture.supplyAsync {
+                try { client.queryTasksForWorkProduct(artifactRef) } catch (e: Exception) {
+                    LOG.warn("Failed to load tasks for $id", e)
+                    null
+                }
+            }
+
+            val attachFuture = CompletableFuture.supplyAsync {
+                try { client.queryAttachments(id) } catch (e: Exception) {
+                    LOG.warn("Failed to load attachments for $id", e)
+                    null
+                }
+            }
+
+            // Update UI as each completes
+            descFuture.thenAccept { resolvedDesc ->
+                ApplicationManager.getApplication().invokeLater {
+                    if (currentArtifactRef != artifactRef) return@invokeLater
+                    if (!resolvedDesc.isNullOrBlank()) {
+                        descriptionPane.text = wrapHtml(resolvedDesc)
+                    } else {
+                        descriptionPane.text = wrapHtml("<i>No description</i>")
+                    }
+                    descriptionPane.caretPosition = 0
+                }
+            }
+
+            tcFuture.thenAccept { testCases ->
                 ApplicationManager.getApplication().invokeLater {
                     if (currentArtifactRef != artifactRef) return@invokeLater
                     testCaseListModel.clear()
-                    testCases.forEach { testCaseListModel.addElement(it) }
-                    val automated = testCases.count { it.method == "Automated" }
-                    val manual = testCases.size - automated
-                    testCaseSummaryLabel.text = "${testCases.size} total ($automated automated, $manual manual)"
-                    tabbedPane.setTitleAt(TAB_TEST_CASES, "Test Cases (${testCases.size})")
-                }
-            } catch (e: Exception) {
-                LOG.warn("Failed to load test cases for $id", e)
-                ApplicationManager.getApplication().invokeLater {
-                    if (currentArtifactRef != artifactRef) return@invokeLater
-                    testCaseSummaryLabel.text = "Failed to load test cases"
+                    if (testCases != null) {
+                        testCases.forEach { testCaseListModel.addElement(it) }
+                        val automated = testCases.count { it.method == "Automated" }
+                        val manual = testCases.size - automated
+                        testCaseSummaryLabel.text = "${testCases.size} total ($automated automated, $manual manual)"
+                        tabbedPane.setTitleAt(TAB_TEST_CASES, "Test Cases (${testCases.size})")
+                    } else {
+                        testCaseSummaryLabel.text = "Failed to load test cases"
+                    }
                 }
             }
 
-            // Load tasks
-            try {
-                val tasks = client.queryTasksForWorkProduct(artifactRef)
+            taskFuture.thenAccept { tasks ->
                 ApplicationManager.getApplication().invokeLater {
                     if (currentArtifactRef != artifactRef) return@invokeLater
                     taskListModel.clear()
-                    tasks.forEach { taskListModel.addElement(it) }
-                    tabbedPane.setTitleAt(TAB_TASKS, "Tasks (${tasks.size})")
-                }
-            } catch (e: Exception) {
-                LOG.warn("Failed to load tasks for $id", e)
-                ApplicationManager.getApplication().invokeLater {
-                    if (currentArtifactRef != artifactRef) return@invokeLater
-                    tabbedPane.setTitleAt(TAB_TASKS, "Tasks (!)")
+                    if (tasks != null) {
+                        tasks.forEach { taskListModel.addElement(it) }
+                        tabbedPane.setTitleAt(TAB_TASKS, "Tasks (${tasks.size})")
+                    } else {
+                        tabbedPane.setTitleAt(TAB_TASKS, "Tasks (!)")
+                    }
                 }
             }
 
-            // Load attachments
-            try {
-                val attachments = client.queryAttachments(id)
+            attachFuture.thenAccept { attachments ->
                 ApplicationManager.getApplication().invokeLater {
                     if (currentArtifactRef != artifactRef) return@invokeLater
                     attachmentListModel.clear()
-                    attachments.forEach { attachmentListModel.addElement(it) }
-                    tabbedPane.setTitleAt(TAB_ATTACHMENTS, "Attachments (${attachments.size})")
-                }
-            } catch (e: Exception) {
-                LOG.warn("Failed to load attachments for $id", e)
-                ApplicationManager.getApplication().invokeLater {
-                    if (currentArtifactRef != artifactRef) return@invokeLater
-                    tabbedPane.setTitleAt(TAB_ATTACHMENTS, "Attachments (!)")
+                    if (attachments != null) {
+                        attachments.forEach { attachmentListModel.addElement(it) }
+                        tabbedPane.setTitleAt(TAB_ATTACHMENTS, "Attachments (${attachments.size})")
+                    } else {
+                        tabbedPane.setTitleAt(TAB_ATTACHMENTS, "Attachments (!)")
+                    }
                 }
             }
         }
