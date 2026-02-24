@@ -10,6 +10,7 @@ import java.net.http.HttpRequest
 import java.net.http.HttpResponse
 import java.nio.charset.StandardCharsets
 import java.time.Duration
+import java.util.concurrent.ConcurrentHashMap
 
 /**
  * Client for interacting with Rally WSAPI 2.0
@@ -20,9 +21,50 @@ class RallyApiClient(
 ) {
     private val httpClient: HttpClient = HttpClient.newBuilder()
         .connectTimeout(Duration.ofSeconds(30))
+        .version(HttpClient.Version.HTTP_2)
         .build()
 
     private val gson = Gson()
+
+    // ── Cache ────────────────────────────────────────────────────
+
+    private data class CacheEntry<T>(val data: T, val timestamp: Long)
+
+    private val queryCache = ConcurrentHashMap<String, CacheEntry<Any>>()
+    private val imageCache = ConcurrentHashMap<String, ByteArray>()
+
+    /** Default TTL for query caches (2 minutes). */
+    private val queryTtlMs = 2 * 60 * 1000L
+
+    /** Image cache has no TTL — images rarely change. */
+
+    @Suppress("UNCHECKED_CAST")
+    private fun <T> getCached(key: String): T? {
+        val entry = queryCache[key] ?: return null
+        if (System.currentTimeMillis() - entry.timestamp > queryTtlMs) {
+            queryCache.remove(key)
+            return null
+        }
+        return entry.data as? T
+    }
+
+    private fun <T : Any> putCache(key: String, data: T) {
+        queryCache[key] = CacheEntry(data, System.currentTimeMillis())
+    }
+
+    /**
+     * Clear all caches. Call after state changes (updates) or manual refresh.
+     */
+    fun clearCache() {
+        queryCache.clear()
+    }
+
+    /**
+     * Clear only artifact list caches (keeps detail/image caches).
+     */
+    fun clearArtifactCache() {
+        queryCache.keys.removeAll { it.startsWith("artifacts:") || it.startsWith("sprint:") }
+    }
 
     companion object {
         private const val API_VERSION = "v2.0"
@@ -30,11 +72,10 @@ class RallyApiClient(
         private const val MAX_PAGE_SIZE = 2000
         private const val ZSESSION_HEADER = "zsessionid"
 
-        // Common fields to fetch for all artifact types
-        private val COMMON_FIELDS = listOf(
+        // Fields for list queries (lightweight — no Description)
+        private val LIST_FIELDS = listOf(
             "FormattedID",
             "Name",
-            "Description",
             "CreationDate",
             "LastUpdateDate",
             "Owner",
@@ -44,6 +85,9 @@ class RallyApiClient(
             "Iteration",
             "PlanEstimate"
         )
+
+        // Fields for detail queries (includes Description)
+        private val DETAIL_FIELDS = LIST_FIELDS + "Description"
     }
 
     /**
@@ -123,7 +167,8 @@ class RallyApiClient(
         start: Int = 1,
         workspace: String? = null,
         project: String? = null,
-        order: String? = null
+        order: String? = null,
+        fields: List<String> = LIST_FIELDS
     ): String {
         val params = mutableListOf<String>()
 
@@ -134,7 +179,7 @@ class RallyApiClient(
 
         params.add("pagesize=${pageSize.coerceIn(1, MAX_PAGE_SIZE)}")
         params.add("start=$start")
-        params.add("fetch=${COMMON_FIELDS.joinToString(",")}")
+        params.add("fetch=${fields.joinToString(",")}")
 
         if (!workspace.isNullOrBlank()) {
             params.add("workspace=${URLEncoder.encode(normalizeRef("workspace", workspace), StandardCharsets.UTF_8)}")
@@ -257,6 +302,29 @@ class RallyApiClient(
     }
 
     /**
+     * Fetch the Description field for a single artifact by ref URL.
+     * Returns the HTML description or null.
+     */
+    fun fetchDescription(artifactRef: String): String? {
+        val cacheKey = "desc:$artifactRef"
+        getCached<String>(cacheKey)?.let { return it }
+
+        val url = "$artifactRef?fetch=Description"
+        return try {
+            val response = executeGet(url)
+            handleResponse(response)
+            val root = JsonParser.parseString(response.body()).asJsonObject
+            // Rally wraps in the type name (HierarchicalRequirement, Defect, Task, etc.)
+            val obj = root.entrySet().firstOrNull()?.value?.asJsonObject
+            val desc = obj?.get("Description")?.asString
+            if (desc != null) putCache(cacheKey, desc)
+            desc
+        } catch (e: Exception) {
+            null
+        }
+    }
+
+    /**
      * Get artifact by FormattedID (e.g., "S-1234", "DE5678", "TA9012")
      */
     fun getArtifactByFormattedId(formattedId: String): RallyArtifact? {
@@ -276,7 +344,7 @@ class RallyApiClient(
         }
 
         val query = "(FormattedID = \"$formattedId\")"
-        val url = buildApiUrl(endpoint) + "?" + buildQuery(query, 1)
+        val url = buildApiUrl(endpoint) + "?" + buildQuery(query, 1, fields = DETAIL_FIELDS)
 
         return try {
             val response = executeGet(url)
@@ -294,21 +362,30 @@ class RallyApiClient(
      * This is useful for the main task browser
      */
     fun queryAllArtifacts(query: String? = null, pageSize: Int = DEFAULT_PAGE_SIZE): List<RallyArtifact> {
+        val cacheKey = "artifacts:${query}|${pageSize}|${workspaceRef}|${projectRef}"
+        getCached<List<RallyArtifact>>(cacheKey)?.let { return it }
+
         val results = mutableListOf<RallyArtifact>()
         val errors = mutableListOf<String>()
 
-        // Query user stories
-        try {
-            results.addAll(queryUserStories(query, pageSize))
-        } catch (e: Exception) {
-            errors.add("UserStories: ${e.message}")
+        // Query user stories and defects in parallel
+        val storiesFuture = java.util.concurrent.CompletableFuture.supplyAsync {
+            queryUserStories(query, pageSize)
+        }
+        val defectsFuture = java.util.concurrent.CompletableFuture.supplyAsync {
+            queryDefects(query, pageSize)
         }
 
-        // Query defects
         try {
-            results.addAll(queryDefects(query, pageSize))
+            results.addAll(storiesFuture.get())
         } catch (e: Exception) {
-            errors.add("Defects: ${e.message}")
+            errors.add("UserStories: ${e.cause?.message ?: e.message}")
+        }
+
+        try {
+            results.addAll(defectsFuture.get())
+        } catch (e: Exception) {
+            errors.add("Defects: ${e.cause?.message ?: e.message}")
         }
 
         // If both queries failed, throw so the UI can show the error
@@ -317,7 +394,9 @@ class RallyApiClient(
         }
 
         // Sort by last update date (most recent first)
-        return results.sortedByDescending { it.lastUpdateDate }
+        val sorted = results.sortedByDescending { it.lastUpdateDate }
+        putCache(cacheKey, sorted)
+        return sorted
     }
 
     /**
@@ -462,6 +541,9 @@ class RallyApiClient(
      * Query tasks linked to a work product (user story/defect).
      */
     fun queryTasksForWorkProduct(workProductRef: String, pageSize: Int = DEFAULT_PAGE_SIZE): List<RallyTaskItem> {
+        val cacheKey = "tasks:$workProductRef"
+        getCached<List<RallyTaskItem>>(cacheKey)?.let { return it }
+
         val query = "(WorkProduct = \"$workProductRef\")"
         val encodedQuery = URLEncoder.encode(query, StandardCharsets.UTF_8)
 
@@ -478,6 +560,7 @@ class RallyApiClient(
 
         val type = object : TypeToken<RallyQueryResult<RallyTaskItem>>() {}.type
         val result: RallyQueryResult<RallyTaskItem> = gson.fromJson(response.body(), type)
+        putCache(cacheKey, result.queryResult.results)
         return result.queryResult.results
     }
 
@@ -485,6 +568,9 @@ class RallyApiClient(
      * Query test cases linked to a work product (user story/defect).
      */
     fun queryTestCases(workProductRef: String, pageSize: Int = DEFAULT_PAGE_SIZE): List<RallyTestCase> {
+        val cacheKey = "testcases:$workProductRef"
+        getCached<List<RallyTestCase>>(cacheKey)?.let { return it }
+
         val query = "(WorkProduct = \"$workProductRef\")"
         val encodedQuery = URLEncoder.encode(query, StandardCharsets.UTF_8)
 
@@ -501,6 +587,7 @@ class RallyApiClient(
 
         val type = object : TypeToken<RallyQueryResult<RallyTestCase>>() {}.type
         val result: RallyQueryResult<RallyTestCase> = gson.fromJson(response.body(), type)
+        putCache(cacheKey, result.queryResult.results)
         return result.queryResult.results
     }
 
@@ -527,6 +614,9 @@ class RallyApiClient(
      * Query attachments for a given artifact FormattedID.
      */
     fun queryAttachments(artifactFormattedId: String): List<RallyAttachment> {
+        val cacheKey = "attachments:$artifactFormattedId"
+        getCached<List<RallyAttachment>>(cacheKey)?.let { return it }
+
         val query = "(Artifact.FormattedID = \"$artifactFormattedId\")"
         val encodedQuery = URLEncoder.encode(query, StandardCharsets.UTF_8)
 
@@ -543,6 +633,7 @@ class RallyApiClient(
 
         val type = object : TypeToken<RallyQueryResult<RallyAttachment>>() {}.type
         val result: RallyQueryResult<RallyAttachment> = gson.fromJson(response.body(), type)
+        putCache(cacheKey, result.queryResult.results)
         return result.queryResult.results
     }
 
@@ -632,6 +723,9 @@ class RallyApiClient(
      * Returns raw bytes.
      */
     fun downloadAttachment(url: String): ByteArray {
+        // Images rarely change — use permanent cache
+        imageCache[url]?.let { return it }
+
         val request = HttpRequest.newBuilder()
             .uri(URI.create(url))
             .header(ZSESSION_HEADER, apiKey)
@@ -649,7 +743,9 @@ class RallyApiClient(
             throw RallyApiException("Download failed with status ${response.statusCode()}", response.statusCode(), null)
         }
 
-        return response.body()
+        val bytes = response.body()
+        imageCache[url] = bytes
+        return bytes
     }
 
     /**
