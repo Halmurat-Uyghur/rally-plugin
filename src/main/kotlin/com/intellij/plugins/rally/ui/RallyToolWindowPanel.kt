@@ -107,7 +107,7 @@ class RallyToolWindowPanel(private val project: Project) {
     private fun setupUI() {
         // Toolbar
         val toolbar = JPanel(FlowLayout(FlowLayout.LEFT, 4, 2))
-        toolbar.add(createButton("Refresh", AllIcons.Actions.Refresh) { loadTickets() })
+        toolbar.add(createButton("Refresh", AllIcons.Actions.Refresh) { currentClient?.clearCache(); loadTickets() })
         toolbar.add(createButton("Open in Browser", AllIcons.General.Web) { openInBrowser() })
         toolbar.add(JSeparator(SwingConstants.VERTICAL).apply { preferredSize = java.awt.Dimension(2, 24) })
         toolbar.add(createButton("Defined", AllIcons.Actions.MoveToButton) { changeState("Defined") })
@@ -348,7 +348,15 @@ class RallyToolWindowPanel(private val project: Project) {
                 val query = buildQuery(scope, settings)
                 val pageSize = if (scope == "Recent Activity") 20 else settings.pageSize
 
-                val artifacts = client.queryAllArtifacts(query, pageSize)
+                // Load artifacts and sprint summary in parallel
+                val artifactsFuture = java.util.concurrent.CompletableFuture.supplyAsync {
+                    client.queryAllArtifacts(query, pageSize)
+                }
+                val sprintFuture = java.util.concurrent.CompletableFuture.runAsync {
+                    loadSprintSummary(client, settings)
+                }
+
+                val artifacts = artifactsFuture.get()
 
                 // Client-side filtering for state and type
                 val filtered = applyClientFilter(scope, stateFilter, artifacts)
@@ -367,8 +375,8 @@ class RallyToolWindowPanel(private val project: Project) {
                     }
                 }
 
-                // Also load sprint summary
-                loadSprintSummary(client, settings)
+                // Wait for sprint summary to finish (it updates UI itself)
+                try { sprintFuture.get() } catch (_: Exception) {}
 
             } catch (e: Exception) {
                 LOG.error("Failed to load Rally tickets", e)
@@ -850,6 +858,7 @@ class RallyToolWindowPanel(private val project: Project) {
                         "Rally - State Change"
                     )
                 }
+                client.clearCache() // Invalidate after state change
                 loadTickets() // Refresh
             }
         }
