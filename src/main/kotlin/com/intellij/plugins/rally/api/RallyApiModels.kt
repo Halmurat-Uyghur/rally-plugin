@@ -287,3 +287,87 @@ data class RallyIteration(
     @SerializedName("PlannedVelocity")
     val plannedVelocity: Double? = null
 )
+
+/**
+ * Rally Test Case
+ */
+data class RallyTestCase(
+    @SerializedName("_ref")
+    val ref: String? = null,
+
+    @SerializedName("ObjectID")
+    val objectID: String? = null,
+
+    @SerializedName("FormattedID")
+    val formattedID: String? = null,
+
+    @SerializedName("Name")
+    val name: String? = null,
+
+    @SerializedName("Method")
+    val method: String? = null,
+
+    @SerializedName("Type")
+    val type: String? = null,
+
+    @SerializedName("LastVerdict")
+    val lastVerdict: String? = null,
+
+    @SerializedName("LastRun")
+    val lastRun: String? = null,
+
+    @SerializedName("Owner")
+    val owner: RallyUser? = null,
+
+    @SerializedName("WorkProduct")
+    val workProduct: RallyRef? = null,
+
+    @SerializedName("Description")
+    val description: String? = null,
+
+    @SerializedName("Priority")
+    val priority: String? = null
+)
+
+/**
+ * Rally Test Case Step
+ */
+data class RallyTestCaseStep(
+    @SerializedName("_ref")
+    val ref: String? = null,
+
+    @SerializedName("StepIndex")
+    val stepIndex: Int? = null,
+
+    @SerializedName("Input")
+    val input: String? = null,
+
+    @SerializedName("ExpectedResult")
+    val expectedResult: String? = null
+)
+
+/**
+ * Rally Attachment
+ */
+data class RallyAttachment(
+    @SerializedName("_ref")
+    val ref: String? = null,
+
+    @SerializedName("ObjectID")
+    val objectID: String? = null,
+
+    @SerializedName("Name")
+    val name: String? = null,
+
+    @SerializedName("ContentType")
+    val contentType: String? = null,
+
+    @SerializedName("Size")
+    val size: Long? = null,
+
+    @SerializedName("Description")
+    val description: String? = null,
+
+    @SerializedName("Content")
+    val content: RallyRef? = null
+)

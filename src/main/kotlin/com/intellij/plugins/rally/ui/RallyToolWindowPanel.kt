@@ -13,6 +13,7 @@ import com.intellij.plugins.rally.api.RallyDefect
 import com.intellij.plugins.rally.api.RallyIteration
 import com.intellij.plugins.rally.api.RallyProject
 import com.intellij.plugins.rally.api.RallyUserStory
+import com.intellij.plugins.rally.export.RallyExporter
 import com.intellij.plugins.rally.settings.RallySettings
 import com.intellij.ui.JBColor
 import com.intellij.ui.SearchTextField
@@ -40,6 +41,7 @@ class RallyToolWindowPanel(private val project: Project) {
             "Defects",
             "Recent Activity"
         )
+        private const val DIVIDER_THICKNESS = 3
         private val STATE_OPTIONS = arrayOf(
             "Any State",
             "Idea",
@@ -63,6 +65,9 @@ class RallyToolWindowPanel(private val project: Project) {
     private val statsLabel = JBLabel("0 items")
     private val sprintLabel = JBLabel("")
     private val statusLabel = JBLabel("Ready")
+
+    private val detailPanel = RallyDetailPanel(project)
+    private var mainSplitPane: JSplitPane? = null
 
     private var allArtifacts: List<RallyArtifact> = emptyList()
     private var currentClient: RallyApiClient? = null
@@ -108,6 +113,9 @@ class RallyToolWindowPanel(private val project: Project) {
         toolbar.add(createButton("Defined", AllIcons.Actions.MoveToButton) { changeState("Defined") })
         toolbar.add(createButton("In-Progress", AllIcons.Actions.Execute) { changeState("In-Progress") })
         toolbar.add(createButton("Completed", AllIcons.Actions.Checked) { changeState("Completed") })
+        toolbar.add(JSeparator(SwingConstants.VERTICAL).apply { preferredSize = java.awt.Dimension(2, 24) })
+        toolbar.add(createButton("Export", AllIcons.ToolbarDecorator.Export) { exportSelectedArtifact() })
+        toolbar.add(createButton("Bulk Export", AllIcons.Actions.Download) { bulkExport() })
         toolbar.add(Box.createHorizontalGlue())
         toolbar.add(statsLabel)
 
@@ -143,7 +151,20 @@ class RallyToolWindowPanel(private val project: Project) {
                     isSelected: Boolean, cellHasFocus: Boolean
                 ): Component {
                     val comp = super.getListCellRendererComponent(list, value, index, isSelected, cellHasFocus)
-                    toolTipText = value?.toString()
+                    val name = value?.toString() ?: ""
+                    // Look up iteration dates from cache (index 0 = "All Sprints", so offset by 1)
+                    val iterIndex = if (index > 0) index - 1 else -1
+                    if (iterIndex in cachedIterations.indices) {
+                        val iter = cachedIterations[iterIndex]
+                        val start = iter.startDate?.take(10) ?: ""
+                        val end = iter.endDate?.take(10) ?: ""
+                        if (start.isNotBlank() && end.isNotBlank()) {
+                            text = "$name  ($start → $end)"
+                            toolTipText = "$name: $start to $end"
+                        }
+                    } else {
+                        toolTipText = name
+                    }
                     return comp
                 }
             }
@@ -165,6 +186,18 @@ class RallyToolWindowPanel(private val project: Project) {
         artifactList.emptyText.text = "No tickets loaded. Configure Rally in Settings → Tools → Rally, then click Refresh."
         val scrollPane = JBScrollPane(artifactList)
 
+        // Split pane: ticket list (left) + detail panel (right)
+        // Detail panel starts collapsed; expands when a ticket is selected
+        val splitPane = JSplitPane(JSplitPane.HORIZONTAL_SPLIT, scrollPane, detailPanel.component)
+        splitPane.resizeWeight = 1.0
+        splitPane.border = null
+        splitPane.dividerSize = 0
+        splitPane.setUI(ThinDividerSplitPaneUI())
+        detailPanel.component.minimumSize = java.awt.Dimension(0, 0)
+        mainSplitPane = splitPane
+        // Push divider to the right edge after layout completes
+        SwingUtilities.invokeLater { splitPane.dividerLocation = splitPane.width }
+
         // Bottom sprint + status
         val bottomPanel = JPanel(BorderLayout())
         bottomPanel.border = JBUI.Borders.empty(2, 6)
@@ -173,7 +206,7 @@ class RallyToolWindowPanel(private val project: Project) {
 
         // Assemble
         mainPanel.add(topPanel, BorderLayout.NORTH)
-        mainPanel.add(scrollPane, BorderLayout.CENTER)
+        mainPanel.add(splitPane, BorderLayout.CENTER)
         mainPanel.add(bottomPanel, BorderLayout.SOUTH)
     }
 
@@ -216,6 +249,27 @@ class RallyToolWindowPanel(private val project: Project) {
             }
         })
 
+        // Selection listener for detail panel
+        artifactList.addListSelectionListener {
+            if (!it.valueIsAdjusting) {
+                val selected = artifactList.selectedValue
+                detailPanel.showArtifact(selected, currentClient)
+                val sp = mainSplitPane ?: return@addListSelectionListener
+                if (selected != null) {
+                    // Auto-expand detail panel if collapsed
+                    val detailWidth = sp.width - sp.dividerLocation - sp.dividerSize
+                    if (detailWidth < 100) {
+                        sp.dividerSize = DIVIDER_THICKNESS
+                        sp.dividerLocation = (sp.width * 0.55).toInt()
+                    }
+                } else {
+                    // Auto-collapse detail panel when nothing is selected
+                    sp.dividerSize = 0
+                    sp.dividerLocation = sp.width
+                }
+            }
+        }
+
         // Double-click to open in browser
         artifactList.addMouseListener(object : MouseAdapter() {
             override fun mouseClicked(e: MouseEvent) {
@@ -250,6 +304,8 @@ class RallyToolWindowPanel(private val project: Project) {
         menu.add(JMenuItem("Set In-Progress").apply { addActionListener { changeState("In-Progress") } })
         menu.add(JMenuItem("Set Completed").apply { addActionListener { changeState("Completed") } })
         menu.add(JMenuItem("Set Defined").apply { addActionListener { changeState("Defined") } })
+        menu.addSeparator()
+        menu.add(JMenuItem("Export to JSON/Markdown").apply { addActionListener { exportSelectedArtifact() } })
         menu.show(artifactList, e.x, e.y)
     }
 
@@ -300,6 +356,7 @@ class RallyToolWindowPanel(private val project: Project) {
                 ApplicationManager.getApplication().invokeLater {
                     if (project.isDisposed) return@invokeLater
                     allArtifacts = filtered
+                    detailPanel.clear()
                     applySearchFilter()
                     loading = false
                     statusLabel.text = "${filtered.size} loaded"
@@ -375,7 +432,9 @@ class RallyToolWindowPanel(private val project: Project) {
 
     private fun loadIterations(client: RallyApiClient) {
         try {
-            val iterations = client.queryIterations()
+            val rawIterations = client.queryIterations()
+            // Deduplicate by name — Rally returns the same iteration per project
+            val iterations = rawIterations.distinctBy { it.name }
             cachedIterations = iterations
 
             // Use invokeAndWait so the combo is fully populated before
@@ -448,11 +507,13 @@ class RallyToolWindowPanel(private val project: Project) {
             conditions.add("(Iteration.Name = \"$selectedIter\")")
         }
 
-        return when (conditions.size) {
+        val query = when (conditions.size) {
             0 -> null
             1 -> conditions[0]
             else -> conditions.reduce { acc, cond -> "(($acc) AND ($cond))" }
         }
+        LOG.info("Rally query: $query (scope=$scope, iteration='$selectedIter', username='${settings.username}')")
+        return query
     }
 
     private fun applyClientFilter(scope: String, stateFilter: String, artifacts: List<RallyArtifact>): List<RallyArtifact> {
@@ -587,6 +648,164 @@ class RallyToolWindowPanel(private val project: Project) {
         clipboard.setContents(java.awt.datatransfer.StringSelection(id), null)
     }
 
+    private fun exportSelectedArtifact() {
+        val selected = artifactList.selectedValuesList
+        if (selected.isEmpty()) {
+            Messages.showInfoMessage(project, "Select one or more tickets to export.", "Rally")
+            return
+        }
+
+        val settings = RallySettings.getInstance()
+        val outputDir = settings.exportDirectory.ifBlank {
+            project.basePath?.let { "$it/rally_testcases" } ?: "rally_testcases"
+        }
+
+        statusLabel.text = "Exporting..."
+
+        ApplicationManager.getApplication().executeOnPooledThread {
+            val client = getClient()
+            val exporter = RallyExporter(client)
+            var artifactSuccess = 0
+            var artifactFailed = 0
+            var tcExported = 0
+            var tcFailed = 0
+
+            for (artifact in selected) {
+                val id = artifact.formattedID ?: continue
+                try {
+                    exporter.exportArtifactJson(id, outputDir)
+                    exporter.exportArtifactMarkdown(id, outputDir)
+                    artifactSuccess++
+                } catch (e: Exception) {
+                    LOG.error("Failed to export $id", e)
+                    artifactFailed++
+                }
+
+                // Also export linked test cases
+                val ref = artifact.ref ?: continue
+                try {
+                    val testCases = client.queryTestCases(ref)
+                    for (tc in testCases) {
+                        val tcId = tc.formattedID ?: continue
+                        try {
+                            exporter.exportTestCaseJson(tcId, outputDir)
+                            exporter.exportTestCaseMarkdown(tcId, outputDir)
+                            tcExported++
+                        } catch (e: Exception) {
+                            LOG.warn("Failed to export test case $tcId", e)
+                            tcFailed++
+                        }
+                    }
+                } catch (e: Exception) {
+                    LOG.warn("Failed to query test cases for $id", e)
+                }
+            }
+
+            ApplicationManager.getApplication().invokeLater {
+                if (project.isDisposed) return@invokeLater
+                statusLabel.text = "Exported $artifactSuccess artifact(s), $tcExported test case(s)"
+                val summary = buildString {
+                    append("Exported to:\n$outputDir\n\n")
+                    append("Artifacts: $artifactSuccess exported")
+                    if (artifactFailed > 0) append(", $artifactFailed failed")
+                    append("\nTest Cases: $tcExported exported")
+                    if (tcFailed > 0) append(", $tcFailed failed")
+                }
+                Messages.showMessageDialog(
+                    project,
+                    summary,
+                    "Rally - Export",
+                    Messages.getInformationIcon()
+                )
+            }
+        }
+    }
+
+    private fun bulkExport() {
+        if (allArtifacts.isEmpty()) {
+            Messages.showInfoMessage(project, "No tickets loaded. Load tickets first, then bulk export.", "Rally")
+            return
+        }
+
+        val settings = RallySettings.getInstance()
+        val outputDir = settings.exportDirectory.ifBlank {
+            project.basePath?.let { "$it/rally_export" } ?: "rally_export"
+        }
+
+        val scope = scopeCombo.selectedItem as? String ?: "All Tickets"
+        val stateFilter = stateCombo.selectedItem as? String ?: "Any State"
+        val filterDesc = if (stateFilter == "Any State") scope else "$scope / $stateFilter"
+
+        val confirm = Messages.showYesNoDialog(
+            project,
+            "Bulk export ${allArtifacts.size} artifacts ($filterDesc) to:\n$outputDir\n\nThis exports a single consolidated file for AI analysis.",
+            "Rally - Bulk Export",
+            Messages.getQuestionIcon()
+        )
+        if (confirm != Messages.YES) return
+
+        val total = allArtifacts.size
+        statusLabel.text = "Exporting 0/$total..."
+
+        ApplicationManager.getApplication().executeOnPooledThread {
+            try {
+                val client = getClient()
+                val exporter = RallyExporter(client)
+                val timestamp = java.time.LocalDate.now().toString()
+                val fileName = "rally_bulk_${timestamp}"
+
+                ApplicationManager.getApplication().invokeLater {
+                    if (!project.isDisposed) statusLabel.text = "Exporting JSON 0/$total..."
+                }
+                val jsonCount = exporter.bulkExportJson(allArtifacts, outputDir, fileName) { processed ->
+                    ApplicationManager.getApplication().invokeLater {
+                        if (!project.isDisposed) statusLabel.text = "Exporting JSON $processed/$total..."
+                    }
+                }
+
+                ApplicationManager.getApplication().invokeLater {
+                    if (!project.isDisposed) statusLabel.text = "Exporting Markdown 0/$total..."
+                }
+                exporter.bulkExportMarkdown(allArtifacts, outputDir, fileName) { processed ->
+                    ApplicationManager.getApplication().invokeLater {
+                        if (!project.isDisposed) statusLabel.text = "Exporting Markdown $processed/$total..."
+                    }
+                }
+
+                // Verify files actually exist before declaring success
+                val jsonFile = java.io.File(outputDir, "$fileName.json")
+                val mdFile = java.io.File(outputDir, "$fileName.md")
+
+                ApplicationManager.getApplication().invokeLater {
+                    if (project.isDisposed) return@invokeLater
+                    if (jsonFile.exists() && mdFile.exists()) {
+                        statusLabel.text = "Exported $jsonCount artifacts"
+                        Messages.showMessageDialog(
+                            project,
+                            "Bulk exported $jsonCount artifacts to:\n${jsonFile.absolutePath}\n${mdFile.absolutePath}\n\nFeed these files to AI for defect pattern analysis.",
+                            "Rally - Bulk Export",
+                            Messages.getInformationIcon()
+                        )
+                    } else {
+                        statusLabel.text = "Export failed — files not written"
+                        Messages.showErrorDialog(
+                            project,
+                            "Export completed but files were not found at:\n$outputDir\n\nCheck that the directory is writable.",
+                            "Rally - Export Error"
+                        )
+                    }
+                }
+            } catch (e: Exception) {
+                LOG.error("Bulk export failed", e)
+                ApplicationManager.getApplication().invokeLater {
+                    if (project.isDisposed) return@invokeLater
+                    statusLabel.text = "Export failed"
+                    Messages.showErrorDialog(project, "Bulk export failed: ${e.message}", "Rally - Error")
+                }
+            }
+        }
+    }
+
     private fun changeState(newState: String) {
         val selected = artifactList.selectedValuesList
         if (selected.isEmpty()) {
@@ -719,6 +938,20 @@ class RallyToolWindowPanel(private val project: Project) {
             panel.add(rightPanel, BorderLayout.EAST)
 
             return panel
+        }
+    }
+}
+
+/**
+ * Custom SplitPane UI that draws a thin dark line instead of the default thick divider.
+ */
+private class ThinDividerSplitPaneUI : javax.swing.plaf.basic.BasicSplitPaneUI() {
+    override fun createDefaultDivider(): javax.swing.plaf.basic.BasicSplitPaneDivider {
+        return object : javax.swing.plaf.basic.BasicSplitPaneDivider(this) {
+            override fun paint(g: java.awt.Graphics) {
+                g.color = JBColor(Color(80, 80, 80), Color(70, 70, 70))
+                g.fillRect(0, 0, width, height)
+            }
         }
     }
 }
