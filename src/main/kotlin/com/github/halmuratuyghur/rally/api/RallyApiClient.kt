@@ -9,7 +9,10 @@ import java.net.http.HttpClient
 import java.net.http.HttpRequest
 import java.net.http.HttpResponse
 import java.nio.charset.StandardCharsets
+import java.nio.file.Files
+import java.nio.file.Path
 import java.time.Duration
+import java.util.Base64
 import java.util.concurrent.ConcurrentHashMap
 
 /**
@@ -53,17 +56,22 @@ class RallyApiClient(
     }
 
     /**
-     * Clear all caches. Call after state changes (updates) or manual refresh.
+     * Clear all query caches (preserves image cache — images never change).
+     * Call on manual Refresh to get fully fresh data from Rally.
      */
     fun clearCache() {
         queryCache.clear()
     }
 
     /**
-     * Clear only artifact list caches (keeps detail/image caches).
+     * Clear only artifact list caches (keeps detail/description/image caches).
+     * Call after local state changes (create, update) where only the list is stale
+     * but detail data we just wrote is still correct.
      */
     fun clearArtifactCache() {
-        queryCache.keys.removeAll { it.startsWith("artifacts:") || it.startsWith("sprint:") }
+        queryCache.keys.removeAll {
+            it.startsWith("artifacts:") || it.startsWith("sprint:") || it.startsWith("currentIteration:")
+        }
     }
 
     companion object {
@@ -764,5 +772,56 @@ class RallyApiClient(
         }
         val obj = createResult.getAsJsonObject("Object")
         return gson.fromJson(obj, RallyUserStory::class.java)
+    }
+
+    /**
+     * Upload a file as an attachment to a Rally artifact.
+     * Rally requires a two-step process:
+     * 1. Create AttachmentContent with base64-encoded file data
+     * 2. Create Attachment linking the content to the artifact
+     */
+    fun uploadAttachment(artifactRef: String, filePath: Path): RallyAttachment {
+        val fileName = filePath.fileName.toString()
+        val fileBytes = Files.readAllBytes(filePath)
+        val fileSize = fileBytes.size.toLong()
+        val contentType = Files.probeContentType(filePath) ?: "application/octet-stream"
+        val base64Content = Base64.getEncoder().encodeToString(fileBytes)
+
+        // Step 1: Create AttachmentContent
+        val contentUrl = buildApiUrl("attachmentcontent/create")
+        val contentBody = """{"AttachmentContent":{"Content":"$base64Content"}}"""
+        val contentResponse = executePost(contentUrl, contentBody)
+        handleResponse(contentResponse)
+
+        val contentJson = JsonParser.parseString(contentResponse.body()).asJsonObject
+        val contentResult = contentJson.getAsJsonObject("CreateResult")
+        val contentErrors = contentResult?.getAsJsonArray("Errors")
+        if (contentErrors != null && contentErrors.size() > 0) {
+            throw RallyApiException("Failed to create attachment content: ${contentErrors.joinToString()}")
+        }
+        val contentRef = contentResult.getAsJsonObject("Object")?.get("_ref")?.asString
+            ?: throw RallyApiException("No _ref in AttachmentContent create response")
+
+        // Step 2: Create Attachment linking content to artifact
+        val attachFields = mutableMapOf<String, Any>(
+            "Content" to contentRef,
+            "Name" to fileName,
+            "ContentType" to contentType,
+            "Size" to fileSize,
+            "Artifact" to artifactRef
+        )
+        val attachUrl = buildApiUrl("attachment/create")
+        val attachBody = """{"Attachment":${gson.toJson(attachFields)}}"""
+        val attachResponse = executePost(attachUrl, attachBody)
+        handleResponse(attachResponse)
+
+        val attachJson = JsonParser.parseString(attachResponse.body()).asJsonObject
+        val attachResult = attachJson.getAsJsonObject("CreateResult")
+        val attachErrors = attachResult?.getAsJsonArray("Errors")
+        if (attachErrors != null && attachErrors.size() > 0) {
+            throw RallyApiException("Failed to create attachment: ${attachErrors.joinToString()}")
+        }
+        val attachObj = attachResult.getAsJsonObject("Object")
+        return gson.fromJson(attachObj, RallyAttachment::class.java)
     }
 }
