@@ -33,6 +33,7 @@ class RallyDetailPanel(private val project: Project) {
         private const val TAB_TEST_CASES = 0
         private const val TAB_TASKS = 1
         private const val TAB_ATTACHMENTS = 2
+        private const val TAB_TEST_STEPS = 3
     }
 
     val component: JPanel = JPanel(BorderLayout())
@@ -58,12 +59,45 @@ class RallyDetailPanel(private val project: Project) {
     private val attachmentListModel = DefaultListModel<RallyAttachment>()
     private val attachmentList = JBList(attachmentListModel)
 
+    // Test Steps
+    private val stepListModel = DefaultListModel<RallyTestCaseStep>()
+    private val stepList = JBList(stepListModel)
+
     // Tabbed pane
     private val tabbedPane = JBTabbedPane()
 
     private var currentArtifactRef: String? = null
     private var currentArtifact: RallyArtifact? = null
     private var currentClient: RallyApiClient? = null
+
+    // Header action buttons
+    private val copyButton = JLabel(AllIcons.Actions.Copy).apply {
+        toolTipText = "Copy FormattedID"
+        cursor = Cursor.getPredefinedCursor(Cursor.HAND_CURSOR)
+        isVisible = false
+        border = JBUI.Borders.empty(0, 4)
+        addMouseListener(object : MouseAdapter() {
+            override fun mouseClicked(e: MouseEvent) {
+                val id = currentArtifact?.formattedID ?: return
+                val clipboard = java.awt.Toolkit.getDefaultToolkit().systemClipboard
+                clipboard.setContents(java.awt.datatransfer.StringSelection(id), null)
+            }
+        })
+    }
+
+    private val browserButton = JLabel(AllIcons.General.Web).apply {
+        toolTipText = "Open in Browser"
+        cursor = Cursor.getPredefinedCursor(Cursor.HAND_CURSOR)
+        isVisible = false
+        border = JBUI.Borders.empty(0, 4)
+        addMouseListener(object : MouseAdapter() {
+            override fun mouseClicked(e: MouseEvent) {
+                val artifact = currentArtifact ?: return
+                val client = currentClient ?: return
+                BrowserUtil.browse(client.buildWebUrl(artifact))
+            }
+        })
+    }
 
     init {
         setupUI()
@@ -77,7 +111,12 @@ class RallyDetailPanel(private val project: Project) {
         headerLabel.font = headerLabel.font.deriveFont(Font.BOLD, 13f)
         headerPanel.add(headerLabel, BorderLayout.CENTER)
         stateBadge.border = JBUI.Borders.empty(2, 8)
-        headerPanel.add(stateBadge, BorderLayout.EAST)
+        val headerRightPanel = JPanel(FlowLayout(FlowLayout.RIGHT, 2, 0))
+        headerRightPanel.isOpaque = false
+        headerRightPanel.add(copyButton)
+        headerRightPanel.add(browserButton)
+        headerRightPanel.add(stateBadge)
+        headerPanel.add(headerRightPanel, BorderLayout.EAST)
 
         // Description
         val descScrollPane = JBScrollPane(descriptionPane)
@@ -105,10 +144,17 @@ class RallyDetailPanel(private val project: Project) {
         attachmentList.emptyText.text = "No attachments"
         val attachmentScrollPane = JBScrollPane(attachmentList)
 
-        // Tabbed pane with 3 tabs
+        // Test Steps tab
+        stepList.cellRenderer = StepCellRenderer()
+        stepList.selectionMode = ListSelectionModel.SINGLE_SELECTION
+        stepList.emptyText.text = "Select a test case to view steps"
+        val stepScrollPane = JBScrollPane(stepList)
+
+        // Tabbed pane with 4 tabs
         tabbedPane.addTab("Test Cases", tcPanel)
         tabbedPane.addTab("Tasks", taskScrollPane)
         tabbedPane.addTab("Attachments", attachmentScrollPane)
+        tabbedPane.addTab("Test Steps (0)", stepScrollPane)
 
         // Split: description (40%) / tabbed pane (60%) with thin dark divider
         val splitPane = JSplitPane(JSplitPane.VERTICAL_SPLIT, descScrollPane, tabbedPane)
@@ -140,7 +186,7 @@ class RallyDetailPanel(private val project: Project) {
                 if (e.isPopupTrigger) showTestCaseContextMenu(e)
             }
             override fun mouseClicked(e: MouseEvent) {
-                if (e.clickCount == 2) openTestCaseInBrowser()
+                if (e.clickCount == 2) loadTestSteps()
             }
         })
 
@@ -186,6 +232,8 @@ class RallyDetailPanel(private val project: Project) {
         val id = artifact.formattedID ?: "?"
         val name = artifact.name ?: "Untitled"
         headerLabel.text = "$id: $name"
+        copyButton.isVisible = true
+        browserButton.isVisible = true
 
         val state = artifact.scheduleState ?: artifact.state ?: "Unknown"
         stateBadge.text = state
@@ -200,11 +248,13 @@ class RallyDetailPanel(private val project: Project) {
             descriptionPane.text = wrapHtml("<i>Loading description...</i>")
         }
 
-        // Clear all lists and set loading state
+        // Reset to first tab and clear all lists
+        tabbedPane.selectedIndex = TAB_TEST_CASES
         testCaseListModel.clear()
         testCaseSummaryLabel.text = "Loading..."
         taskListModel.clear()
         attachmentListModel.clear()
+        stepListModel.clear()
         updateTabTitles(0, 0, 0)
 
         // Load description, test cases, tasks, and attachments in parallel
@@ -312,11 +362,14 @@ class RallyDetailPanel(private val project: Project) {
         currentClient = null
         headerLabel.text = "Select a ticket to view details"
         stateBadge.text = ""
+        copyButton.isVisible = false
+        browserButton.isVisible = false
         descriptionPane.text = ""
         testCaseListModel.clear()
         testCaseSummaryLabel.text = ""
         taskListModel.clear()
         attachmentListModel.clear()
+        stepListModel.clear()
         updateTabTitles(0, 0, 0)
     }
 
@@ -324,6 +377,7 @@ class RallyDetailPanel(private val project: Project) {
         tabbedPane.setTitleAt(TAB_TEST_CASES, "Test Cases ($testCases)")
         tabbedPane.setTitleAt(TAB_TASKS, "Tasks ($tasks)")
         tabbedPane.setTitleAt(TAB_ATTACHMENTS, "Attachments ($attachments)")
+        tabbedPane.setTitleAt(TAB_TEST_STEPS, "Test Steps (0)")
     }
 
     // ── Test Case Context Menu ──────────────────────────────────
@@ -336,9 +390,9 @@ class RallyDetailPanel(private val project: Project) {
         }
 
         val menu = JPopupMenu()
-        menu.add(JMenuItem("Mark Automated").apply {
-            icon = AllIcons.Actions.Checked
-            addActionListener { markSelectedTestCases("Method", "Automated") }
+        menu.add(JMenuItem("View Test Steps").apply {
+            icon = AllIcons.Actions.ListFiles
+            addActionListener { loadTestSteps() }
         })
         menu.addSeparator()
         menu.add(JMenuItem("Export to JSON/Markdown").apply {
@@ -351,52 +405,6 @@ class RallyDetailPanel(private val project: Project) {
             addActionListener { openTestCaseInBrowser() }
         })
         menu.show(testCaseList, e.x, e.y)
-    }
-
-    private fun markSelectedTestCases(field: String, value: String) {
-        val selected = testCaseList.selectedValuesList
-        if (selected.isEmpty()) return
-        val client = currentClient ?: return
-        val artifactRef = currentArtifactRef
-
-        val fieldLabel = if (field == "Method") "Automated" else "Automatable = Yes"
-        val ids = selected.mapNotNull { it.formattedID }.joinToString(", ")
-        val confirm = Messages.showYesNoDialog(
-            project,
-            "Set $fieldLabel on ${selected.size} test case(s)?\n$ids",
-            "Rally - Update Test Cases",
-            Messages.getQuestionIcon()
-        )
-        if (confirm != Messages.YES) return
-
-        ApplicationManager.getApplication().executeOnPooledThread {
-            var success = 0
-            var failed = 0
-            for (tc in selected) {
-                try {
-                    val ref = tc.ref ?: continue
-                    client.updateTestCaseField(ref, field, value)
-                    success++
-                } catch (e: Exception) {
-                    LOG.error("Failed to update ${tc.formattedID}", e)
-                    failed++
-                }
-            }
-
-            ApplicationManager.getApplication().invokeLater {
-                if (failed > 0) {
-                    Messages.showWarningDialog(
-                        project,
-                        "Updated: $success, Failed: $failed",
-                        "Rally - Test Case Update"
-                    )
-                }
-                // Refresh
-                if (currentArtifactRef == artifactRef) {
-                    showArtifact(currentArtifact, currentClient)
-                }
-            }
-        }
     }
 
     private fun exportSelectedTestCases(json: Boolean, markdown: Boolean) {
@@ -428,8 +436,38 @@ class RallyDetailPanel(private val project: Project) {
                     project,
                     "Exported $success/${selected.size} test case(s) to:\n$outputDir",
                     "Rally - Export",
-                    Messages.getInformationIcon()
+                    AllIcons.General.InspectionsOK
                 )
+            }
+        }
+    }
+
+    private fun loadTestSteps() {
+        val selected = testCaseList.selectedValue ?: return
+        val tcId = selected.formattedID ?: return
+        val client = currentClient ?: return
+        val artifactRef = currentArtifactRef
+
+        stepListModel.clear()
+        tabbedPane.setTitleAt(TAB_TEST_STEPS, "Test Steps (...)")
+        tabbedPane.selectedIndex = TAB_TEST_STEPS
+
+        ApplicationManager.getApplication().executeOnPooledThread {
+            val steps = try {
+                client.queryTestSteps(tcId)
+            } catch (ex: Exception) {
+                LOG.warn("Failed to load test steps for $tcId", ex)
+                null
+            }
+            ApplicationManager.getApplication().invokeLater {
+                if (currentArtifactRef != artifactRef) return@invokeLater
+                stepListModel.clear()
+                if (steps != null) {
+                    steps.forEach { stepListModel.addElement(it) }
+                    tabbedPane.setTitleAt(TAB_TEST_STEPS, "Test Steps (${steps.size})")
+                } else {
+                    tabbedPane.setTitleAt(TAB_TEST_STEPS, "Test Steps (!)")
+                }
             }
         }
     }
@@ -519,7 +557,7 @@ class RallyDetailPanel(private val project: Project) {
                         project,
                         "Saved to: ${targetFile.absolutePath}",
                         "Rally - Attachment Saved",
-                        Messages.getInformationIcon()
+                        AllIcons.General.InspectionsOK
                     )
                 }
             } catch (e: Exception) {
@@ -758,6 +796,65 @@ class RallyDetailPanel(private val project: Project) {
             panel.add(rightPanel, BorderLayout.EAST)
 
             return panel
+        }
+    }
+
+    // ── Test Step Cell Renderer ────────────────────────────────
+
+    private class StepCellRenderer : ListCellRenderer<RallyTestCaseStep> {
+        private val htmlTagPattern = Pattern.compile("<[^>]+>")
+
+        override fun getListCellRendererComponent(
+            list: JList<out RallyTestCaseStep>,
+            value: RallyTestCaseStep,
+            index: Int,
+            isSelected: Boolean,
+            cellHasFocus: Boolean
+        ): Component {
+            val panel = JPanel(BorderLayout(8, 0))
+            panel.border = JBUI.Borders.empty(4, 6)
+
+            if (isSelected) {
+                panel.background = list.selectionBackground
+                panel.foreground = list.selectionForeground
+            } else {
+                panel.background = list.background
+                panel.foreground = list.foreground
+            }
+
+            // Step number badge
+            val stepNum = value.stepIndex ?: (index + 1)
+            val badgeLabel = JLabel("#$stepNum")
+            badgeLabel.font = badgeLabel.font.deriveFont(Font.BOLD)
+            badgeLabel.preferredSize = Dimension(32, badgeLabel.preferredSize.height)
+            if (isSelected) badgeLabel.foreground = list.selectionForeground
+
+            // Center: input (primary) + expected result (secondary)
+            val centerPanel = JPanel()
+            centerPanel.layout = BoxLayout(centerPanel, BoxLayout.Y_AXIS)
+            centerPanel.isOpaque = false
+
+            val inputText = stripHtml(value.input ?: "")
+            val inputLabel = JLabel(inputText.ifBlank { "(no input)" })
+            if (isSelected) inputLabel.foreground = list.selectionForeground
+            centerPanel.add(inputLabel)
+
+            val expectedText = stripHtml(value.expectedResult ?: "")
+            if (expectedText.isNotBlank()) {
+                val expectedLabel = JLabel("Expected: $expectedText")
+                expectedLabel.foreground = if (isSelected) list.selectionForeground else JBColor.GRAY
+                expectedLabel.font = expectedLabel.font.deriveFont(expectedLabel.font.size2D - 1f)
+                centerPanel.add(expectedLabel)
+            }
+
+            panel.add(badgeLabel, BorderLayout.WEST)
+            panel.add(centerPanel, BorderLayout.CENTER)
+
+            return panel
+        }
+
+        private fun stripHtml(text: String): String {
+            return htmlTagPattern.matcher(text).replaceAll("").trim()
         }
     }
 

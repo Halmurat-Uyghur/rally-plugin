@@ -687,24 +687,6 @@ class RallyApiClient(
     }
 
     /**
-     * Update a field on a test case.
-     */
-    fun updateTestCaseField(testCaseRef: String, field: String, value: String) {
-        val body = """{"TestCase":{"$field":"$value"}}"""
-        val response = executePost(testCaseRef, body)
-        handleResponse(response)
-
-        val json = JsonParser.parseString(response.body()).asJsonObject
-        val result = json.getAsJsonObject("OperationResult")
-        if (result != null) {
-            val errors = result.getAsJsonArray("Errors")
-            if (errors != null && errors.size() > 0) {
-                throw RallyApiException("Failed to update test case field: ${errors.joinToString()}")
-            }
-        }
-    }
-
-    /**
      * Get attachment content (base64) by fetching the Content ref.
      */
     fun getAttachmentContent(contentRef: String): String {
@@ -751,11 +733,19 @@ class RallyApiClient(
     /**
      * Create a new User Story.
      */
-    fun createUserStory(name: String, projectRef: String?, ownerRef: String? = null): RallyUserStory {
+    fun createUserStory(
+        name: String,
+        projectRef: String?,
+        ownerRef: String? = null,
+        description: String? = null,
+        iterationRef: String? = null
+    ): RallyUserStory {
         val url = buildApiUrl("hierarchicalrequirement/create")
         val fields = mutableMapOf<String, Any>("Name" to name, "ScheduleState" to "Defined")
         if (!projectRef.isNullOrBlank()) fields["Project"] = projectRef
         if (!ownerRef.isNullOrBlank()) fields["Owner"] = ownerRef
+        if (!description.isNullOrBlank()) fields["Description"] = description
+        if (!iterationRef.isNullOrBlank()) fields["Iteration"] = iterationRef
 
         val body = """{"HierarchicalRequirement":${gson.toJson(fields)}}"""
         val response = executePost(url, body)

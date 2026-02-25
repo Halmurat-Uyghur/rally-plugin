@@ -6,7 +6,9 @@ import com.intellij.openapi.application.ApplicationManager
 import com.intellij.openapi.diagnostic.Logger
 import com.intellij.openapi.project.Project
 import com.intellij.openapi.ui.ComboBox
+import com.intellij.openapi.ui.DialogWrapper
 import com.intellij.openapi.ui.Messages
+import com.intellij.openapi.ui.ValidationInfo
 import com.intellij.plugins.rally.api.RallyApiClient
 import com.intellij.plugins.rally.api.RallyArtifact
 import com.intellij.plugins.rally.api.RallyDefect
@@ -20,6 +22,8 @@ import com.intellij.ui.SearchTextField
 import com.intellij.ui.components.JBLabel
 import com.intellij.ui.components.JBList
 import com.intellij.ui.components.JBScrollPane
+import com.intellij.ui.components.JBTextArea
+import com.intellij.ui.components.JBTextField
 import com.intellij.util.ui.JBUI
 import java.awt.BorderLayout
 import java.awt.Color
@@ -85,7 +89,9 @@ class RallyToolWindowPanel(private val project: Project) {
     }
 
     private fun checkInitialConfiguration() {
-        if (!RallySettings.getInstance().isConfigured()) {
+        if (RallySettings.getInstance().isConfigured()) {
+            loadTickets()
+        } else {
             showNotConfigured()
         }
     }
@@ -108,14 +114,13 @@ class RallyToolWindowPanel(private val project: Project) {
         // Toolbar
         val toolbar = JPanel(FlowLayout(FlowLayout.LEFT, 4, 2))
         toolbar.add(createButton("Refresh", AllIcons.Actions.Refresh) { currentClient?.clearCache(); loadTickets() })
-        toolbar.add(createButton("Open in Browser", AllIcons.General.Web) { openInBrowser() })
+        toolbar.add(createButton("Create", AllIcons.General.Add) { showCreateUserStoryDialog() })
         toolbar.add(JSeparator(SwingConstants.VERTICAL).apply { preferredSize = java.awt.Dimension(2, 24) })
         toolbar.add(createButton("Defined", AllIcons.Actions.MoveToButton) { changeState("Defined") })
         toolbar.add(createButton("In-Progress", AllIcons.Actions.Execute) { changeState("In-Progress") })
         toolbar.add(createButton("Completed", AllIcons.Actions.Checked) { changeState("Completed") })
         toolbar.add(JSeparator(SwingConstants.VERTICAL).apply { preferredSize = java.awt.Dimension(2, 24) })
         toolbar.add(createButton("Export", AllIcons.ToolbarDecorator.Export) { exportSelectedArtifact() })
-        toolbar.add(createButton("Bulk Export", AllIcons.Actions.Download) { bulkExport() })
         toolbar.add(Box.createHorizontalGlue())
         toolbar.add(statsLabel)
 
@@ -638,6 +643,160 @@ class RallyToolWindowPanel(private val project: Project) {
 
     // ── Actions ──────────────────────────────────────────────────
 
+    private fun showCreateUserStoryDialog() {
+        val settings = RallySettings.getInstance()
+        if (!settings.isConfigured()) {
+            Messages.showErrorDialog(project, "Configure Rally in Settings → Tools → Rally first.", "Rally")
+            return
+        }
+
+        val dialog = CreateUserStoryDialog()
+        if (!dialog.showAndGet()) return
+
+        val name = dialog.nameField.text.trim()
+        val description = dialog.descriptionArea.text.trim().ifBlank { null }
+        val selectedProjectIndex = dialog.projectCombo.selectedIndex
+        val selectedIterationIndex = dialog.iterationCombo.selectedIndex
+        val assignToMe = dialog.assignToMeCheckbox.isSelected
+
+        statusLabel.text = "Creating..."
+
+        ApplicationManager.getApplication().executeOnPooledThread {
+            try {
+                val client = getClient()
+                val projectRefForCreate = if (selectedProjectIndex > 0 && selectedProjectIndex - 1 < cachedProjects.size) {
+                    cachedProjects[selectedProjectIndex - 1].ref
+                } else {
+                    getSelectedProjectRef()
+                }
+                val iterationRefForCreate = if (selectedIterationIndex > 0 && selectedIterationIndex - 1 < cachedIterations.size) {
+                    cachedIterations[selectedIterationIndex - 1].ref
+                } else {
+                    null
+                }
+                val ownerRef = if (assignToMe) {
+                    try { client.getCurrentUser().ref } catch (_: Exception) { null }
+                } else {
+                    null
+                }
+
+                val created = client.createUserStory(name, projectRefForCreate, ownerRef = ownerRef, description = description, iterationRef = iterationRefForCreate)
+                val createdId = created.formattedID ?: "?"
+
+                ApplicationManager.getApplication().invokeLater {
+                    if (project.isDisposed) return@invokeLater
+                    statusLabel.text = "Created $createdId"
+                    Messages.showInfoMessage(project, "Created user story: $createdId", "Rally")
+                    client.clearCache()
+                    loadTickets()
+                }
+            } catch (e: Exception) {
+                LOG.error("Failed to create user story", e)
+                ApplicationManager.getApplication().invokeLater {
+                    if (project.isDisposed) return@invokeLater
+                    statusLabel.text = "Create failed"
+                    Messages.showErrorDialog(project, "Failed to create user story: ${e.message}", "Rally - Error")
+                }
+            }
+        }
+    }
+
+    private inner class CreateUserStoryDialog : DialogWrapper(project) {
+        val nameField = JBTextField()
+        val projectCombo = ComboBox<String>()
+        val iterationCombo = ComboBox<String>()
+        val assignToMeCheckbox = javax.swing.JCheckBox("Assign to me")
+        val descriptionArea = JBTextArea(5, 40)
+
+        init {
+            title = "Create User Story"
+            // Populate project combo from cached projects
+            projectCombo.addItem("All Projects")
+            cachedProjects.forEach { projectCombo.addItem(it.name ?: "Unnamed") }
+
+            // Pre-select current project from toolbar
+            val currentProjectIndex = this@RallyToolWindowPanel.projectCombo.selectedIndex
+            if (currentProjectIndex >= 0 && currentProjectIndex < projectCombo.itemCount) {
+                projectCombo.selectedIndex = currentProjectIndex
+            }
+
+            // Populate iteration combo from cached iterations
+            iterationCombo.addItem("Unscheduled")
+            cachedIterations.forEach { iter ->
+                val name = iter.name ?: "Unnamed"
+                val start = iter.startDate?.take(10) ?: ""
+                val end = iter.endDate?.take(10) ?: ""
+                val label = if (start.isNotBlank() && end.isNotBlank()) "$name ($start → $end)" else name
+                iterationCombo.addItem(label)
+            }
+
+            // Pre-select current iteration from toolbar
+            val currentIterIndex = this@RallyToolWindowPanel.iterationCombo.selectedIndex
+            if (currentIterIndex > 0 && currentIterIndex < iterationCombo.itemCount) {
+                iterationCombo.selectedIndex = currentIterIndex
+            }
+
+            assignToMeCheckbox.isSelected = true
+
+            init()
+        }
+
+        override fun createCenterPanel(): JComponent {
+            val panel = JPanel(BorderLayout(0, 8))
+            panel.border = JBUI.Borders.empty(8)
+
+            // Form fields at top using GridBagLayout for aligned labels
+            val formPanel = JPanel(java.awt.GridBagLayout())
+            val gbc = java.awt.GridBagConstraints()
+            gbc.insets = java.awt.Insets(0, 0, 6, 8)
+            gbc.anchor = java.awt.GridBagConstraints.WEST
+
+            // Row 0: Name
+            gbc.gridx = 0; gbc.gridy = 0; gbc.fill = java.awt.GridBagConstraints.NONE; gbc.weightx = 0.0
+            formPanel.add(JBLabel("Name:"), gbc)
+            gbc.gridx = 1; gbc.fill = java.awt.GridBagConstraints.HORIZONTAL; gbc.weightx = 1.0
+            formPanel.add(nameField, gbc)
+
+            // Row 1: Project
+            gbc.gridx = 0; gbc.gridy = 1; gbc.fill = java.awt.GridBagConstraints.NONE; gbc.weightx = 0.0
+            formPanel.add(JBLabel("Project:"), gbc)
+            gbc.gridx = 1; gbc.fill = java.awt.GridBagConstraints.HORIZONTAL; gbc.weightx = 1.0
+            formPanel.add(projectCombo, gbc)
+
+            // Row 2: Sprint
+            gbc.gridx = 0; gbc.gridy = 2; gbc.fill = java.awt.GridBagConstraints.NONE; gbc.weightx = 0.0
+            formPanel.add(JBLabel("Sprint:"), gbc)
+            gbc.gridx = 1; gbc.fill = java.awt.GridBagConstraints.HORIZONTAL; gbc.weightx = 1.0
+            formPanel.add(iterationCombo, gbc)
+
+            // Row 3: Assign to me
+            gbc.gridx = 1; gbc.gridy = 3; gbc.fill = java.awt.GridBagConstraints.NONE; gbc.weightx = 0.0
+            formPanel.add(assignToMeCheckbox, gbc)
+
+            panel.add(formPanel, BorderLayout.NORTH)
+
+            // Description fills remaining space
+            descriptionArea.lineWrap = true
+            descriptionArea.wrapStyleWord = true
+            val descPanel = JPanel(BorderLayout(0, 4))
+            descPanel.add(JBLabel("Description:"), BorderLayout.NORTH)
+            descPanel.add(JBScrollPane(descriptionArea), BorderLayout.CENTER)
+            panel.add(descPanel, BorderLayout.CENTER)
+
+            panel.preferredSize = java.awt.Dimension(500, 380)
+            return panel
+        }
+
+        override fun doValidate(): ValidationInfo? {
+            if (nameField.text.isNullOrBlank()) {
+                return ValidationInfo("Name is required", nameField)
+            }
+            return null
+        }
+
+        override fun getPreferredFocusedComponent(): JComponent = nameField
+    }
+
     private fun openInBrowser() {
         val selected = artifactList.selectedValue
         if (selected == null) {
@@ -723,96 +882,13 @@ class RallyToolWindowPanel(private val project: Project) {
                     project,
                     summary,
                     "Rally - Export",
-                    Messages.getInformationIcon()
+                    AllIcons.General.InspectionsOK
                 )
             }
         }
     }
 
-    private fun bulkExport() {
-        if (allArtifacts.isEmpty()) {
-            Messages.showInfoMessage(project, "No tickets loaded. Load tickets first, then bulk export.", "Rally")
-            return
-        }
 
-        val settings = RallySettings.getInstance()
-        val outputDir = settings.exportDirectory.ifBlank {
-            project.basePath?.let { "$it/rally_export" } ?: "rally_export"
-        }
-
-        val scope = scopeCombo.selectedItem as? String ?: "All Tickets"
-        val stateFilter = stateCombo.selectedItem as? String ?: "Any State"
-        val filterDesc = if (stateFilter == "Any State") scope else "$scope / $stateFilter"
-
-        val confirm = Messages.showYesNoDialog(
-            project,
-            "Bulk export ${allArtifacts.size} artifacts ($filterDesc) to:\n$outputDir\n\nThis exports a single consolidated file for AI analysis.",
-            "Rally - Bulk Export",
-            Messages.getQuestionIcon()
-        )
-        if (confirm != Messages.YES) return
-
-        val total = allArtifacts.size
-        statusLabel.text = "Exporting 0/$total..."
-
-        ApplicationManager.getApplication().executeOnPooledThread {
-            try {
-                val client = getClient()
-                val exporter = RallyExporter(client)
-                val timestamp = java.time.LocalDate.now().toString()
-                val fileName = "rally_bulk_${timestamp}"
-
-                ApplicationManager.getApplication().invokeLater {
-                    if (!project.isDisposed) statusLabel.text = "Exporting JSON 0/$total..."
-                }
-                val jsonCount = exporter.bulkExportJson(allArtifacts, outputDir, fileName) { processed ->
-                    ApplicationManager.getApplication().invokeLater {
-                        if (!project.isDisposed) statusLabel.text = "Exporting JSON $processed/$total..."
-                    }
-                }
-
-                ApplicationManager.getApplication().invokeLater {
-                    if (!project.isDisposed) statusLabel.text = "Exporting Markdown 0/$total..."
-                }
-                exporter.bulkExportMarkdown(allArtifacts, outputDir, fileName) { processed ->
-                    ApplicationManager.getApplication().invokeLater {
-                        if (!project.isDisposed) statusLabel.text = "Exporting Markdown $processed/$total..."
-                    }
-                }
-
-                // Verify files actually exist before declaring success
-                val jsonFile = java.io.File(outputDir, "$fileName.json")
-                val mdFile = java.io.File(outputDir, "$fileName.md")
-
-                ApplicationManager.getApplication().invokeLater {
-                    if (project.isDisposed) return@invokeLater
-                    if (jsonFile.exists() && mdFile.exists()) {
-                        statusLabel.text = "Exported $jsonCount artifacts"
-                        Messages.showMessageDialog(
-                            project,
-                            "Bulk exported $jsonCount artifacts to:\n${jsonFile.absolutePath}\n${mdFile.absolutePath}\n\nFeed these files to AI for defect pattern analysis.",
-                            "Rally - Bulk Export",
-                            Messages.getInformationIcon()
-                        )
-                    } else {
-                        statusLabel.text = "Export failed — files not written"
-                        Messages.showErrorDialog(
-                            project,
-                            "Export completed but files were not found at:\n$outputDir\n\nCheck that the directory is writable.",
-                            "Rally - Export Error"
-                        )
-                    }
-                }
-            } catch (e: Exception) {
-                LOG.error("Bulk export failed", e)
-                ApplicationManager.getApplication().invokeLater {
-                    if (project.isDisposed) return@invokeLater
-                    statusLabel.text = "Export failed"
-                    Messages.showErrorDialog(project, "Bulk export failed: ${e.message}", "Rally - Error")
-                }
-            }
-        }
-    }
 
     private fun changeState(newState: String) {
         val selected = artifactList.selectedValuesList
