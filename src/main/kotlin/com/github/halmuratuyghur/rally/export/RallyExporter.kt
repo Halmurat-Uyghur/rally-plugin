@@ -458,7 +458,7 @@ class RallyExporter(private val client: RallyApiClient) {
             val ext = fileName.substringAfterLast('.', "png").lowercase()
             val uniqueFileName = if (imgCounter == 1) "$artifactId.$ext" else "${artifactId}_$imgCounter.$ext"
 
-            val localPath = downloadRallyImage(objectId, uniqueFileName, imgDir)
+            val localPath = downloadRallyImage(objectId, fileName, uniqueFileName, imgDir)
             if (localPath != null) {
                 val relativePath = "${artifactId}_images/$uniqueFileName"
                 val replacement = matcher.group().replace(originalSrc, relativePath)
@@ -471,17 +471,17 @@ class RallyExporter(private val client: RallyApiClient) {
         return result.toString()
     }
 
-    private fun downloadRallyImage(objectId: String, fileName: String, imgDir: String): String? {
+    private fun downloadRallyImage(objectId: String, originalFileName: String, localFileName: String, imgDir: String): String? {
         try {
             Files.createDirectories(Paths.get(imgDir))
 
             val baseUrl = client.serverUrl.trimEnd('/')
             val url = if (!baseUrl.startsWith("http")) "https://$baseUrl" else baseUrl
-            val imageUrl = "$url/slm/attachment/$objectId/${fileName.removePrefix("${objectId}_")}"
+            val imageUrl = "$url/slm/attachment/$objectId/$originalFileName"
 
             val fileBytes = client.downloadAttachment(imageUrl)
 
-            val outputFile = File(imgDir, fileName)
+            val outputFile = File(imgDir, localFileName)
             Files.write(outputFile.toPath(), fileBytes)
             LOG.info("Downloaded inline image: ${outputFile.absolutePath} (${fileBytes.size} bytes)")
             return outputFile.absolutePath

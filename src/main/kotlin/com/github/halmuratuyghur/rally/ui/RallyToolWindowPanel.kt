@@ -76,6 +76,7 @@ class RallyToolWindowPanel(private val project: Project) {
     private var allArtifacts: List<RallyArtifact> = emptyList()
     private var currentClient: RallyApiClient? = null
     private var loading = false
+    private var pendingReload = false
     private var cachedProjects: List<RallyProject> = emptyList()
     private var cachedIterations: List<RallyIteration> = emptyList()
     private var projectsLoaded = false
@@ -323,8 +324,12 @@ class RallyToolWindowPanel(private val project: Project) {
             return
         }
 
-        if (loading) return
+        if (loading) {
+            pendingReload = true
+            return
+        }
         loading = true
+        pendingReload = false
         clearStatusIcon()
         statusLabel.text = "Loading..."
 
@@ -355,6 +360,9 @@ class RallyToolWindowPanel(private val project: Project) {
 
                 val selectedIter = iterationCombo.selectedItem as? String ?: ""
                 val hasIterationFilter = selectedIter.isNotBlank() && selectedIter != "All Sprints"
+                // Sprint summary can reuse main artifacts only when the main query has no extra
+                // filters (owner, etc.) beyond the iteration — otherwise counts would be wrong.
+                val mainQueryIsIterationOnly = hasIterationFilter && query == "(Iteration.Name = \"$selectedIter\")"
 
                 // Load artifacts; sprint summary runs in parallel only when it needs separate API calls
                 val artifactsFuture = java.util.concurrent.CompletableFuture.supplyAsync {
@@ -365,12 +373,19 @@ class RallyToolWindowPanel(private val project: Project) {
                     java.util.concurrent.CompletableFuture.runAsync {
                         loadSprintSummary(client, settings, null)
                     }
+                } else if (!mainQueryIsIterationOnly) {
+                    // Iteration selected but main query has extra filters (e.g. owner) —
+                    // sprint summary needs unfiltered iteration data
+                    java.util.concurrent.CompletableFuture.runAsync {
+                        val sprintArtifacts = client.queryIterationArtifacts(selectedIter)
+                        computeSprintSummaryFromArtifacts(selectedIter, sprintArtifacts)
+                    }
                 } else null
 
                 val artifacts = artifactsFuture.get()
 
-                // When iteration is selected, compute sprint summary from loaded artifacts (no extra API calls)
-                if (hasIterationFilter) {
+                // When main query is iteration-only, reuse loaded artifacts for sprint summary
+                if (mainQueryIsIterationOnly) {
                     computeSprintSummaryFromArtifacts(selectedIter, artifacts)
                 }
 
@@ -389,6 +404,10 @@ class RallyToolWindowPanel(private val project: Project) {
                         val filterDesc = if (stateFilter == "Any State") scope else "$scope / $stateFilter"
                         artifactList.emptyText.text = "No tickets found for $filterDesc in project: $projectName"
                     }
+                    if (pendingReload) {
+                        pendingReload = false
+                        loadTickets()
+                    }
                 }
 
                 // Wait for sprint summary to finish (it updates UI itself)
@@ -401,9 +420,14 @@ class RallyToolWindowPanel(private val project: Project) {
                 ApplicationManager.getApplication().invokeLater {
                     if (project.isDisposed) return@invokeLater
                     loading = false
-                    statusLabel.icon = AllIcons.General.Error
-                    statusLabel.text = "Error"
-                    artifactList.emptyText.text = "Error: ${e.message}"
+                    if (pendingReload) {
+                        pendingReload = false
+                        loadTickets()
+                    } else {
+                        statusLabel.icon = AllIcons.General.Error
+                        statusLabel.text = "Error"
+                        artifactList.emptyText.text = "Error: ${e.message}"
+                    }
                 }
             }
         }

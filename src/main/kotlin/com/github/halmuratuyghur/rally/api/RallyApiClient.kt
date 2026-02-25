@@ -56,11 +56,12 @@ class RallyApiClient(
     }
 
     /**
-     * Clear all query caches (preserves image cache — images never change).
+     * Clear all caches including images.
      * Call on manual Refresh to get fully fresh data from Rally.
      */
     fun clearCache() {
         queryCache.clear()
+        imageCache.clear()
     }
 
     /**
@@ -220,22 +221,6 @@ class RallyApiClient(
         }
         // Just a number
         return "${normalizeServerUrl()}/slm/webservice/$API_VERSION/$type/$trimmed"
-    }
-
-    /**
-     * Test connection to Rally server
-     */
-    fun testConnection(): Boolean {
-        return try {
-            val url = buildApiUrl("user") + "?query=(UserName = \"${getCurrentUser().userName}\")"
-            val response = executeGet(url)
-            handleResponse(response)
-            true
-        } catch (e: RallyApiException) {
-            throw e
-        } catch (e: Exception) {
-            throw RallyConnectionException("Connection test failed: ${e.message}", e)
-        }
     }
 
     /**
@@ -611,9 +596,13 @@ class RallyApiClient(
         val query = "(TestCase.FormattedID = \"$testCaseFormattedId\")"
         val encodedQuery = URLEncoder.encode(query, StandardCharsets.UTF_8)
 
-        val url = buildApiUrl("testcasestep") +
+        var url = buildApiUrl("testcasestep") +
                 "?query=$encodedQuery&fetch=StepIndex,Input,ExpectedResult,_ref" +
                 "&pagesize=$DEFAULT_PAGE_SIZE&order=${URLEncoder.encode("StepIndex ASC", StandardCharsets.UTF_8)}"
+
+        if (!workspaceRef.isNullOrBlank()) {
+            url += "&workspace=${URLEncoder.encode(normalizeRef("workspace", workspaceRef!!), StandardCharsets.UTF_8)}"
+        }
 
         val response = executeGet(url)
         handleResponse(response)
@@ -766,11 +755,13 @@ class RallyApiClient(
 
         val json = JsonParser.parseString(response.body()).asJsonObject
         val createResult = json.getAsJsonObject("CreateResult")
-        val errors = createResult?.getAsJsonArray("Errors")
+            ?: throw RallyApiException("Unexpected response: missing CreateResult")
+        val errors = createResult.getAsJsonArray("Errors")
         if (errors != null && errors.size() > 0) {
             throw RallyApiException("Failed to create user story: ${errors.joinToString()}")
         }
         val obj = createResult.getAsJsonObject("Object")
+            ?: throw RallyApiException("Unexpected response: missing Object in CreateResult")
         return gson.fromJson(obj, RallyUserStory::class.java)
     }
 
@@ -795,7 +786,8 @@ class RallyApiClient(
 
         val contentJson = JsonParser.parseString(contentResponse.body()).asJsonObject
         val contentResult = contentJson.getAsJsonObject("CreateResult")
-        val contentErrors = contentResult?.getAsJsonArray("Errors")
+            ?: throw RallyApiException("Unexpected response: missing CreateResult for AttachmentContent")
+        val contentErrors = contentResult.getAsJsonArray("Errors")
         if (contentErrors != null && contentErrors.size() > 0) {
             throw RallyApiException("Failed to create attachment content: ${contentErrors.joinToString()}")
         }
@@ -817,11 +809,13 @@ class RallyApiClient(
 
         val attachJson = JsonParser.parseString(attachResponse.body()).asJsonObject
         val attachResult = attachJson.getAsJsonObject("CreateResult")
-        val attachErrors = attachResult?.getAsJsonArray("Errors")
+            ?: throw RallyApiException("Unexpected response: missing CreateResult for Attachment")
+        val attachErrors = attachResult.getAsJsonArray("Errors")
         if (attachErrors != null && attachErrors.size() > 0) {
             throw RallyApiException("Failed to create attachment: ${attachErrors.joinToString()}")
         }
         val attachObj = attachResult.getAsJsonObject("Object")
+            ?: throw RallyApiException("Unexpected response: missing Object in Attachment CreateResult")
         return gson.fromJson(attachObj, RallyAttachment::class.java)
     }
 }
