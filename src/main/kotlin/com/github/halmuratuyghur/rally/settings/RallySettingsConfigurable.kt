@@ -1,11 +1,11 @@
-package com.intellij.plugins.rally.settings
+package com.github.halmuratuyghur.rally.settings
 
 import com.intellij.openapi.application.ApplicationManager
 import com.intellij.openapi.fileChooser.FileChooserDescriptorFactory
 import com.intellij.openapi.options.Configurable
 import com.intellij.openapi.ui.Messages
 import com.intellij.openapi.ui.TextFieldWithBrowseButton
-import com.intellij.plugins.rally.api.RallyApiClient
+import com.github.halmuratuyghur.rally.api.RallyApiClient
 import com.intellij.ui.components.JBLabel
 import com.intellij.ui.components.JBTextField
 import com.intellij.util.ui.FormBuilder

@@ -1,4 +1,4 @@
-package com.intellij.plugins.rally.ui
+package com.github.halmuratuyghur.rally.ui
 
 import com.intellij.icons.AllIcons
 import com.intellij.ide.BrowserUtil
@@ -9,14 +9,14 @@ import com.intellij.openapi.ui.ComboBox
 import com.intellij.openapi.ui.DialogWrapper
 import com.intellij.openapi.ui.Messages
 import com.intellij.openapi.ui.ValidationInfo
-import com.intellij.plugins.rally.api.RallyApiClient
-import com.intellij.plugins.rally.api.RallyArtifact
-import com.intellij.plugins.rally.api.RallyDefect
-import com.intellij.plugins.rally.api.RallyIteration
-import com.intellij.plugins.rally.api.RallyProject
-import com.intellij.plugins.rally.api.RallyUserStory
-import com.intellij.plugins.rally.export.RallyExporter
-import com.intellij.plugins.rally.settings.RallySettings
+import com.github.halmuratuyghur.rally.api.RallyApiClient
+import com.github.halmuratuyghur.rally.api.RallyArtifact
+import com.github.halmuratuyghur.rally.api.RallyDefect
+import com.github.halmuratuyghur.rally.api.RallyIteration
+import com.github.halmuratuyghur.rally.api.RallyProject
+import com.github.halmuratuyghur.rally.api.RallyUserStory
+import com.github.halmuratuyghur.rally.export.RallyExporter
+import com.github.halmuratuyghur.rally.settings.RallySettings
 import com.intellij.ui.JBColor
 import com.intellij.ui.SearchTextField
 import com.intellij.ui.components.JBLabel

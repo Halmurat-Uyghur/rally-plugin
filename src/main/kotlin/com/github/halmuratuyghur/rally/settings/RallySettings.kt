@@ -1,4 +1,4 @@
-package com.intellij.plugins.rally.settings
+package com.github.halmuratuyghur.rally.settings
 
 import com.intellij.openapi.application.ApplicationManager
 import com.intellij.openapi.components.PersistentStateComponent
@@ -6,7 +6,7 @@ import com.intellij.openapi.components.State
 import com.intellij.openapi.components.Storage
 
 @State(
-    name = "com.intellij.plugins.rally.settings.RallySettings",
+    name = "com.github.halmuratuyghur.rally.settings.RallySettings",
     storages = [Storage("RallyPlugin.xml")]
 )
 class RallySettings : PersistentStateComponent<RallySettings.State> {

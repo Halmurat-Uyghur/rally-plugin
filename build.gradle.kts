@@ -4,7 +4,7 @@ plugins {
     id("org.jetbrains.intellij") version "1.17.4"
 }
 
-group = "com.intellij.plugins"
+group = "com.github.halmuratuyghur"
 version = "1.0.0"
 
 repositories {
@@ -42,11 +42,12 @@ tasks {
         changeNotes.set("""
             <h3>1.0.0</h3>
             <ul>
-                <li>Initial release</li>
-                <li>Connect to Rally using API Key</li>
-                <li>Browse User Stories, Defects, and Tasks</li>
-                <li>Open tasks with context switching</li>
-                <li>Search and filter Rally work items</li>
+                <li>Browse User Stories and Defects with scope, state, project, and sprint filters</li>
+                <li>Detail panel with description, test cases, tasks, attachments, and test steps</li>
+                <li>Create User Stories with project, sprint, and owner assignment</li>
+                <li>Change ticket state (Defined, In-Progress, Completed)</li>
+                <li>Export artifacts and test cases to JSON/Markdown</li>
+                <li>Sprint summary, auto-load on startup, parallel API queries with caching</li>
             </ul>
         """.trimIndent())
     }

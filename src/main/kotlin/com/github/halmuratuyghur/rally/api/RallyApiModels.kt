@@ -1,4 +1,4 @@
-package com.intellij.plugins.rally.api
+package com.github.halmuratuyghur.rally.api
 
 import com.google.gson.annotations.SerializedName
 

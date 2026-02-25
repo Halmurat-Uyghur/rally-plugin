@@ -1,27 +1,31 @@
 <idea-plugin>
-    <id>com.github.rally</id>
+    <id>com.github.halmuratuyghur.rally</id>
     <name>Rally Integration</name>
-    <vendor>Rally Plugin Contributors</vendor>
+    <vendor url="https://github.com/Halmurat-Uyghur">Halmurat</vendor>
 
     <description><![CDATA[
-        <p>Rally (Broadcom Agile Central) tool window for IntelliJ IDEA.</p>
+        <p>Browse and manage Rally (Broadcom Agile Central) work items directly from your IDE.</p>
         <br/>
         <p><b>Features:</b></p>
         <ul>
-            <li>View My Tickets, Active Tickets, and In-Progress tickets</li>
-            <li>Search by name or FormattedID</li>
-            <li>Change ticket state (In-Progress, Completed, Defined)</li>
-            <li>Sprint summary with ticket counts and points</li>
-            <li>Open tickets in Rally web interface</li>
+            <li>Browse User Stories and Defects with search, scope, state, project, and sprint filters</li>
+            <li>Detail panel with HTML description, linked Test Cases, Tasks, and Attachments</li>
+            <li>View test case steps by double-clicking a test case</li>
+            <li>Create User Stories with project, sprint, and owner assignment</li>
+            <li>Change ticket state (Defined, In-Progress, Completed) with multi-select support</li>
+            <li>Export individual artifacts and linked test cases to JSON/Markdown</li>
+            <li>Sprint summary with ticket counts and story points</li>
+            <li>Open any artifact in Rally web UI, copy FormattedID to clipboard</li>
+            <li>Auto-loads tickets on startup, parallel API queries, 2-minute query cache</li>
         </ul>
         <br/>
         <p><b>Setup:</b></p>
         <ol>
             <li>Open Settings → Tools → Rally</li>
             <li>Enter your Rally server URL (e.g., https://rally1.rallydev.com)</li>
-            <li>Enter your Rally API Key (get it from Rally Profile → API Keys)</li>
-            <li>Enter your workspace ref, project ref, and username</li>
-            <li>Click 'Test Connection' to verify</li>
+            <li>Enter your Rally API Key (get it from Rally → Profile → API Keys)</li>
+            <li>Enter your Workspace Ref and Username</li>
+            <li>Click "Test Connection" to verify</li>
         </ol>
     ]]></description>
 
@@ -32,16 +36,16 @@
             id="Rally"
             anchor="bottom"
             icon="/icons/rally.svg"
-            factoryClass="com.intellij.plugins.rally.ui.RallyToolWindowFactory"/>
+            factoryClass="com.github.halmuratuyghur.rally.ui.RallyToolWindowFactory"/>
 
         <applicationConfigurable
             parentId="tools"
-            id="com.intellij.plugins.rally.settings"
+            id="com.github.halmuratuyghur.rally.settings"
             displayName="Rally"
-            instance="com.intellij.plugins.rally.settings.RallySettingsConfigurable"/>
+            instance="com.github.halmuratuyghur.rally.settings.RallySettingsConfigurable"/>
 
         <applicationService
-            serviceImplementation="com.intellij.plugins.rally.settings.RallySettings"/>
+            serviceImplementation="com.github.halmuratuyghur.rally.settings.RallySettings"/>
     </extensions>
 
 </idea-plugin>

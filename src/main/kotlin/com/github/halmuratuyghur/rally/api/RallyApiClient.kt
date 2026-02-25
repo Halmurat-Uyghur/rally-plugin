@@ -1,4 +1,4 @@
-package com.intellij.plugins.rally.api
+package com.github.halmuratuyghur.rally.api
 
 import com.google.gson.Gson
 import com.google.gson.JsonParser

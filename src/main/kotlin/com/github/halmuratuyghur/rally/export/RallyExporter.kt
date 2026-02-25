@@ -1,9 +1,9 @@
-package com.intellij.plugins.rally.export
+package com.github.halmuratuyghur.rally.export
 
 import com.intellij.openapi.diagnostic.Logger
-import com.intellij.plugins.rally.api.RallyApiClient
-import com.intellij.plugins.rally.api.RallyAttachment
-import com.intellij.plugins.rally.api.RallyTestCaseStep
+import com.github.halmuratuyghur.rally.api.RallyApiClient
+import com.github.halmuratuyghur.rally.api.RallyAttachment
+import com.github.halmuratuyghur.rally.api.RallyTestCaseStep
 import com.google.gson.GsonBuilder
 import com.google.gson.JsonArray
 import com.google.gson.JsonObject
@@ -103,7 +103,7 @@ class RallyExporter(private val client: RallyApiClient) {
      * Export all artifacts to a single consolidated JSON file suitable for AI analysis.
      * Returns the number of artifacts exported.
      */
-    fun bulkExportJson(artifacts: List<com.intellij.plugins.rally.api.RallyArtifact>, outputDir: String, fileName: String = "bulk_export", onProgress: ((Int) -> Unit)? = null): Int {
+    fun bulkExportJson(artifacts: List<com.github.halmuratuyghur.rally.api.RallyArtifact>, outputDir: String, fileName: String = "bulk_export", onProgress: ((Int) -> Unit)? = null): Int {
         LOG.info("Bulk exporting ${artifacts.size} artifacts to JSON")
 
         val array = JsonArray()
@@ -128,7 +128,7 @@ class RallyExporter(private val client: RallyApiClient) {
                 }
 
                 // Defect-specific fields
-                if (artifact is com.intellij.plugins.rally.api.RallyDefect) {
+                if (artifact is com.github.halmuratuyghur.rally.api.RallyDefect) {
                     obj.addProperty("severity", artifact.severity ?: "")
                     obj.addProperty("priority", artifact.priority ?: "")
                     obj.addProperty("environment", artifact.environment ?: "")
@@ -137,7 +137,7 @@ class RallyExporter(private val client: RallyApiClient) {
                 }
 
                 // User story specific fields
-                if (artifact is com.intellij.plugins.rally.api.RallyUserStory) {
+                if (artifact is com.github.halmuratuyghur.rally.api.RallyUserStory) {
                     obj.addProperty("planEstimate", artifact.planEstimate ?: 0.0)
                     obj.addProperty("project", artifact.project?.refObjectName ?: artifact.project?.name ?: "")
                     obj.addProperty("iteration", artifact.iteration?.refObjectName ?: artifact.iteration?.name ?: "")
@@ -171,7 +171,7 @@ class RallyExporter(private val client: RallyApiClient) {
      * Export all artifacts to a single consolidated Markdown file suitable for AI analysis.
      * Returns the number of artifacts exported.
      */
-    fun bulkExportMarkdown(artifacts: List<com.intellij.plugins.rally.api.RallyArtifact>, outputDir: String, fileName: String = "bulk_export", onProgress: ((Int) -> Unit)? = null): Int {
+    fun bulkExportMarkdown(artifacts: List<com.github.halmuratuyghur.rally.api.RallyArtifact>, outputDir: String, fileName: String = "bulk_export", onProgress: ((Int) -> Unit)? = null): Int {
         LOG.info("Bulk exporting ${artifacts.size} artifacts to Markdown")
 
         val md = StringBuilder()
@@ -196,7 +196,7 @@ class RallyExporter(private val client: RallyApiClient) {
                 md.appendLine("- **Created:** ${artifact.creationDate?.take(10) ?: ""}")
                 md.appendLine("- **Updated:** ${artifact.lastUpdateDate?.take(10) ?: ""}")
 
-                if (artifact is com.intellij.plugins.rally.api.RallyDefect) {
+                if (artifact is com.github.halmuratuyghur.rally.api.RallyDefect) {
                     md.appendLine("- **Severity:** ${artifact.severity ?: ""}")
                     md.appendLine("- **Priority:** ${artifact.priority ?: ""}")
                     md.appendLine("- **Environment:** ${artifact.environment ?: ""}")
@@ -204,7 +204,7 @@ class RallyExporter(private val client: RallyApiClient) {
                     md.appendLine("- **Iteration:** ${artifact.iteration?.refObjectName ?: artifact.iteration?.name ?: ""}")
                 }
 
-                if (artifact is com.intellij.plugins.rally.api.RallyUserStory) {
+                if (artifact is com.github.halmuratuyghur.rally.api.RallyUserStory) {
                     md.appendLine("- **Plan Estimate:** ${artifact.planEstimate ?: ""}")
                     md.appendLine("- **Project:** ${artifact.project?.refObjectName ?: artifact.project?.name ?: ""}")
                     md.appendLine("- **Iteration:** ${artifact.iteration?.refObjectName ?: artifact.iteration?.name ?: ""}")
@@ -362,7 +362,7 @@ class RallyExporter(private val client: RallyApiClient) {
 
     // ── Helpers ──────────────────────────────────────────────────
 
-    private fun queryTestCaseByFormattedId(testCaseId: String): com.intellij.plugins.rally.api.RallyTestCase? {
+    private fun queryTestCaseByFormattedId(testCaseId: String): com.github.halmuratuyghur.rally.api.RallyTestCase? {
         return try {
             client.queryTestCaseByFormattedId(testCaseId)
         } catch (e: Exception) {

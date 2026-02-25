@@ -1,4 +1,4 @@
-package com.intellij.plugins.rally.ui
+package com.github.halmuratuyghur.rally.ui
 
 import com.intellij.icons.AllIcons
 import com.intellij.ide.BrowserUtil
@@ -8,9 +8,9 @@ import com.intellij.openapi.fileChooser.FileChooserFactory
 import com.intellij.openapi.fileChooser.FileSaverDescriptor
 import com.intellij.openapi.project.Project
 import com.intellij.openapi.ui.Messages
-import com.intellij.plugins.rally.api.*
-import com.intellij.plugins.rally.export.RallyExporter
-import com.intellij.plugins.rally.settings.RallySettings
+import com.github.halmuratuyghur.rally.api.*
+import com.github.halmuratuyghur.rally.export.RallyExporter
+import com.github.halmuratuyghur.rally.settings.RallySettings
 import com.intellij.ui.JBColor
 import com.intellij.ui.components.JBLabel
 import com.intellij.ui.components.JBList

@@ -1,4 +1,4 @@
-package com.intellij.plugins.rally.api
+package com.github.halmuratuyghur.rally.api
 
 /**
  * Exception thrown when Rally API operations fail
