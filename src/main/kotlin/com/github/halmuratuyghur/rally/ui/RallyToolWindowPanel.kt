@@ -353,15 +353,26 @@ class RallyToolWindowPanel(private val project: Project) {
                 val query = buildQuery(scope, settings)
                 val pageSize = if (scope == "Recent Activity") 20 else settings.pageSize
 
-                // Load artifacts and sprint summary in parallel
+                val selectedIter = iterationCombo.selectedItem as? String ?: ""
+                val hasIterationFilter = selectedIter.isNotBlank() && selectedIter != "All Sprints"
+
+                // Load artifacts; sprint summary runs in parallel only when it needs separate API calls
                 val artifactsFuture = java.util.concurrent.CompletableFuture.supplyAsync {
                     client.queryAllArtifacts(query, pageSize)
                 }
-                val sprintFuture = java.util.concurrent.CompletableFuture.runAsync {
-                    loadSprintSummary(client, settings)
-                }
+                val sprintFuture = if (!hasIterationFilter) {
+                    // No iteration selected — sprint summary needs its own API calls
+                    java.util.concurrent.CompletableFuture.runAsync {
+                        loadSprintSummary(client, settings, null)
+                    }
+                } else null
 
                 val artifacts = artifactsFuture.get()
+
+                // When iteration is selected, compute sprint summary from loaded artifacts (no extra API calls)
+                if (hasIterationFilter) {
+                    computeSprintSummaryFromArtifacts(selectedIter, artifacts)
+                }
 
                 // Client-side filtering for state and type
                 val filtered = applyClientFilter(scope, stateFilter, artifacts)
@@ -381,7 +392,9 @@ class RallyToolWindowPanel(private val project: Project) {
                 }
 
                 // Wait for sprint summary to finish (it updates UI itself)
-                try { sprintFuture.get() } catch (_: Exception) {}
+                if (sprintFuture != null) {
+                    try { sprintFuture.get() } catch (_: Exception) {}
+                }
 
             } catch (e: Exception) {
                 LOG.error("Failed to load Rally tickets", e)
@@ -558,18 +571,16 @@ class RallyToolWindowPanel(private val project: Project) {
         return if (projectIndex < cachedProjects.size) cachedProjects[projectIndex].ref else null
     }
 
-    private fun loadSprintSummary(client: RallyApiClient, settings: RallySettings) {
+    /**
+     * Load sprint summary via API. Called only when no iteration is selected
+     * (so we need to find the current sprint by date and fetch its artifacts separately).
+     */
+    private fun loadSprintSummary(client: RallyApiClient, settings: RallySettings, preloadedArtifacts: List<RallyArtifact>?) {
         try {
-            // Use selected iteration if one is picked, otherwise fall back to current date-based iteration
-            val selectedIter = iterationCombo.selectedItem as? String ?: ""
-            val iteration = if (selectedIter.isNotBlank() && selectedIter != "All Sprints") {
-                cachedIterations.firstOrNull { it.name == selectedIter }
-            } else {
-                client.queryCurrentIteration(
-                    if (settings.workspaceRef.isNotBlank()) settings.workspaceRef else null,
-                    getSelectedProjectRef()
-                )
-            }
+            val iteration = client.queryCurrentIteration(
+                if (settings.workspaceRef.isNotBlank()) settings.workspaceRef else null,
+                getSelectedProjectRef()
+            )
 
             if (iteration == null) {
                 ApplicationManager.getApplication().invokeLater {
@@ -579,35 +590,55 @@ class RallyToolWindowPanel(private val project: Project) {
                 return
             }
 
-            val sprintArtifacts = client.queryIterationArtifacts(iteration.name ?: "")
-            val stateCounts = mutableMapOf<String, Int>()
-            var totalPoints = 0.0
-
-            for (artifact in sprintArtifacts) {
-                val state = artifact.scheduleState ?: artifact.state ?: "Unknown"
-                stateCounts[state] = (stateCounts[state] ?: 0) + 1
-                val points = when (artifact) {
-                    is RallyUserStory -> artifact.planEstimate
-                    is RallyDefect -> artifact.planEstimate
-                    else -> null
-                }
-                if (points != null) totalPoints += points
-            }
-
-            val countsText = stateCounts.entries.joinToString(" | ") { "${it.key}: ${it.value}" }
-            val startDate = iteration.startDate?.take(10) ?: ""
-            val endDate = iteration.endDate?.take(10) ?: ""
-
-            ApplicationManager.getApplication().invokeLater {
-                if (project.isDisposed) return@invokeLater
-                sprintLabel.text = "Sprint: ${iteration.name} ($startDate to $endDate) | $countsText | ${totalPoints.toInt()} pts"
-            }
+            val sprintArtifacts = preloadedArtifacts ?: client.queryIterationArtifacts(iteration.name ?: "")
+            updateSprintLabel(iteration, sprintArtifacts)
         } catch (e: Exception) {
             LOG.warn("Failed to load sprint summary", e)
             ApplicationManager.getApplication().invokeLater {
                 if (project.isDisposed) return@invokeLater
                 sprintLabel.text = "Sprint: unable to load"
             }
+        }
+    }
+
+    /**
+     * Compute sprint summary directly from already-loaded artifacts.
+     * Used when an iteration is selected — avoids redundant API calls.
+     */
+    private fun computeSprintSummaryFromArtifacts(iterationName: String, artifacts: List<RallyArtifact>) {
+        val iteration = cachedIterations.firstOrNull { it.name == iterationName }
+        if (iteration == null) {
+            ApplicationManager.getApplication().invokeLater {
+                if (project.isDisposed) return@invokeLater
+                sprintLabel.text = "No active sprint"
+            }
+            return
+        }
+        updateSprintLabel(iteration, artifacts)
+    }
+
+    private fun updateSprintLabel(iteration: RallyIteration, artifacts: List<RallyArtifact>) {
+        val stateCounts = mutableMapOf<String, Int>()
+        var totalPoints = 0.0
+
+        for (artifact in artifacts) {
+            val state = artifact.scheduleState ?: artifact.state ?: "Unknown"
+            stateCounts[state] = (stateCounts[state] ?: 0) + 1
+            val points = when (artifact) {
+                is RallyUserStory -> artifact.planEstimate
+                is RallyDefect -> artifact.planEstimate
+                else -> null
+            }
+            if (points != null) totalPoints += points
+        }
+
+        val countsText = stateCounts.entries.joinToString(" | ") { "${it.key}: ${it.value}" }
+        val startDate = iteration.startDate?.take(10) ?: ""
+        val endDate = iteration.endDate?.take(10) ?: ""
+
+        ApplicationManager.getApplication().invokeLater {
+            if (project.isDisposed) return@invokeLater
+            sprintLabel.text = "Sprint: ${iteration.name} ($startDate to $endDate) | $countsText | ${totalPoints.toInt()} pts"
         }
     }
 
@@ -658,6 +689,7 @@ class RallyToolWindowPanel(private val project: Project) {
         val selectedProjectIndex = dialog.projectCombo.selectedIndex
         val selectedIterationIndex = dialog.iterationCombo.selectedIndex
         val assignToMe = dialog.assignToMeCheckbox.isSelected
+        val attachment = dialog.attachmentFile
 
         statusLabel.text = "Creating..."
 
@@ -683,11 +715,21 @@ class RallyToolWindowPanel(private val project: Project) {
                 val created = client.createUserStory(name, projectRefForCreate, ownerRef = ownerRef, description = description, iterationRef = iterationRefForCreate)
                 val createdId = created.formattedID ?: "?"
 
+                // Upload attachment if a file was selected
+                if (attachment != null && created.ref != null) {
+                    ApplicationManager.getApplication().invokeLater {
+                        if (project.isDisposed) return@invokeLater
+                        statusLabel.text = "Uploading attachment..."
+                    }
+                    client.uploadAttachment(created.ref, attachment.toPath())
+                }
+
                 ApplicationManager.getApplication().invokeLater {
                     if (project.isDisposed) return@invokeLater
-                    statusLabel.text = "Created $createdId"
-                    Messages.showInfoMessage(project, "Created user story: $createdId", "Rally")
-                    client.clearCache()
+                    val attachMsg = if (attachment != null) " with attachment" else ""
+                    statusLabel.text = "Created $createdId$attachMsg"
+                    Messages.showInfoMessage(project, "Created user story: $createdId$attachMsg", "Rally")
+                    client.clearArtifactCache()
                     loadTickets()
                 }
             } catch (e: Exception) {
@@ -707,6 +749,8 @@ class RallyToolWindowPanel(private val project: Project) {
         val iterationCombo = ComboBox<String>()
         val assignToMeCheckbox = javax.swing.JCheckBox("Assign to me")
         val descriptionArea = JBTextArea(5, 40)
+        val attachmentPathField = JBTextField()
+        var attachmentFile: java.io.File? = null
 
         init {
             title = "Create User Story"
@@ -773,6 +817,26 @@ class RallyToolWindowPanel(private val project: Project) {
             gbc.gridx = 1; gbc.gridy = 3; gbc.fill = java.awt.GridBagConstraints.NONE; gbc.weightx = 0.0
             formPanel.add(assignToMeCheckbox, gbc)
 
+            // Row 4: Attachment
+            gbc.gridx = 0; gbc.gridy = 4; gbc.fill = java.awt.GridBagConstraints.NONE; gbc.weightx = 0.0
+            formPanel.add(JBLabel("Attachment:"), gbc)
+            gbc.gridx = 1; gbc.fill = java.awt.GridBagConstraints.HORIZONTAL; gbc.weightx = 1.0
+            attachmentPathField.isEditable = false
+            val attachPanel = JPanel(BorderLayout(4, 0))
+            attachPanel.add(attachmentPathField, BorderLayout.CENTER)
+            val browseButton = JButton("Browse...")
+            browseButton.addActionListener {
+                val chooser = javax.swing.JFileChooser()
+                chooser.fileFilter = javax.swing.filechooser.FileNameExtensionFilter("ZIP files", "zip")
+                chooser.dialogTitle = "Select ZIP file to attach"
+                if (chooser.showOpenDialog(contentPanel) == javax.swing.JFileChooser.APPROVE_OPTION) {
+                    attachmentFile = chooser.selectedFile
+                    attachmentPathField.text = chooser.selectedFile.name
+                }
+            }
+            attachPanel.add(browseButton, BorderLayout.EAST)
+            formPanel.add(attachPanel, gbc)
+
             panel.add(formPanel, BorderLayout.NORTH)
 
             // Description fills remaining space
@@ -832,51 +896,59 @@ class RallyToolWindowPanel(private val project: Project) {
         ApplicationManager.getApplication().executeOnPooledThread {
             val client = getClient()
             val exporter = RallyExporter(client)
-            var artifactSuccess = 0
-            var artifactFailed = 0
-            var tcExported = 0
-            var tcFailed = 0
+            val artifactSuccess = java.util.concurrent.atomic.AtomicInteger(0)
+            val artifactFailed = java.util.concurrent.atomic.AtomicInteger(0)
+            val tcExported = java.util.concurrent.atomic.AtomicInteger(0)
+            val tcFailed = java.util.concurrent.atomic.AtomicInteger(0)
 
-            for (artifact in selected) {
-                val id = artifact.formattedID ?: continue
-                try {
-                    exporter.exportArtifactJson(id, outputDir)
-                    exporter.exportArtifactMarkdown(id, outputDir)
-                    artifactSuccess++
-                } catch (e: Exception) {
-                    LOG.error("Failed to export $id", e)
-                    artifactFailed++
-                }
+            // Export all selected artifacts in parallel
+            val futures = selected.mapNotNull { artifact ->
+                val id = artifact.formattedID ?: return@mapNotNull null
+                val ref = artifact.ref
+                java.util.concurrent.CompletableFuture.runAsync {
+                    try {
+                        exporter.exportArtifactJson(id, outputDir)
+                        exporter.exportArtifactMarkdown(id, outputDir)
+                        artifactSuccess.incrementAndGet()
+                    } catch (e: Exception) {
+                        LOG.error("Failed to export $id", e)
+                        artifactFailed.incrementAndGet()
+                    }
 
-                // Also export linked test cases
-                val ref = artifact.ref ?: continue
-                try {
-                    val testCases = client.queryTestCases(ref)
-                    for (tc in testCases) {
-                        val tcId = tc.formattedID ?: continue
+                    // Also export linked test cases
+                    if (ref != null) {
                         try {
-                            exporter.exportTestCaseJson(tcId, outputDir)
-                            exporter.exportTestCaseMarkdown(tcId, outputDir)
-                            tcExported++
+                            val testCases = client.queryTestCases(ref)
+                            for (tc in testCases) {
+                                val tcId = tc.formattedID ?: continue
+                                try {
+                                    exporter.exportTestCaseJson(tcId, outputDir)
+                                    exporter.exportTestCaseMarkdown(tcId, outputDir)
+                                    tcExported.incrementAndGet()
+                                } catch (e: Exception) {
+                                    LOG.warn("Failed to export test case $tcId", e)
+                                    tcFailed.incrementAndGet()
+                                }
+                            }
                         } catch (e: Exception) {
-                            LOG.warn("Failed to export test case $tcId", e)
-                            tcFailed++
+                            LOG.warn("Failed to query test cases for $id", e)
                         }
                     }
-                } catch (e: Exception) {
-                    LOG.warn("Failed to query test cases for $id", e)
                 }
             }
 
+            // Wait for all exports to complete
+            java.util.concurrent.CompletableFuture.allOf(*futures.toTypedArray()).join()
+
             ApplicationManager.getApplication().invokeLater {
                 if (project.isDisposed) return@invokeLater
-                statusLabel.text = "Exported $artifactSuccess artifact(s), $tcExported test case(s)"
+                statusLabel.text = "Exported ${artifactSuccess.get()} artifact(s), ${tcExported.get()} test case(s)"
                 val summary = buildString {
                     append("Exported to:\n$outputDir\n\n")
-                    append("Artifacts: $artifactSuccess exported")
-                    if (artifactFailed > 0) append(", $artifactFailed failed")
-                    append("\nTest Cases: $tcExported exported")
-                    if (tcFailed > 0) append(", $tcFailed failed")
+                    append("Artifacts: ${artifactSuccess.get()} exported")
+                    if (artifactFailed.get() > 0) append(", ${artifactFailed.get()} failed")
+                    append("\nTest Cases: ${tcExported.get()} exported")
+                    if (tcFailed.get() > 0) append(", ${tcFailed.get()} failed")
                 }
                 Messages.showMessageDialog(
                     project,
@@ -910,31 +982,37 @@ class RallyToolWindowPanel(private val project: Project) {
 
         ApplicationManager.getApplication().executeOnPooledThread {
             val client = getClient()
-            var success = 0
-            var failed = 0
+            val results = java.util.concurrent.atomic.AtomicInteger(0)
+            val failures = java.util.concurrent.atomic.AtomicInteger(0)
 
-            for (artifact in selected) {
-                try {
-                    val ref = artifact.ref ?: continue
-                    val type = artifact.type ?: continue
-                    client.updateArtifactState(ref, type, newState)
-                    success++
-                } catch (e: Exception) {
-                    LOG.error("Failed to update ${artifact.formattedID}", e)
-                    failed++
+            // Update all selected artifacts in parallel
+            val futures = selected.mapNotNull { artifact ->
+                val ref = artifact.ref ?: return@mapNotNull null
+                val type = artifact.type ?: return@mapNotNull null
+                java.util.concurrent.CompletableFuture.runAsync {
+                    try {
+                        client.updateArtifactState(ref, type, newState)
+                        results.incrementAndGet()
+                    } catch (e: Exception) {
+                        LOG.error("Failed to update ${artifact.formattedID}", e)
+                        failures.incrementAndGet()
+                    }
                 }
             }
 
+            // Wait for all updates to complete
+            java.util.concurrent.CompletableFuture.allOf(*futures.toTypedArray()).join()
+
             ApplicationManager.getApplication().invokeLater {
                 if (project.isDisposed) return@invokeLater
-                if (failed > 0) {
+                if (failures.get() > 0) {
                     Messages.showWarningDialog(
                         project,
-                        "Updated: $success, Failed: $failed",
+                        "Updated: ${results.get()}, Failed: ${failures.get()}",
                         "Rally - State Change"
                     )
                 }
-                client.clearCache() // Invalidate after state change
+                client.clearArtifactCache() // Invalidate after state change
                 loadTickets() // Refresh
             }
         }
