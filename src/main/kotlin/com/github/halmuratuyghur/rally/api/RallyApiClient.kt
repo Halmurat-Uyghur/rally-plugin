@@ -460,6 +460,9 @@ class RallyApiClient(
      * Get the current iteration (sprint) by today's date.
      */
     fun queryCurrentIteration(workspaceRef: String? = null, projectRef: String? = null): RallyIteration? {
+        val cacheKey = "currentIteration:${workspaceRef}|${projectRef}"
+        getCached<RallyIteration>(cacheKey)?.let { return it }
+
         val today = java.time.LocalDate.now().toString()
         val query = "((StartDate <= \"$today\") AND (EndDate >= \"$today\"))"
         val encodedQuery = URLEncoder.encode(query, StandardCharsets.UTF_8)
@@ -479,7 +482,9 @@ class RallyApiClient(
 
         val type = object : TypeToken<RallyQueryResult<RallyIteration>>() {}.type
         val result: RallyQueryResult<RallyIteration> = gson.fromJson(response.body(), type)
-        return result.queryResult.results.firstOrNull()
+        val iteration = result.queryResult.results.firstOrNull()
+        if (iteration != null) putCache(cacheKey, iteration)
+        return iteration
     }
 
     /**
