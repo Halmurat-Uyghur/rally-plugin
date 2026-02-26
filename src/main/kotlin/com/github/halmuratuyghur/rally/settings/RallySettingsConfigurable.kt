@@ -35,7 +35,7 @@ class RallySettingsConfigurable : Configurable {
             toolTipText = "Workspace reference (e.g., /workspace/12345)"
         }
         usernameField = JBTextField().apply {
-            toolTipText = "Rally UserName (shown in Test Connection result). Used for 'My Tickets' filter. Can be any user's username."
+            toolTipText = "Your Rally UserName (email address, e.g. john.doe@company.com). Used for 'My Tickets' filter and 'Assign to me'. Use Test Connection to validate."
         }
         exportDirField = TextFieldWithBrowseButton().apply {
             addBrowseFolderListener(
@@ -116,12 +116,27 @@ class RallySettingsConfigurable : Configurable {
         ApplicationManager.getApplication().executeOnPooledThread {
             try {
                 val client = RallyApiClient(url, key)
-                val user = client.getCurrentUser()
-                val displayName = user.displayName ?: "Unknown"
-                val userName = user.userName ?: "Unknown"
+                val apiKeyOwner = client.getCurrentUser()
+                val apiKeyName = apiKeyOwner.displayName ?: "Unknown"
+                val apiKeyUserName = apiKeyOwner.userName ?: "Unknown"
+
+                // Check if a username is configured and validate it
+                val configuredUsername = usernameField?.text?.trim() ?: ""
+                val usernameInfo = if (configuredUsername.isNotBlank()) {
+                    try {
+                        val configuredUser = client.getUserByUsername(configuredUsername)
+                        val name = configuredUser.displayName ?: configuredUser.refObjectName ?: "Unknown"
+                        "\n\nConfigured Username: $configuredUsername\nResolved to: $name (valid)"
+                    } catch (_: Exception) {
+                        "\n\nConfigured Username: $configuredUsername\nWarning: No Rally user found with this UserName! 'My Tickets' filter will not work."
+                    }
+                } else {
+                    "\n\nUsername field is empty. Enter your Rally UserName (email) for 'My Tickets' filter."
+                }
+
                 ApplicationManager.getApplication().invokeLater {
                     Messages.showInfoMessage(
-                        "Connected successfully!\n\nDisplay Name: $displayName\nUserName (for queries): $userName\n\nUse the UserName value above in the Username field for 'My Tickets' filter.",
+                        "Connected successfully!\n\nAPI Key Owner: $apiKeyName ($apiKeyUserName)$usernameInfo",
                         "Rally Connection"
                     )
                 }

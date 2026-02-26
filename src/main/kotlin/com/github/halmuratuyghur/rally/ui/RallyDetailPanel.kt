@@ -66,9 +66,9 @@ class RallyDetailPanel(private val project: Project) {
     // Tabbed pane
     private val tabbedPane = JBTabbedPane()
 
-    private var currentArtifactRef: String? = null
-    private var currentArtifact: RallyArtifact? = null
-    private var currentClient: RallyApiClient? = null
+    @Volatile private var currentArtifactRef: String? = null
+    @Volatile private var currentArtifact: RallyArtifact? = null
+    @Volatile private var currentClient: RallyApiClient? = null
 
     // Header action buttons
     private val copyButton = JLabel(AllIcons.Actions.Copy).apply {
@@ -478,7 +478,9 @@ class RallyDetailPanel(private val project: Project) {
         val objectId = selected.objectID ?: return
         val baseUrl = client.serverUrl.trimEnd('/')
         val url = if (!baseUrl.startsWith("http")) "https://$baseUrl" else baseUrl
-        BrowserUtil.browse("$url/#/detail/testcase/$objectId")
+        val projectOid = getParentProjectOid()
+        val projectSegment = if (projectOid != null) "${projectOid}d/" else ""
+        BrowserUtil.browse("$url/#/${projectSegment}detail/testcase/$objectId")
     }
 
     // ── Task Context Menu ───────────────────────────────────────
@@ -504,7 +506,9 @@ class RallyDetailPanel(private val project: Project) {
         val objectId = selected.objectID ?: return
         val baseUrl = client.serverUrl.trimEnd('/')
         val url = if (!baseUrl.startsWith("http")) "https://$baseUrl" else baseUrl
-        BrowserUtil.browse("$url/#/detail/task/$objectId")
+        val projectOid = getParentProjectOid()
+        val projectSegment = if (projectOid != null) "${projectOid}d/" else ""
+        BrowserUtil.browse("$url/#/${projectSegment}detail/task/$objectId")
     }
 
     // ── Attachment Context Menu & Actions ────────────────────────
@@ -579,10 +583,21 @@ class RallyDetailPanel(private val project: Project) {
         val objectId = selected.objectID ?: return
         val baseUrl = client.serverUrl.trimEnd('/')
         val url = if (!baseUrl.startsWith("http")) "https://$baseUrl" else baseUrl
-        BrowserUtil.browse("$url/#/detail/attachment/$objectId")
+        val projectOid = getParentProjectOid()
+        val projectSegment = if (projectOid != null) "${projectOid}d/" else ""
+        BrowserUtil.browse("$url/#/${projectSegment}detail/attachment/$objectId")
     }
 
     // ── Helpers ──────────────────────────────────────────────────
+
+    private fun getParentProjectOid(): String? {
+        val projectRef = when (val artifact = currentArtifact) {
+            is RallyUserStory -> artifact.project?.ref
+            is RallyDefect -> artifact.project?.ref
+            else -> null
+        }
+        return projectRef?.trimEnd('/')?.substringAfterLast('/')
+    }
 
     private fun stateColor(state: String): Color = when (state) {
         "In-Progress" -> JBColor(Color(0, 128, 0), Color(100, 200, 100))

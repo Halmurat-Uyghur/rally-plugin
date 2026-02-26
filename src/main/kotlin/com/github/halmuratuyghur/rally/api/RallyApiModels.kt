@@ -285,7 +285,13 @@ data class RallyIteration(
     val endDate: String? = null,
 
     @SerializedName("PlannedVelocity")
-    val plannedVelocity: Double? = null
+    val plannedVelocity: Double? = null,
+
+    @SerializedName("State")
+    val state: String? = null,
+
+    @SerializedName("Project")
+    val project: RallyRef? = null
 )
 
 /**

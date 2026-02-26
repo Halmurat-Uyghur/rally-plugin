@@ -70,8 +70,12 @@ class RallyApiClient(
      * but detail data we just wrote is still correct.
      */
     fun clearArtifactCache() {
-        queryCache.keys.removeAll {
-            it.startsWith("artifacts:") || it.startsWith("sprint:") || it.startsWith("currentIteration:")
+        val iter = queryCache.keys.iterator()
+        while (iter.hasNext()) {
+            val key = iter.next()
+            if (key.startsWith("artifacts:") || key.startsWith("sprint:") || key.startsWith("currentIteration:")) {
+                iter.remove()
+            }
         }
     }
 
@@ -204,8 +208,8 @@ class RallyApiClient(
     }
 
     // Stored workspace/project refs, set by the caller
-    var workspaceRef: String? = null
-    var projectRef: String? = null
+    @Volatile var workspaceRef: String? = null
+    @Volatile var projectRef: String? = null
 
     /**
      * Normalize a ref to full Rally API URL.
@@ -250,6 +254,24 @@ class RallyApiClient(
         }
 
         throw RallyApiException("No user found for the provided API key")
+    }
+
+    /**
+     * Get a user by their UserName (email).
+     * Uses the Rally user query endpoint instead of /user (which always returns the API key owner).
+     */
+    fun getUserByUsername(username: String): RallyUser {
+        val url = buildApiUrl("user") + "?" +
+                buildQuery("(UserName = \"$username\")", pageSize = 1, workspace = workspaceRef)
+        val response = executeGet(url)
+        handleResponse(response)
+
+        val root = JsonParser.parseString(response.body()).asJsonObject
+        val results = root.getAsJsonObject("QueryResult")?.getAsJsonArray("Results")
+        if (results != null && results.size() > 0) {
+            return gson.fromJson(results.get(0), RallyUser::class.java)
+        }
+        throw RallyApiException("No user found with UserName: $username")
     }
 
     /**
@@ -393,7 +415,8 @@ class RallyApiClient(
     }
 
     /**
-     * Build web URL for viewing an artifact in Rally
+     * Build web URL for viewing an artifact in Rally.
+     * Rally web UI URLs require the project OID: /#/<projectOID>d/detail/<type>/<objectID>
      */
     fun buildWebUrl(artifact: RallyArtifact): String {
         val baseUrl = normalizeServerUrl()
@@ -406,7 +429,18 @@ class RallyApiClient(
             else -> "detail"
         }
 
-        return "$baseUrl/#/detail/$detailPage/$objectId"
+        // Extract project OID from the artifact's project ref
+        val projectOid = when (artifact) {
+            is RallyUserStory -> artifact.project?.ref
+            is RallyDefect -> artifact.project?.ref
+            else -> null
+        }?.trimEnd('/')?.substringAfterLast('/')
+
+        return if (projectOid != null) {
+            "$baseUrl/#/${projectOid}d/detail/$detailPage/$objectId"
+        } else {
+            "$baseUrl/#/detail/$detailPage/$objectId"
+        }
     }
 
     /**
@@ -513,18 +547,27 @@ class RallyApiClient(
 
     /**
      * Query iterations (sprints) in the configured workspace/project.
+     * When a project is selected, filters iterations to that project only.
      * Returns iterations sorted by StartDate descending (most recent first).
      */
     fun queryIterations(pageSize: Int = MAX_PAGE_SIZE): List<RallyIteration> {
         var url = buildApiUrl("iteration") +
-                "?fetch=Name,ObjectID,_ref,StartDate,EndDate&pagesize=$pageSize" +
-                "&order=${URLEncoder.encode("StartDate desc", StandardCharsets.UTF_8)}"
+                "?fetch=Name,ObjectID,_ref,StartDate,EndDate,PlannedVelocity,Project,State&pagesize=$pageSize" +
+                "&order=${URLEncoder.encode("StartDate DESC,EndDate DESC,ObjectID", StandardCharsets.UTF_8)}"
+
+        // Filter by project in the query — without this, Rally returns iterations from all projects
+        if (!projectRef.isNullOrBlank()) {
+            val normalizedProjectRef = normalizeRef("project", projectRef!!)
+            val query = "(Project = \"$normalizedProjectRef\")"
+            url += "&query=${URLEncoder.encode(query, StandardCharsets.UTF_8)}"
+        }
 
         if (!workspaceRef.isNullOrBlank()) {
             url += "&workspace=${URLEncoder.encode(normalizeRef("workspace", workspaceRef!!), StandardCharsets.UTF_8)}"
         }
         if (!projectRef.isNullOrBlank()) {
             url += "&project=${URLEncoder.encode(normalizeRef("project", projectRef!!), StandardCharsets.UTF_8)}"
+            url += "&projectScopeUp=true&projectScopeDown=true"
         }
 
         val response = executeGet(url)

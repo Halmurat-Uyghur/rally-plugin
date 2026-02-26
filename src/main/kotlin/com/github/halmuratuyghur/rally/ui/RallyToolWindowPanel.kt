@@ -73,15 +73,15 @@ class RallyToolWindowPanel(private val project: Project) {
     private val detailPanel = RallyDetailPanel(project)
     private var mainSplitPane: JSplitPane? = null
 
-    private var allArtifacts: List<RallyArtifact> = emptyList()
-    private var currentClient: RallyApiClient? = null
-    private var loading = false
-    private var pendingReload = false
-    private var cachedProjects: List<RallyProject> = emptyList()
-    private var cachedIterations: List<RallyIteration> = emptyList()
-    private var projectsLoaded = false
-    private var iterationsLoaded = false
-    private var lastSettingsSnapshot: String = ""
+    @Volatile private var allArtifacts: List<RallyArtifact> = emptyList()
+    @Volatile private var currentClient: RallyApiClient? = null
+    @Volatile private var loading = false
+    @Volatile private var pendingReload = false
+    @Volatile private var cachedProjects: List<RallyProject> = emptyList()
+    @Volatile private var cachedIterations: List<RallyIteration> = emptyList()
+    @Volatile private var projectsLoaded = false
+    @Volatile private var iterationsLoaded = false
+    @Volatile private var lastSettingsSnapshot: String = ""
 
     init {
         setupUI()
@@ -231,7 +231,7 @@ class RallyToolWindowPanel(private val project: Project) {
         // Project change — also reset iteration cache since iterations are project-scoped
         projectCombo.addActionListener {
             if (projectsLoaded) {
-                updateClientProjectRef()
+                updateClientProjectRef(projectCombo.selectedIndex)
                 RallySettings.getInstance().selectedProject =
                     projectCombo.selectedItem as? String ?: ""
                 iterationsLoaded = false
@@ -333,6 +333,13 @@ class RallyToolWindowPanel(private val project: Project) {
         clearStatusIcon()
         statusLabel.text = "Loading..."
 
+        // Capture all UI state on the EDT before dispatching to background thread
+        val scope = scopeCombo.selectedItem as? String ?: "My Tickets"
+        val stateFilter = stateCombo.selectedItem as? String ?: "Any State"
+        val selectedIter = iterationCombo.selectedItem as? String ?: ""
+        val selectedProjectIndex = projectCombo.selectedIndex
+        val pageSize = if (scope == "Recent Activity") 20 else settings.pageSize
+
         ApplicationManager.getApplication().executeOnPooledThread {
             try {
                 val client = getClient()
@@ -346,19 +353,14 @@ class RallyToolWindowPanel(private val project: Project) {
                 }
 
                 // Ensure projectRef is set from dropdown before querying iterations or artifacts
-                updateClientProjectRef()
+                updateClientProjectRef(selectedProjectIndex)
 
                 // Load iterations if not yet loaded (or reset after project change)
                 if (!iterationsLoaded) {
                     loadIterations(client)
                 }
 
-                val scope = scopeCombo.selectedItem as? String ?: "My Tickets"
-                val stateFilter = stateCombo.selectedItem as? String ?: "Any State"
-                val query = buildQuery(scope, settings)
-                val pageSize = if (scope == "Recent Activity") 20 else settings.pageSize
-
-                val selectedIter = iterationCombo.selectedItem as? String ?: ""
+                val query = buildQuery(scope, selectedIter, settings)
                 val hasIterationFilter = selectedIter.isNotBlank() && selectedIter != "All Sprints"
                 // Sprint summary can reuse main artifacts only when the main query has no extra
                 // filters (owner, etc.) beyond the iteration — otherwise counts would be wrong.
@@ -412,7 +414,9 @@ class RallyToolWindowPanel(private val project: Project) {
 
                 // Wait for sprint summary to finish (it updates UI itself)
                 if (sprintFuture != null) {
-                    try { sprintFuture.get() } catch (_: Exception) {}
+                    try { sprintFuture.get() } catch (e: Exception) {
+                        LOG.warn("Failed to load sprint summary", e)
+                    }
                 }
 
             } catch (e: Exception) {
@@ -438,8 +442,8 @@ class RallyToolWindowPanel(private val project: Project) {
             val projects = client.queryProjects()
             cachedProjects = projects
 
-            ApplicationManager.getApplication().invokeAndWait {
-                if (project.isDisposed) return@invokeAndWait
+            ApplicationManager.getApplication().invokeLater {
+                if (project.isDisposed) return@invokeLater
 
                 // Temporarily remove listener to avoid triggering loadTickets during population
                 val listeners = projectCombo.actionListeners
@@ -470,8 +474,8 @@ class RallyToolWindowPanel(private val project: Project) {
             }
         } catch (e: Exception) {
             LOG.warn("Failed to load projects", e)
-            ApplicationManager.getApplication().invokeAndWait {
-                if (project.isDisposed) return@invokeAndWait
+            ApplicationManager.getApplication().invokeLater {
+                if (project.isDisposed) return@invokeLater
                 projectCombo.removeAllItems()
                 projectCombo.addItem("All Projects")
                 projectCombo.isEnabled = false
@@ -482,15 +486,12 @@ class RallyToolWindowPanel(private val project: Project) {
 
     private fun loadIterations(client: RallyApiClient) {
         try {
-            val rawIterations = client.queryIterations()
-            // Deduplicate by name — Rally returns the same iteration per project
-            val iterations = rawIterations.distinctBy { it.name }
+            val iterations = client.queryIterations()
             cachedIterations = iterations
 
-            // Use invokeAndWait so the combo is fully populated before
-            // loadTickets() continues to build the query from the selection
-            ApplicationManager.getApplication().invokeAndWait {
-                if (project.isDisposed) return@invokeAndWait
+            // Use invokeLater to populate combo on EDT without blocking the pooled thread
+            ApplicationManager.getApplication().invokeLater {
+                if (project.isDisposed) return@invokeLater
 
                 val listeners = iterationCombo.actionListeners
                 listeners.forEach { iterationCombo.removeActionListener(it) }
@@ -519,8 +520,8 @@ class RallyToolWindowPanel(private val project: Project) {
             }
         } catch (e: Exception) {
             LOG.warn("Failed to load iterations", e)
-            ApplicationManager.getApplication().invokeAndWait {
-                if (project.isDisposed) return@invokeAndWait
+            ApplicationManager.getApplication().invokeLater {
+                if (project.isDisposed) return@invokeLater
                 iterationCombo.removeAllItems()
                 iterationCombo.addItem("All Sprints")
                 iterationCombo.isEnabled = false
@@ -529,9 +530,8 @@ class RallyToolWindowPanel(private val project: Project) {
         }
     }
 
-    private fun updateClientProjectRef() {
+    private fun updateClientProjectRef(selectedIndex: Int) {
         val client = currentClient ?: return
-        val selectedIndex = projectCombo.selectedIndex
         if (selectedIndex <= 0) {
             // "All Projects" or nothing selected — no project filter
             client.projectRef = null
@@ -543,7 +543,7 @@ class RallyToolWindowPanel(private val project: Project) {
         }
     }
 
-    private fun buildQuery(scope: String, settings: RallySettings): String? {
+    private fun buildQuery(scope: String, selectedIter: String, settings: RallySettings): String? {
         // workspace/project are passed as URL params by the API client, not as query conditions
         // State/type filtering is done client-side since ScheduleState vs State differs by type
         val conditions = mutableListOf<String>()
@@ -552,7 +552,6 @@ class RallyToolWindowPanel(private val project: Project) {
             conditions.add("(Owner.UserName = \"${settings.username}\")")
         }
 
-        val selectedIter = iterationCombo.selectedItem as? String ?: ""
         if (selectedIter.isNotBlank() && selectedIter != "All Sprints") {
             conditions.add("(Iteration.Name = \"$selectedIter\")")
         }
@@ -560,7 +559,7 @@ class RallyToolWindowPanel(private val project: Project) {
         val query = when (conditions.size) {
             0 -> null
             1 -> conditions[0]
-            else -> conditions.reduce { acc, cond -> "(($acc) AND ($cond))" }
+            else -> conditions.reduce { acc, cond -> "($acc AND $cond)" }
         }
         LOG.info("Rally query: $query (scope=$scope, iteration='$selectedIter', username='${settings.username}')")
         return query
@@ -678,8 +677,12 @@ class RallyToolWindowPanel(private val project: Project) {
                         it.name?.contains(query, ignoreCase = true) == true
             }
         }
+        // Temporarily remove selection listener to avoid firing events during bulk update
+        val selectionListeners = artifactList.listSelectionListeners
+        selectionListeners.forEach { artifactList.removeListSelectionListener(it) }
         listModel.clear()
         filtered.forEach { listModel.addElement(it) }
+        selectionListeners.forEach { artifactList.addListSelectionListener(it) }
         updateStats(filtered)
     }
 
@@ -730,8 +733,8 @@ class RallyToolWindowPanel(private val project: Project) {
                 } else {
                     null
                 }
-                val ownerRef = if (assignToMe) {
-                    try { client.getCurrentUser().ref } catch (_: Exception) { null }
+                val ownerRef = if (assignToMe && settings.username.isNotBlank()) {
+                    try { client.getUserByUsername(settings.username).ref } catch (_: Exception) { null }
                 } else {
                     null
                 }
@@ -850,12 +853,13 @@ class RallyToolWindowPanel(private val project: Project) {
             attachPanel.add(attachmentPathField, BorderLayout.CENTER)
             val browseButton = JButton("Browse...")
             browseButton.addActionListener {
-                val chooser = javax.swing.JFileChooser()
-                chooser.fileFilter = javax.swing.filechooser.FileNameExtensionFilter("ZIP files", "zip")
-                chooser.dialogTitle = "Select ZIP file to attach"
-                if (chooser.showOpenDialog(contentPanel) == javax.swing.JFileChooser.APPROVE_OPTION) {
-                    attachmentFile = chooser.selectedFile
-                    attachmentPathField.text = chooser.selectedFile.name
+                val descriptor = com.intellij.openapi.fileChooser.FileChooserDescriptorFactory.createSingleFileDescriptor()
+                    .withTitle("Select ZIP file to attach")
+                    .withFileFilter { it.extension.equals("zip", ignoreCase = true) }
+                val chosen = com.intellij.openapi.fileChooser.FileChooser.chooseFile(descriptor, project, null)
+                if (chosen != null) {
+                    attachmentFile = java.io.File(chosen.path)
+                    attachmentPathField.text = chosen.name
                 }
             }
             attachPanel.add(browseButton, BorderLayout.EAST)
