@@ -13,6 +13,10 @@ import java.nio.file.Files
 import java.nio.file.Paths
 import java.time.Instant
 import java.util.*
+import java.util.concurrent.CompletableFuture
+import java.util.concurrent.ConcurrentHashMap
+import java.util.concurrent.Semaphore
+import java.util.concurrent.atomic.AtomicInteger
 import java.util.regex.Pattern
 
 class RallyExporter(private val client: RallyApiClient) {
@@ -30,6 +34,9 @@ class RallyExporter(private val client: RallyApiClient) {
             .serializeNulls()
             .create()
     }
+
+    /** Per-session cache for downloaded attachment paths (deduplicates across JSON+Markdown export). */
+    private val downloadedPaths = ConcurrentHashMap<String, String?>()
 
     // ── Test Case Export ─────────────────────────────────────────
 
@@ -105,16 +112,16 @@ class RallyExporter(private val client: RallyApiClient) {
      */
     fun bulkExportJson(artifacts: List<com.github.halmuratuyghur.rally.api.RallyArtifact>, outputDir: String, fileName: String = "bulk_export", onProgress: ((Int) -> Unit)? = null): Int {
         LOG.info("Bulk exporting ${artifacts.size} artifacts to JSON")
+        client.enterBulkMode()
+        try {
+        // Pre-fetch all descriptions in parallel (10 concurrent)
+        val descriptionMap = prefetchDescriptions(artifacts, onProgress)
 
         val array = JsonArray()
-        var processed = 0
         for (artifact in artifacts) {
             val id = artifact.formattedID ?: continue
             try {
-                // Fetch description on demand if not present (list queries omit it for speed)
-                val desc = artifact.description
-                    ?: artifact.ref?.let { client.fetchDescription(it) }
-                    ?: ""
+                val desc = descriptionMap[id] ?: ""
 
                 val obj = JsonObject().apply {
                     addProperty("formattedID", id)
@@ -144,12 +151,8 @@ class RallyExporter(private val client: RallyApiClient) {
                 }
 
                 array.add(obj)
-                processed++
-                onProgress?.invoke(processed)
             } catch (e: Exception) {
                 LOG.warn("Failed to process $id for bulk export", e)
-                processed++
-                onProgress?.invoke(processed)
             }
         }
 
@@ -165,6 +168,9 @@ class RallyExporter(private val client: RallyApiClient) {
         file.writeText(gson.toJson(output), StandardCharsets.UTF_8)
         LOG.info("Bulk export JSON: ${file.absolutePath} (${array.size()} artifacts)")
         return array.size()
+        } finally {
+            client.exitBulkMode()
+        }
     }
 
     /**
@@ -173,74 +179,102 @@ class RallyExporter(private val client: RallyApiClient) {
      */
     fun bulkExportMarkdown(artifacts: List<com.github.halmuratuyghur.rally.api.RallyArtifact>, outputDir: String, fileName: String = "bulk_export", onProgress: ((Int) -> Unit)? = null): Int {
         LOG.info("Bulk exporting ${artifacts.size} artifacts to Markdown")
-
-        val md = StringBuilder()
-        md.appendLine("# Rally Bulk Export")
-        md.appendLine()
-        md.appendLine("Exported: ${Instant.now()}")
-        md.appendLine("Total artifacts: ${artifacts.size}")
-        md.appendLine()
-        md.appendLine("---")
-        md.appendLine()
-
-        var count = 0
-        var processed = 0
-        for (artifact in artifacts) {
-            val id = artifact.formattedID ?: continue
-            try {
-                md.appendLine("## $id — ${artifact.name ?: "Untitled"}")
-                md.appendLine()
-                md.appendLine("- **Type:** ${artifact.type ?: ""}")
-                md.appendLine("- **State:** ${artifact.scheduleState ?: artifact.state ?: ""}")
-                md.appendLine("- **Owner:** ${artifact.owner?.displayName ?: artifact.owner?.refObjectName ?: ""}")
-                md.appendLine("- **Created:** ${artifact.creationDate?.take(10) ?: ""}")
-                md.appendLine("- **Updated:** ${artifact.lastUpdateDate?.take(10) ?: ""}")
-
-                if (artifact is com.github.halmuratuyghur.rally.api.RallyDefect) {
-                    md.appendLine("- **Severity:** ${artifact.severity ?: ""}")
-                    md.appendLine("- **Priority:** ${artifact.priority ?: ""}")
-                    md.appendLine("- **Environment:** ${artifact.environment ?: ""}")
-                    md.appendLine("- **Project:** ${artifact.project?.refObjectName ?: artifact.project?.name ?: ""}")
-                    md.appendLine("- **Iteration:** ${artifact.iteration?.refObjectName ?: artifact.iteration?.name ?: ""}")
-                }
-
-                if (artifact is com.github.halmuratuyghur.rally.api.RallyUserStory) {
-                    md.appendLine("- **Plan Estimate:** ${artifact.planEstimate ?: ""}")
-                    md.appendLine("- **Project:** ${artifact.project?.refObjectName ?: artifact.project?.name ?: ""}")
-                    md.appendLine("- **Iteration:** ${artifact.iteration?.refObjectName ?: artifact.iteration?.name ?: ""}")
-                }
-
-                // Fetch description on demand if not present (list queries omit it for speed)
-                val rawDesc = artifact.description
-                    ?: artifact.ref?.let { client.fetchDescription(it) }
-                    ?: ""
-                val desc = stripHtml(rawDesc)
-                if (desc.isNotBlank()) {
-                    md.appendLine()
-                    md.appendLine("### Description")
-                    md.appendLine()
-                    md.appendLine(desc)
-                }
-
-                md.appendLine()
-                md.appendLine("---")
-                md.appendLine()
-                count++
-                processed++
-                onProgress?.invoke(processed)
-            } catch (e: Exception) {
-                LOG.warn("Failed to process $id for bulk export", e)
-                processed++
-                onProgress?.invoke(processed)
-            }
-        }
+        client.enterBulkMode()
+        try {
+        // Pre-fetch all descriptions in parallel (10 concurrent)
+        val descriptionMap = prefetchDescriptions(artifacts, onProgress)
 
         val dir = File(outputDir)
         dir.mkdirs()
         val file = File(dir, "$fileName.md")
-        file.writeText(md.toString(), StandardCharsets.UTF_8)
+
+        var count = 0
+        file.bufferedWriter(StandardCharsets.UTF_8).use { writer ->
+            writer.write("# Rally Bulk Export\n\n")
+            writer.write("Exported: ${Instant.now()}\n")
+            writer.write("Total artifacts: ${artifacts.size}\n\n---\n\n")
+
+            for (artifact in artifacts) {
+                val id = artifact.formattedID ?: continue
+                try {
+                    writer.write("## $id — ${artifact.name ?: "Untitled"}\n\n")
+                    writer.write("- **Type:** ${artifact.type ?: ""}\n")
+                    writer.write("- **State:** ${artifact.scheduleState ?: artifact.state ?: ""}\n")
+                    writer.write("- **Owner:** ${artifact.owner?.displayName ?: artifact.owner?.refObjectName ?: ""}\n")
+                    writer.write("- **Created:** ${artifact.creationDate?.take(10) ?: ""}\n")
+                    writer.write("- **Updated:** ${artifact.lastUpdateDate?.take(10) ?: ""}\n")
+
+                    if (artifact is com.github.halmuratuyghur.rally.api.RallyDefect) {
+                        writer.write("- **Severity:** ${artifact.severity ?: ""}\n")
+                        writer.write("- **Priority:** ${artifact.priority ?: ""}\n")
+                        writer.write("- **Environment:** ${artifact.environment ?: ""}\n")
+                        writer.write("- **Project:** ${artifact.project?.refObjectName ?: artifact.project?.name ?: ""}\n")
+                        writer.write("- **Iteration:** ${artifact.iteration?.refObjectName ?: artifact.iteration?.name ?: ""}\n")
+                    }
+
+                    if (artifact is com.github.halmuratuyghur.rally.api.RallyUserStory) {
+                        writer.write("- **Plan Estimate:** ${artifact.planEstimate ?: ""}\n")
+                        writer.write("- **Project:** ${artifact.project?.refObjectName ?: artifact.project?.name ?: ""}\n")
+                        writer.write("- **Iteration:** ${artifact.iteration?.refObjectName ?: artifact.iteration?.name ?: ""}\n")
+                    }
+
+                    val desc = stripHtml(descriptionMap[id] ?: "")
+                    if (desc.isNotBlank()) {
+                        writer.write("\n### Description\n\n")
+                        writer.write(desc)
+                        writer.write("\n")
+                    }
+
+                    writer.write("\n---\n\n")
+                    writer.flush()
+                    count++
+                } catch (e: Exception) {
+                    LOG.warn("Failed to process $id for bulk export", e)
+                }
+            }
+        }
+
         LOG.info("Bulk export Markdown: ${file.absolutePath} ($count artifacts)")
         return count
+        } finally {
+            client.exitBulkMode()
+        }
+    }
+
+    /**
+     * Pre-fetch descriptions for all artifacts in parallel (bounded to 10 concurrent).
+     * Returns a map of FormattedID -> description HTML.
+     */
+    private fun prefetchDescriptions(
+        artifacts: List<com.github.halmuratuyghur.rally.api.RallyArtifact>,
+        onProgress: ((Int) -> Unit)? = null
+    ): Map<String, String> {
+        val result = ConcurrentHashMap<String, String>()
+        val semaphore = Semaphore(10)
+        val counter = AtomicInteger(0)
+
+        val futures = artifacts.mapNotNull { artifact ->
+            val id = artifact.formattedID ?: return@mapNotNull null
+            val ref = artifact.ref
+            CompletableFuture.runAsync({
+                semaphore.acquire()
+                try {
+                    val desc = artifact.description
+                        ?: ref?.let { client.fetchDescription(it) }
+                        ?: ""
+                    result[id] = desc
+                } catch (e: Exception) {
+                    LOG.warn("Failed to fetch description for $id", e)
+                    result[id] = ""
+                } finally {
+                    semaphore.release()
+                    onProgress?.invoke(counter.incrementAndGet())
+                }
+            }, client.apiExecutor)
+        }
+
+        CompletableFuture.allOf(*futures.toTypedArray()).join()
+        return result
     }
 
     /**
@@ -389,28 +423,28 @@ class RallyExporter(private val client: RallyApiClient) {
         artifactId: String,
         outputDir: String
     ): JsonArray {
-        val array = JsonArray()
         val attachDir = "$outputDir${File.separator}${artifactId}_attachments"
 
-        for (att in attachments) {
+        // Download all attachments in parallel
+        val futures = attachments.map { att ->
             val attName = att.name ?: "unnamed"
-            val contentType = att.contentType ?: ""
+            CompletableFuture.supplyAsync({
+                val savedPath = downloadAttachmentContent(att, attachDir, attName)
+                Triple(att, attName, savedPath)
+            }, client.apiExecutor)
+        }
 
+        val array = JsonArray()
+        for (future in futures) {
+            val (att, attName, savedPath) = future.join()
             val obj = JsonObject().apply {
                 addProperty("name", attName)
-                addProperty("contentType", contentType)
+                addProperty("contentType", att.contentType ?: "")
                 addProperty("size", att.size ?: 0)
                 addProperty("description", att.description ?: "")
+                addProperty("downloaded", savedPath != null)
+                if (savedPath != null) addProperty("filePath", savedPath)
             }
-
-            val savedPath = downloadAttachmentContent(att, attachDir, attName)
-            if (savedPath != null) {
-                obj.addProperty("filePath", savedPath)
-                obj.addProperty("downloaded", true)
-            } else {
-                obj.addProperty("downloaded", false)
-            }
-
             array.add(obj)
         }
         return array
@@ -421,9 +455,13 @@ class RallyExporter(private val client: RallyApiClient) {
         attachDir: String,
         fileName: String
     ): String? {
-        try {
-            val contentRef = attachment.content?.ref ?: return null
+        val contentRef = attachment.content?.ref ?: return null
+        val cacheKey = "$contentRef:$attachDir:$fileName"
 
+        // Check per-session dedup cache (avoids re-downloading for JSON+Markdown exports)
+        downloadedPaths[cacheKey]?.let { return it }
+
+        return try {
             Files.createDirectories(Paths.get(attachDir))
 
             val base64Content = client.getAttachmentContent(contentRef)
@@ -432,10 +470,13 @@ class RallyExporter(private val client: RallyApiClient) {
             val outputFile = File(attachDir, fileName)
             Files.write(outputFile.toPath(), fileBytes)
             LOG.info("Saved attachment: ${outputFile.absolutePath} (${fileBytes.size} bytes)")
-            return outputFile.absolutePath
+            val path = outputFile.absolutePath
+            downloadedPaths[cacheKey] = path
+            path
         } catch (e: Exception) {
             LOG.warn("Failed to download attachment '$fileName'", e)
-            return null
+            downloadedPaths[cacheKey] = null
+            null
         }
     }
 

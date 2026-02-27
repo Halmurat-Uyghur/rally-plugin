@@ -79,12 +79,14 @@ class RallySettingsConfigurable : Configurable {
     }
 
     override fun apply() {
-        val state = RallySettings.getInstance().state
+        val settings = RallySettings.getInstance()
+        val state = settings.state
         state.serverUrl = serverUrlField?.text?.trim() ?: ""
-        state.apiKey = String(apiKeyField?.password ?: charArrayOf()).trim()
         state.workspaceRef = workspaceRefField?.text?.trim() ?: ""
         state.username = usernameField?.text?.trim() ?: ""
         state.exportDirectory = exportDirField?.text?.trim() ?: ""
+        // API key stored in PasswordSafe, not in XML
+        settings.apiKey = String(apiKeyField?.password ?: charArrayOf()).trim()
     }
 
     override fun reset() {

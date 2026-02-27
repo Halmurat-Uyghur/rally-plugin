@@ -66,6 +66,7 @@ class RallyToolWindowPanel(private val project: Project) {
     private val projectCombo = ComboBox<String>().apply { isEnabled = false }
     private val iterationCombo = ComboBox<String>().apply { isEnabled = false }
     private val searchField = SearchTextField()
+    private val searchDebounceTimer = javax.swing.Timer(300) { applySearchFilter() }.apply { isRepeats = false }
     private val statsLabel = JBLabel("0 items")
     private val sprintLabel = JBLabel("")
     private val statusLabel = JBLabel("Ready")
@@ -82,6 +83,10 @@ class RallyToolWindowPanel(private val project: Project) {
     @Volatile private var projectsLoaded = false
     @Volatile private var iterationsLoaded = false
     @Volatile private var lastSettingsSnapshot: String = ""
+    private var lastScope: String = ""
+    private var lastState: String = ""
+    private var lastProject: String = ""
+    private var lastIteration: String = ""
 
     init {
         setupUI()
@@ -224,17 +229,30 @@ class RallyToolWindowPanel(private val project: Project) {
     }
 
     private fun setupListeners() {
-        // Scope/state change
-        scopeCombo.addActionListener { loadTickets() }
-        stateCombo.addActionListener { loadTickets() }
+        // Scope/state change (with duplicate-selection guard)
+        scopeCombo.addActionListener {
+            val newScope = scopeCombo.selectedItem as? String ?: return@addActionListener
+            if (newScope == lastScope) return@addActionListener
+            lastScope = newScope
+            loadTickets()
+        }
+        stateCombo.addActionListener {
+            val newState = stateCombo.selectedItem as? String ?: return@addActionListener
+            if (newState == lastState) return@addActionListener
+            lastState = newState
+            loadTickets()
+        }
 
         // Project change — also reset iteration cache since iterations are project-scoped
         projectCombo.addActionListener {
             if (projectsLoaded) {
+                val newProject = projectCombo.selectedItem as? String ?: return@addActionListener
+                if (newProject == lastProject) return@addActionListener
+                lastProject = newProject
                 updateClientProjectRef(projectCombo.selectedIndex)
-                RallySettings.getInstance().selectedProject =
-                    projectCombo.selectedItem as? String ?: ""
+                RallySettings.getInstance().selectedProject = newProject
                 iterationsLoaded = false
+                lastIteration = ""
                 loadTickets()
             }
         }
@@ -242,16 +260,18 @@ class RallyToolWindowPanel(private val project: Project) {
         // Iteration change
         iterationCombo.addActionListener {
             if (iterationsLoaded) {
-                RallySettings.getInstance().selectedIteration =
-                    iterationCombo.selectedItem as? String ?: ""
+                val newIteration = iterationCombo.selectedItem as? String ?: return@addActionListener
+                if (newIteration == lastIteration) return@addActionListener
+                lastIteration = newIteration
+                RallySettings.getInstance().selectedIteration = newIteration
                 loadTickets()
             }
         }
 
-        // Search as you type
+        // Search as you type (debounced — waits 300ms after last keystroke)
         searchField.addDocumentListener(object : com.intellij.ui.DocumentAdapter() {
             override fun textChanged(e: javax.swing.event.DocumentEvent) {
-                applySearchFilter()
+                searchDebounceTimer.restart()
             }
         })
 
@@ -367,21 +387,21 @@ class RallyToolWindowPanel(private val project: Project) {
                 val mainQueryIsIterationOnly = hasIterationFilter && query == "(Iteration.Name = \"$selectedIter\")"
 
                 // Load artifacts; sprint summary runs in parallel only when it needs separate API calls
-                val artifactsFuture = java.util.concurrent.CompletableFuture.supplyAsync {
-                    client.queryAllArtifacts(query, pageSize)
-                }
+                val artifactsFuture = java.util.concurrent.CompletableFuture.supplyAsync({
+                    client.queryAllArtifacts(query, pageSize, scope = scope, maxResults = pageSize)
+                }, client.apiExecutor)
                 val sprintFuture = if (!hasIterationFilter) {
                     // No iteration selected — sprint summary needs its own API calls
-                    java.util.concurrent.CompletableFuture.runAsync {
+                    java.util.concurrent.CompletableFuture.runAsync({
                         loadSprintSummary(client, settings, null)
-                    }
+                    }, client.apiExecutor)
                 } else if (!mainQueryIsIterationOnly) {
                     // Iteration selected but main query has extra filters (e.g. owner) —
                     // sprint summary needs unfiltered iteration data
-                    java.util.concurrent.CompletableFuture.runAsync {
+                    java.util.concurrent.CompletableFuture.runAsync({
                         val sprintArtifacts = client.queryIterationArtifacts(selectedIter)
                         computeSprintSummaryFromArtifacts(selectedIter, sprintArtifacts)
-                    }
+                    }, client.apiExecutor)
                 } else null
 
                 val artifacts = artifactsFuture.get()
@@ -756,8 +776,13 @@ class RallyToolWindowPanel(private val project: Project) {
                     val attachMsg = if (attachment != null) " with attachment" else ""
                     statusLabel.text = "Created $createdId$attachMsg"
                     Messages.showInfoMessage(project, "Created user story: $createdId$attachMsg", "Rally")
+                    // Optimistic update: prepend new item instead of full reload
+                    allArtifacts = listOf(created as RallyArtifact) + allArtifacts
                     client.clearArtifactCache()
-                    loadTickets()
+                    applySearchFilter()
+                    // Select the newly created item
+                    val index = listModel.indexOf(created)
+                    if (index >= 0) artifactList.selectedIndex = index
                 }
             } catch (e: Exception) {
                 LOG.error("Failed to create user story", e)
@@ -933,7 +958,7 @@ class RallyToolWindowPanel(private val project: Project) {
             val futures = selected.mapNotNull { artifact ->
                 val id = artifact.formattedID ?: return@mapNotNull null
                 val ref = artifact.ref
-                java.util.concurrent.CompletableFuture.runAsync {
+                java.util.concurrent.CompletableFuture.runAsync({
                     try {
                         exporter.exportArtifactJson(id, outputDir)
                         exporter.exportArtifactMarkdown(id, outputDir)
@@ -962,7 +987,7 @@ class RallyToolWindowPanel(private val project: Project) {
                             LOG.warn("Failed to query test cases for $id", e)
                         }
                     }
-                }
+                }, client.apiExecutor)
             }
 
             // Wait for all exports to complete
@@ -1012,20 +1037,22 @@ class RallyToolWindowPanel(private val project: Project) {
             val client = getClient()
             val results = java.util.concurrent.atomic.AtomicInteger(0)
             val failures = java.util.concurrent.atomic.AtomicInteger(0)
+            val successfulRefs = java.util.concurrent.ConcurrentHashMap.newKeySet<String>()
 
             // Update all selected artifacts in parallel
             val futures = selected.mapNotNull { artifact ->
                 val ref = artifact.ref ?: return@mapNotNull null
                 val type = artifact.type ?: return@mapNotNull null
-                java.util.concurrent.CompletableFuture.runAsync {
+                java.util.concurrent.CompletableFuture.runAsync({
                     try {
                         client.updateArtifactState(ref, type, newState)
+                        successfulRefs.add(ref)
                         results.incrementAndGet()
                     } catch (e: Exception) {
                         LOG.error("Failed to update ${artifact.formattedID}", e)
                         failures.incrementAndGet()
                     }
-                }
+                }, client.apiExecutor)
             }
 
             // Wait for all updates to complete
@@ -1040,8 +1067,19 @@ class RallyToolWindowPanel(private val project: Project) {
                         "Rally - State Change"
                     )
                 }
-                client.clearArtifactCache() // Invalidate after state change
-                loadTickets() // Refresh
+                // Optimistic update: patch in-memory list instead of full reload
+                allArtifacts = allArtifacts.map { artifact ->
+                    if (artifact.ref in successfulRefs) {
+                        when (artifact) {
+                            is RallyUserStory -> artifact.copy(scheduleState = newState)
+                            is RallyDefect -> artifact.copy(scheduleState = newState)
+                            else -> artifact
+                        }
+                    } else artifact
+                }
+                client.clearArtifactCache()
+                applySearchFilter()
+                statusLabel.text = "Updated ${results.get()}"
             }
         }
     }
@@ -1054,6 +1092,8 @@ class RallyToolWindowPanel(private val project: Project) {
             currentClient?.serverUrl != settings.serverUrl ||
             currentClient?.apiKey != settings.apiKey
         ) {
+            // Shut down the old client's thread pool to prevent thread leaks
+            currentClient?.apiExecutor?.shutdown()
             currentClient = RallyApiClient(settings.serverUrl, settings.apiKey)
             // Reset caches when client changes
             projectsLoaded = false
@@ -1068,6 +1108,21 @@ class RallyToolWindowPanel(private val project: Project) {
     // ── Cell Renderer ────────────────────────────────────────────
 
     private class ArtifactCellRenderer : ListCellRenderer<RallyArtifact> {
+        private val panel = JPanel(BorderLayout(8, 0)).apply { border = JBUI.Borders.empty(4, 6) }
+        private val iconLabel = JLabel()
+        private val textLabel = JLabel()
+        private val stateLabel = JLabel()
+        private val ownerLabel = JLabel()
+        private val rightPanel = JPanel(FlowLayout(FlowLayout.RIGHT, 8, 0)).apply { isOpaque = false }
+
+        init {
+            rightPanel.add(ownerLabel)
+            rightPanel.add(stateLabel)
+            panel.add(iconLabel, BorderLayout.WEST)
+            panel.add(textLabel, BorderLayout.CENTER)
+            panel.add(rightPanel, BorderLayout.EAST)
+        }
+
         override fun getListCellRendererComponent(
             list: JList<out RallyArtifact>,
             value: RallyArtifact,
@@ -1075,58 +1130,29 @@ class RallyToolWindowPanel(private val project: Project) {
             isSelected: Boolean,
             cellHasFocus: Boolean
         ): Component {
-            val panel = JPanel(BorderLayout(8, 0))
-            panel.border = JBUI.Borders.empty(4, 6)
+            panel.background = if (isSelected) list.selectionBackground else list.background
 
-            if (isSelected) {
-                panel.background = list.selectionBackground
-                panel.foreground = list.selectionForeground
-            } else {
-                panel.background = list.background
-                panel.foreground = list.foreground
-            }
-
-            // Type icon
-            val icon = when (value.type) {
+            iconLabel.icon = when (value.type) {
                 "HierarchicalRequirement" -> AllIcons.Nodes.PpLib
                 "Defect" -> AllIcons.General.Error
-                "Task" -> AllIcons.FileTypes.Any_type
                 else -> AllIcons.FileTypes.Any_type
             }
-            val iconLabel = JLabel(icon)
 
-            // FormattedID + Name
-            val id = value.formattedID ?: "?"
-            val name = value.name ?: "Untitled"
-            val textLabel = JLabel("$id: $name")
-            if (isSelected) textLabel.foreground = list.selectionForeground
+            textLabel.text = "${value.formattedID ?: "?"}: ${value.name ?: "Untitled"}"
+            textLabel.foreground = if (isSelected) list.selectionForeground else list.foreground
 
-            // State badge
             val state = value.scheduleState ?: value.state ?: "Unknown"
-            val stateLabel = JLabel(state)
-            stateLabel.foreground = when (state) {
+            stateLabel.text = state
+            stateLabel.foreground = if (isSelected) list.selectionForeground else when (state) {
                 "In-Progress" -> JBColor(Color(0, 128, 0), Color(100, 200, 100))
                 "Completed" -> JBColor(Color(0, 0, 180), Color(100, 150, 255))
                 "Accepted" -> JBColor.GRAY
                 "Defined" -> JBColor(Color(200, 120, 0), Color(255, 180, 80))
                 else -> JBColor.DARK_GRAY
             }
-            if (isSelected) stateLabel.foreground = list.selectionForeground
 
-            // Owner
-            val ownerName = value.owner?.displayName ?: value.owner?.refObjectName ?: ""
-            val ownerLabel = JLabel(ownerName)
-            ownerLabel.foreground = JBColor.GRAY
-            if (isSelected) ownerLabel.foreground = list.selectionForeground
-
-            val rightPanel = JPanel(FlowLayout(FlowLayout.RIGHT, 8, 0))
-            rightPanel.isOpaque = false
-            rightPanel.add(ownerLabel)
-            rightPanel.add(stateLabel)
-
-            panel.add(iconLabel, BorderLayout.WEST)
-            panel.add(textLabel, BorderLayout.CENTER)
-            panel.add(rightPanel, BorderLayout.EAST)
+            ownerLabel.text = value.owner?.displayName ?: value.owner?.refObjectName ?: ""
+            ownerLabel.foreground = if (isSelected) list.selectionForeground else JBColor.GRAY
 
             return panel
         }

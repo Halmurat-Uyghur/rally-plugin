@@ -1,5 +1,9 @@
 package com.github.halmuratuyghur.rally.settings
 
+import com.intellij.credentialStore.CredentialAttributes
+import com.intellij.credentialStore.Credentials
+import com.intellij.credentialStore.generateServiceName
+import com.intellij.ide.passwordSafe.PasswordSafe
 import com.intellij.openapi.application.ApplicationManager
 import com.intellij.openapi.components.PersistentStateComponent
 import com.intellij.openapi.components.State
@@ -13,6 +17,7 @@ class RallySettings : PersistentStateComponent<RallySettings.State> {
 
     data class State(
         var serverUrl: String = "https://rally1.rallydev.com",
+        @Deprecated("Use PasswordSafe via apiKey property instead")
         var apiKey: String = "",
         var workspaceRef: String = "",
         var username: String = "",
@@ -28,13 +33,25 @@ class RallySettings : PersistentStateComponent<RallySettings.State> {
 
     override fun loadState(state: State) {
         myState = state
+        // Migrate cleartext API key to PasswordSafe on first load
+        @Suppress("DEPRECATION")
+        if (state.apiKey.isNotBlank()) {
+            apiKey = state.apiKey
+            state.apiKey = ""
+        }
     }
 
     val serverUrl: String get() = myState.serverUrl
-    val apiKey: String get() = myState.apiKey
     val workspaceRef: String get() = myState.workspaceRef
     val username: String get() = myState.username
     val pageSize: Int get() = myState.pageSize
+
+    var apiKey: String
+        get() = PasswordSafe.instance.getPassword(credentialAttributes) ?: ""
+        set(value) {
+            PasswordSafe.instance.set(credentialAttributes, Credentials(CREDENTIAL_USER, value))
+        }
+
     var selectedProject: String
         get() = myState.selectedProject
         set(value) { myState.selectedProject = value }
@@ -45,9 +62,14 @@ class RallySettings : PersistentStateComponent<RallySettings.State> {
         get() = myState.exportDirectory
         set(value) { myState.exportDirectory = value }
 
-    fun isConfigured(): Boolean = myState.serverUrl.isNotBlank() && myState.apiKey.isNotBlank()
+    fun isConfigured(): Boolean = myState.serverUrl.isNotBlank() && apiKey.isNotBlank()
 
     companion object {
+        private const val CREDENTIAL_USER = "RallyPlugin"
+        private val credentialAttributes = CredentialAttributes(
+            generateServiceName("RallyPlugin", "apiKey")
+        )
+
         fun getInstance(): RallySettings {
             return ApplicationManager.getApplication().getService(RallySettings::class.java)
         }

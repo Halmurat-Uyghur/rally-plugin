@@ -260,7 +260,7 @@ class RallyDetailPanel(private val project: Project) {
         // Load description, test cases, tasks, and attachments in parallel
         ApplicationManager.getApplication().executeOnPooledThread {
             // Launch all four queries concurrently
-            val descFuture = CompletableFuture.supplyAsync {
+            val descFuture = CompletableFuture.supplyAsync({
                 // Fetch description on demand if not included in list query
                 var resolved = desc
                 if (resolved.isNullOrBlank()) {
@@ -276,28 +276,28 @@ class RallyDetailPanel(private val project: Project) {
                         resolved
                     }
                 } else null
-            }
+            }, client.apiExecutor)
 
-            val tcFuture = CompletableFuture.supplyAsync {
+            val tcFuture = CompletableFuture.supplyAsync({
                 try { client.queryTestCases(artifactRef) } catch (e: Exception) {
                     LOG.warn("Failed to load test cases for $id", e)
                     null
                 }
-            }
+            }, client.apiExecutor)
 
-            val taskFuture = CompletableFuture.supplyAsync {
+            val taskFuture = CompletableFuture.supplyAsync({
                 try { client.queryTasksForWorkProduct(artifactRef) } catch (e: Exception) {
                     LOG.warn("Failed to load tasks for $id", e)
                     null
                 }
-            }
+            }, client.apiExecutor)
 
-            val attachFuture = CompletableFuture.supplyAsync {
+            val attachFuture = CompletableFuture.supplyAsync({
                 try { client.queryAttachments(id) } catch (e: Exception) {
                     LOG.warn("Failed to load attachments for $id", e)
                     null
                 }
-            }
+            }, client.apiExecutor)
 
             // Update UI as each completes
             descFuture.thenAccept { resolvedDesc ->
@@ -317,7 +317,7 @@ class RallyDetailPanel(private val project: Project) {
                     if (currentArtifactRef != artifactRef) return@invokeLater
                     testCaseListModel.clear()
                     if (testCases != null) {
-                        testCases.forEach { testCaseListModel.addElement(it) }
+                        testCaseListModel.addAll(testCases)
                         val automated = testCases.count { it.method == "Automated" }
                         val manual = testCases.size - automated
                         testCaseSummaryLabel.text = "${testCases.size} total ($automated automated, $manual manual)"
@@ -333,7 +333,7 @@ class RallyDetailPanel(private val project: Project) {
                     if (currentArtifactRef != artifactRef) return@invokeLater
                     taskListModel.clear()
                     if (tasks != null) {
-                        tasks.forEach { taskListModel.addElement(it) }
+                        taskListModel.addAll(tasks)
                         tabbedPane.setTitleAt(TAB_TASKS, "Tasks (${tasks.size})")
                     } else {
                         tabbedPane.setTitleAt(TAB_TASKS, "Tasks (!)")
@@ -346,7 +346,7 @@ class RallyDetailPanel(private val project: Project) {
                     if (currentArtifactRef != artifactRef) return@invokeLater
                     attachmentListModel.clear()
                     if (attachments != null) {
-                        attachments.forEach { attachmentListModel.addElement(it) }
+                        attachmentListModel.addAll(attachments)
                         tabbedPane.setTitleAt(TAB_ATTACHMENTS, "Attachments (${attachments.size})")
                     } else {
                         tabbedPane.setTitleAt(TAB_ATTACHMENTS, "Attachments (!)")
@@ -463,7 +463,7 @@ class RallyDetailPanel(private val project: Project) {
                 if (currentArtifactRef != artifactRef) return@invokeLater
                 stepListModel.clear()
                 if (steps != null) {
-                    steps.forEach { stepListModel.addElement(it) }
+                    stepListModel.addAll(steps)
                     tabbedPane.setTitleAt(TAB_TEST_STEPS, "Test Steps (${steps.size})")
                 } else {
                     tabbedPane.setTitleAt(TAB_TEST_STEPS, "Test Steps (!)")
@@ -625,46 +625,58 @@ class RallyDetailPanel(private val project: Project) {
         if (!matcher.find()) return html
 
         matcher.reset()
-        val result = StringBuilder()
         val baseUrl = client.serverUrl.trimEnd('/')
         val normalizedBase = if (!baseUrl.startsWith("http")) "https://$baseUrl" else baseUrl
 
+        // Phase 1: Collect all image matches
+        data class ImageMatch(val start: Int, val end: Int, val fullMatch: String,
+                              val originalSrc: String, val objectId: String, val fileName: String)
+        val matches = mutableListOf<ImageMatch>()
         while (matcher.find()) {
-            val originalSrc = matcher.group(1)
-            val objectId = matcher.group(2)
-            val fileName = matcher.group(3)
-
-            try {
-                // Build full URL if relative
-                val fullUrl = if (originalSrc.startsWith("http")) {
-                    originalSrc
-                } else {
-                    "$normalizedBase$originalSrc"
-                }
-
-                val bytes = client.downloadAttachment(fullUrl)
-                val base64 = Base64.getEncoder().encodeToString(bytes)
-
-                // Guess content type from extension
-                val ext = fileName.substringAfterLast('.', "png").lowercase()
-                val contentType = when (ext) {
-                    "jpg", "jpeg" -> "image/jpeg"
-                    "gif" -> "image/gif"
-                    "svg" -> "image/svg+xml"
-                    "webp" -> "image/webp"
-                    else -> "image/png"
-                }
-
-                val dataUri = "data:$contentType;base64,$base64"
-                val replacement = matcher.group().replace(originalSrc, dataUri)
-                matcher.appendReplacement(result, java.util.regex.Matcher.quoteReplacement(replacement))
-            } catch (e: Exception) {
-                LOG.warn("Failed to download inline image OID=$objectId ($fileName)", e)
-                matcher.appendReplacement(result, java.util.regex.Matcher.quoteReplacement(matcher.group()))
-            }
+            matches.add(ImageMatch(
+                matcher.start(), matcher.end(), matcher.group(),
+                matcher.group(1), matcher.group(2), matcher.group(3)
+            ))
         }
-        matcher.appendTail(result)
-        return result.toString()
+        if (matches.isEmpty()) return html
+
+        // Phase 2: Download all images in parallel on the plugin's executor
+        val futures = matches.map { match ->
+            CompletableFuture.supplyAsync({
+                try {
+                    val fullUrl = if (match.originalSrc.startsWith("http")) {
+                        match.originalSrc
+                    } else {
+                        "$normalizedBase${match.originalSrc}"
+                    }
+                    val bytes = client.downloadAttachment(fullUrl)
+                    val base64 = Base64.getEncoder().encodeToString(bytes)
+                    val ext = match.fileName.substringAfterLast('.', "png").lowercase()
+                    val contentType = when (ext) {
+                        "jpg", "jpeg" -> "image/jpeg"
+                        "gif" -> "image/gif"
+                        "svg" -> "image/svg+xml"
+                        "webp" -> "image/webp"
+                        else -> "image/png"
+                    }
+                    "data:$contentType;base64,$base64"
+                } catch (e: Exception) {
+                    LOG.warn("Failed to download inline image OID=${match.objectId} (${match.fileName})", e)
+                    null
+                }
+            }, client.apiExecutor)
+        }
+        val results = futures.map { it.join() }
+
+        // Phase 3: Replace in reverse order to preserve string indices
+        val sb = StringBuilder(html)
+        for (i in matches.indices.reversed()) {
+            val match = matches[i]
+            val dataUri = results[i] ?: continue
+            val replacement = match.fullMatch.replace(match.originalSrc, dataUri)
+            sb.replace(match.start, match.end, replacement)
+        }
+        return sb.toString()
     }
 
     private fun formatFileSize(bytes: Long?): String {
@@ -680,6 +692,21 @@ class RallyDetailPanel(private val project: Project) {
     // ── Test Case Cell Renderer ─────────────────────────────────
 
     private class TestCaseCellRenderer : ListCellRenderer<RallyTestCase> {
+        private val panel = JPanel(BorderLayout(8, 0)).apply { border = JBUI.Borders.empty(3, 6) }
+        private val iconLabel = JLabel()
+        private val textLabel = JLabel()
+        private val methodLabel = JLabel()
+        private val verdictLabel = JLabel()
+        private val rightPanel = JPanel(FlowLayout(FlowLayout.RIGHT, 6, 0)).apply { isOpaque = false }
+
+        init {
+            rightPanel.add(verdictLabel)
+            rightPanel.add(methodLabel)
+            panel.add(iconLabel, BorderLayout.WEST)
+            panel.add(textLabel, BorderLayout.CENTER)
+            panel.add(rightPanel, BorderLayout.EAST)
+        }
+
         override fun getListCellRendererComponent(
             list: JList<out RallyTestCase>,
             value: RallyTestCase,
@@ -687,57 +714,29 @@ class RallyDetailPanel(private val project: Project) {
             isSelected: Boolean,
             cellHasFocus: Boolean
         ): Component {
-            val panel = JPanel(BorderLayout(8, 0))
-            panel.border = JBUI.Borders.empty(3, 6)
+            panel.background = if (isSelected) list.selectionBackground else list.background
 
-            if (isSelected) {
-                panel.background = list.selectionBackground
-                panel.foreground = list.selectionForeground
-            } else {
-                panel.background = list.background
-                panel.foreground = list.foreground
-            }
+            iconLabel.icon = if (value.method == "Automated") AllIcons.Actions.Checked else AllIcons.Actions.Edit
 
-            // Icon: checkmark for Automated, pencil for Manual
-            val icon = if (value.method == "Automated") AllIcons.Actions.Checked else AllIcons.Actions.Edit
-            val iconLabel = JLabel(icon)
-
-            // FormattedID + Name
-            val id = value.formattedID ?: "?"
-            val name = value.name ?: "Untitled"
-            val textLabel = JLabel("$id: $name")
-            if (isSelected) textLabel.foreground = list.selectionForeground
-
-            // Right side: Method badge + LastVerdict
-            val rightPanel = JPanel(FlowLayout(FlowLayout.RIGHT, 6, 0))
-            rightPanel.isOpaque = false
+            textLabel.text = "${value.formattedID ?: "?"}: ${value.name ?: "Untitled"}"
+            textLabel.foreground = if (isSelected) list.selectionForeground else list.foreground
 
             val method = value.method ?: "Manual"
-            val methodLabel = JLabel(method)
-            methodLabel.foreground = if (method == "Automated") {
+            methodLabel.text = method
+            methodLabel.foreground = if (isSelected) list.selectionForeground else if (method == "Automated") {
                 JBColor(Color(0, 128, 0), Color(100, 200, 100))
             } else {
                 JBColor(Color(200, 120, 0), Color(255, 180, 80))
             }
-            if (isSelected) methodLabel.foreground = list.selectionForeground
 
             val verdict = value.lastVerdict ?: ""
-            if (verdict.isNotBlank()) {
-                val verdictLabel = JLabel(verdict)
-                verdictLabel.foreground = when (verdict) {
-                    "Pass" -> JBColor(Color(0, 128, 0), Color(100, 200, 100))
-                    "Fail" -> JBColor(Color(180, 0, 0), Color(255, 100, 100))
-                    else -> JBColor.GRAY
-                }
-                if (isSelected) verdictLabel.foreground = list.selectionForeground
-                rightPanel.add(verdictLabel)
+            verdictLabel.isVisible = verdict.isNotBlank()
+            verdictLabel.text = verdict
+            verdictLabel.foreground = if (isSelected) list.selectionForeground else when (verdict) {
+                "Pass" -> JBColor(Color(0, 128, 0), Color(100, 200, 100))
+                "Fail" -> JBColor(Color(180, 0, 0), Color(255, 100, 100))
+                else -> JBColor.GRAY
             }
-
-            rightPanel.add(methodLabel)
-
-            panel.add(iconLabel, BorderLayout.WEST)
-            panel.add(textLabel, BorderLayout.CENTER)
-            panel.add(rightPanel, BorderLayout.EAST)
 
             return panel
         }
@@ -746,6 +745,23 @@ class RallyDetailPanel(private val project: Project) {
     // ── Task Cell Renderer ──────────────────────────────────────
 
     private class TaskCellRenderer : ListCellRenderer<RallyTaskItem> {
+        private val panel = JPanel(BorderLayout(8, 0)).apply { border = JBUI.Borders.empty(3, 6) }
+        private val iconLabel = JLabel(AllIcons.FileTypes.Any_type)
+        private val textLabel = JLabel()
+        private val stateLabel = JLabel()
+        private val ownerLabel = JLabel()
+        private val todoLabel = JLabel()
+        private val rightPanel = JPanel(FlowLayout(FlowLayout.RIGHT, 6, 0)).apply { isOpaque = false }
+
+        init {
+            rightPanel.add(stateLabel)
+            rightPanel.add(ownerLabel)
+            rightPanel.add(todoLabel)
+            panel.add(iconLabel, BorderLayout.WEST)
+            panel.add(textLabel, BorderLayout.CENTER)
+            panel.add(rightPanel, BorderLayout.EAST)
+        }
+
         override fun getListCellRendererComponent(
             list: JList<out RallyTaskItem>,
             value: RallyTaskItem,
@@ -753,62 +769,30 @@ class RallyDetailPanel(private val project: Project) {
             isSelected: Boolean,
             cellHasFocus: Boolean
         ): Component {
-            val panel = JPanel(BorderLayout(8, 0))
-            panel.border = JBUI.Borders.empty(3, 6)
+            panel.background = if (isSelected) list.selectionBackground else list.background
 
-            if (isSelected) {
-                panel.background = list.selectionBackground
-                panel.foreground = list.selectionForeground
-            } else {
-                panel.background = list.background
-                panel.foreground = list.foreground
-            }
-
-            // Icon
-            val iconLabel = JLabel(AllIcons.FileTypes.Any_type)
-
-            // FormattedID + Name
-            val id = value.formattedID ?: "?"
-            val name = value.name ?: "Untitled"
-            val textLabel = JLabel("$id: $name")
-            if (isSelected) textLabel.foreground = list.selectionForeground
-
-            // Right side: State badge + Owner + ToDo
-            val rightPanel = JPanel(FlowLayout(FlowLayout.RIGHT, 6, 0))
-            rightPanel.isOpaque = false
+            textLabel.text = "${value.formattedID ?: "?"}: ${value.name ?: "Untitled"}"
+            textLabel.foreground = if (isSelected) list.selectionForeground else list.foreground
 
             val state = value.state ?: ""
-            if (state.isNotBlank()) {
-                val stateLabel = JLabel(state)
-                stateLabel.foreground = when (state) {
-                    "In-Progress" -> JBColor(Color(0, 128, 0), Color(100, 200, 100))
-                    "Completed" -> JBColor(Color(0, 0, 180), Color(100, 150, 255))
-                    "Defined" -> JBColor(Color(200, 120, 0), Color(255, 180, 80))
-                    else -> JBColor.DARK_GRAY
-                }
-                if (isSelected) stateLabel.foreground = list.selectionForeground
-                rightPanel.add(stateLabel)
+            stateLabel.isVisible = state.isNotBlank()
+            stateLabel.text = state
+            stateLabel.foreground = if (isSelected) list.selectionForeground else when (state) {
+                "In-Progress" -> JBColor(Color(0, 128, 0), Color(100, 200, 100))
+                "Completed" -> JBColor(Color(0, 0, 180), Color(100, 150, 255))
+                "Defined" -> JBColor(Color(200, 120, 0), Color(255, 180, 80))
+                else -> JBColor.DARK_GRAY
             }
 
-            val ownerName = value.owner?.refObjectName ?: value.owner?.displayName
-            if (!ownerName.isNullOrBlank()) {
-                val ownerLabel = JLabel(ownerName)
-                ownerLabel.foreground = JBColor.GRAY
-                if (isSelected) ownerLabel.foreground = list.selectionForeground
-                rightPanel.add(ownerLabel)
-            }
+            val ownerName = value.owner?.refObjectName ?: value.owner?.displayName ?: ""
+            ownerLabel.isVisible = ownerName.isNotBlank()
+            ownerLabel.text = ownerName
+            ownerLabel.foreground = if (isSelected) list.selectionForeground else JBColor.GRAY
 
             val todo = value.toDo
-            if (todo != null && todo > 0) {
-                val todoLabel = JLabel("${todo}h left")
-                todoLabel.foreground = JBColor.GRAY
-                if (isSelected) todoLabel.foreground = list.selectionForeground
-                rightPanel.add(todoLabel)
-            }
-
-            panel.add(iconLabel, BorderLayout.WEST)
-            panel.add(textLabel, BorderLayout.CENTER)
-            panel.add(rightPanel, BorderLayout.EAST)
+            todoLabel.isVisible = todo != null && todo > 0
+            todoLabel.text = if (todo != null && todo > 0) "${todo}h left" else ""
+            todoLabel.foreground = if (isSelected) list.selectionForeground else JBColor.GRAY
 
             return panel
         }
@@ -818,6 +802,26 @@ class RallyDetailPanel(private val project: Project) {
 
     private class StepCellRenderer : ListCellRenderer<RallyTestCaseStep> {
         private val htmlTagPattern = Pattern.compile("<[^>]+>")
+        private val panel = JPanel(BorderLayout(8, 0)).apply { border = JBUI.Borders.empty(4, 6) }
+        private val badgeLabel = JLabel().apply {
+            font = font.deriveFont(Font.BOLD)
+            preferredSize = Dimension(32, preferredSize.height)
+        }
+        private val centerPanel = JPanel().apply {
+            layout = BoxLayout(this, BoxLayout.Y_AXIS)
+            isOpaque = false
+        }
+        private val inputLabel = JLabel()
+        private val expectedLabel = JLabel().apply {
+            font = font.deriveFont(font.size2D - 1f)
+        }
+
+        init {
+            centerPanel.add(inputLabel)
+            centerPanel.add(expectedLabel)
+            panel.add(badgeLabel, BorderLayout.WEST)
+            panel.add(centerPanel, BorderLayout.CENTER)
+        }
 
         override fun getListCellRendererComponent(
             list: JList<out RallyTestCaseStep>,
@@ -826,44 +830,19 @@ class RallyDetailPanel(private val project: Project) {
             isSelected: Boolean,
             cellHasFocus: Boolean
         ): Component {
-            val panel = JPanel(BorderLayout(8, 0))
-            panel.border = JBUI.Borders.empty(4, 6)
+            panel.background = if (isSelected) list.selectionBackground else list.background
 
-            if (isSelected) {
-                panel.background = list.selectionBackground
-                panel.foreground = list.selectionForeground
-            } else {
-                panel.background = list.background
-                panel.foreground = list.foreground
-            }
-
-            // Step number badge
-            val stepNum = value.stepIndex ?: (index + 1)
-            val badgeLabel = JLabel("#$stepNum")
-            badgeLabel.font = badgeLabel.font.deriveFont(Font.BOLD)
-            badgeLabel.preferredSize = Dimension(32, badgeLabel.preferredSize.height)
-            if (isSelected) badgeLabel.foreground = list.selectionForeground
-
-            // Center: input (primary) + expected result (secondary)
-            val centerPanel = JPanel()
-            centerPanel.layout = BoxLayout(centerPanel, BoxLayout.Y_AXIS)
-            centerPanel.isOpaque = false
+            badgeLabel.text = "#${value.stepIndex ?: (index + 1)}"
+            badgeLabel.foreground = if (isSelected) list.selectionForeground else list.foreground
 
             val inputText = stripHtml(value.input ?: "")
-            val inputLabel = JLabel(inputText.ifBlank { "(no input)" })
-            if (isSelected) inputLabel.foreground = list.selectionForeground
-            centerPanel.add(inputLabel)
+            inputLabel.text = inputText.ifBlank { "(no input)" }
+            inputLabel.foreground = if (isSelected) list.selectionForeground else list.foreground
 
             val expectedText = stripHtml(value.expectedResult ?: "")
-            if (expectedText.isNotBlank()) {
-                val expectedLabel = JLabel("Expected: $expectedText")
-                expectedLabel.foreground = if (isSelected) list.selectionForeground else JBColor.GRAY
-                expectedLabel.font = expectedLabel.font.deriveFont(expectedLabel.font.size2D - 1f)
-                centerPanel.add(expectedLabel)
-            }
-
-            panel.add(badgeLabel, BorderLayout.WEST)
-            panel.add(centerPanel, BorderLayout.CENTER)
+            expectedLabel.isVisible = expectedText.isNotBlank()
+            expectedLabel.text = if (expectedText.isNotBlank()) "Expected: $expectedText" else ""
+            expectedLabel.foreground = if (isSelected) list.selectionForeground else JBColor.GRAY
 
             return panel
         }
@@ -876,6 +855,19 @@ class RallyDetailPanel(private val project: Project) {
     // ── Attachment Cell Renderer ─────────────────────────────────
 
     private inner class AttachmentCellRenderer : ListCellRenderer<RallyAttachment> {
+        private val panel = JPanel(BorderLayout(8, 0)).apply { border = JBUI.Borders.empty(3, 6) }
+        private val iconLabel = JLabel()
+        private val textLabel = JLabel()
+        private val sizeLabel = JLabel()
+        private val rightPanel = JPanel(FlowLayout(FlowLayout.RIGHT, 6, 0)).apply { isOpaque = false }
+
+        init {
+            rightPanel.add(sizeLabel)
+            panel.add(iconLabel, BorderLayout.WEST)
+            panel.add(textLabel, BorderLayout.CENTER)
+            panel.add(rightPanel, BorderLayout.EAST)
+        }
+
         override fun getListCellRendererComponent(
             list: JList<out RallyAttachment>,
             value: RallyAttachment,
@@ -883,42 +875,18 @@ class RallyDetailPanel(private val project: Project) {
             isSelected: Boolean,
             cellHasFocus: Boolean
         ): Component {
-            val panel = JPanel(BorderLayout(8, 0))
-            panel.border = JBUI.Borders.empty(3, 6)
+            panel.background = if (isSelected) list.selectionBackground else list.background
 
-            if (isSelected) {
-                panel.background = list.selectionBackground
-                panel.foreground = list.selectionForeground
-            } else {
-                panel.background = list.background
-                panel.foreground = list.foreground
-            }
-
-            // Icon: image icon for image types, generic file icon for others
             val isImage = value.contentType?.startsWith("image/") == true
-            val icon = if (isImage) AllIcons.FileTypes.Image else AllIcons.FileTypes.Any_type
-            val iconLabel = JLabel(icon)
+            iconLabel.icon = if (isImage) AllIcons.FileTypes.Image else AllIcons.FileTypes.Any_type
 
-            // Filename
-            val fileName = value.name ?: "Unknown"
-            val textLabel = JLabel(fileName)
-            if (isSelected) textLabel.foreground = list.selectionForeground
-
-            // Right side: file size
-            val rightPanel = JPanel(FlowLayout(FlowLayout.RIGHT, 6, 0))
-            rightPanel.isOpaque = false
+            textLabel.text = value.name ?: "Unknown"
+            textLabel.foreground = if (isSelected) list.selectionForeground else list.foreground
 
             val sizeText = formatFileSize(value.size)
-            if (sizeText.isNotBlank()) {
-                val sizeLabel = JLabel(sizeText)
-                sizeLabel.foreground = JBColor.GRAY
-                if (isSelected) sizeLabel.foreground = list.selectionForeground
-                rightPanel.add(sizeLabel)
-            }
-
-            panel.add(iconLabel, BorderLayout.WEST)
-            panel.add(textLabel, BorderLayout.CENTER)
-            panel.add(rightPanel, BorderLayout.EAST)
+            sizeLabel.isVisible = sizeText.isNotBlank()
+            sizeLabel.text = sizeText
+            sizeLabel.foreground = if (isSelected) list.selectionForeground else JBColor.GRAY
 
             return panel
         }

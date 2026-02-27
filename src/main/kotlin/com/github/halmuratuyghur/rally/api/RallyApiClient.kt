@@ -3,6 +3,8 @@ package com.github.halmuratuyghur.rally.api
 import com.google.gson.Gson
 import com.google.gson.JsonParser
 import com.google.gson.reflect.TypeToken
+import java.net.InetSocketAddress
+import java.net.ProxySelector
 import java.net.URI
 import java.net.URLEncoder
 import java.net.http.HttpClient
@@ -13,7 +15,11 @@ import java.nio.file.Files
 import java.nio.file.Path
 import java.time.Duration
 import java.util.Base64
+import java.util.Collections
+import java.util.LinkedHashMap
 import java.util.concurrent.ConcurrentHashMap
+import java.util.concurrent.ExecutorService
+import java.util.concurrent.Executors
 
 /**
  * Client for interacting with Rally WSAPI 2.0
@@ -22,29 +28,79 @@ class RallyApiClient(
     val serverUrl: String,
     val apiKey: String
 ) {
+    /** Bounded thread pool for API operations (daemon threads so IDE shutdown isn't blocked). */
+    val apiExecutor: ExecutorService = Executors.newFixedThreadPool(8) { r ->
+        Thread(r, "rally-api-worker").apply { isDaemon = true }
+    }
+
     private val httpClient: HttpClient = HttpClient.newBuilder()
         .connectTimeout(Duration.ofSeconds(30))
         .version(HttpClient.Version.HTTP_2)
+        .executor(apiExecutor)
+        .apply {
+            // Respect IDE proxy settings (Settings → Appearance & Behavior → System Settings → HTTP Proxy)
+            try {
+                val httpConfigurable = com.intellij.util.net.HttpConfigurable.getInstance()
+                if (httpConfigurable.USE_HTTP_PROXY && !httpConfigurable.PROXY_HOST.isNullOrBlank()) {
+                    proxy(ProxySelector.of(InetSocketAddress(httpConfigurable.PROXY_HOST, httpConfigurable.PROXY_PORT)))
+                }
+            } catch (_: Exception) {
+                // IDE proxy API not available — use direct connection
+            }
+        }
         .build()
 
     private val gson = Gson()
+
+    /** Pre-computed normalized server URL (computed once at construction time). */
+    private val normalizedServerUrl: String = run {
+        var url = serverUrl.trim().removeSuffix("/")
+        if (!url.startsWith("http://") && !url.startsWith("https://")) {
+            url = "https://$url"
+        }
+        url
+    }
 
     // ── Cache ────────────────────────────────────────────────────
 
     private data class CacheEntry<T>(val data: T, val timestamp: Long)
 
-    private val queryCache = ConcurrentHashMap<String, CacheEntry<Any>>()
+    /** LRU query cache: insertion-ordered LinkedHashMap with automatic eldest-entry eviction. */
+    private val maxQueryCacheSize = 500
+    private val queryCache: MutableMap<String, CacheEntry<Any>> = Collections.synchronizedMap(
+        object : LinkedHashMap<String, CacheEntry<Any>>(maxQueryCacheSize * 4 / 3 + 1, 0.75f, false) {
+            override fun removeEldestEntry(eldest: MutableMap.MutableEntry<String, CacheEntry<Any>>?): Boolean {
+                return size > maxQueryCacheSize
+            }
+        }
+    )
     private val imageCache = ConcurrentHashMap<String, ByteArray>()
+    private val imageCacheBytes = java.util.concurrent.atomic.AtomicLong(0)
 
     /** Default TTL for query caches (2 minutes). */
     private val queryTtlMs = 2 * 60 * 1000L
 
-    /** Image cache has no TTL — images rarely change. */
+    /** Maximum image cache size in bytes (50 MB). */
+    private val maxImageCacheBytes = 50L * 1024 * 1024
+
+    /** Extended TTL for bulk mode (null = use default). */
+    @Volatile private var bulkModeTtlMs: Long? = null
+
+    /** Enter bulk mode: extends cache TTL to prevent expiry during long exports. */
+    fun enterBulkMode(ttlMinutes: Int = 15) {
+        bulkModeTtlMs = ttlMinutes * 60 * 1000L
+    }
+
+    /** Exit bulk mode: restores default cache TTL. */
+    fun exitBulkMode() {
+        bulkModeTtlMs = null
+    }
 
     @Suppress("UNCHECKED_CAST")
     private fun <T> getCached(key: String): T? {
         val entry = queryCache[key] ?: return null
-        if (System.currentTimeMillis() - entry.timestamp > queryTtlMs) {
+        val ttl = bulkModeTtlMs ?: queryTtlMs
+        if (System.currentTimeMillis() - entry.timestamp > ttl) {
             queryCache.remove(key)
             return null
         }
@@ -62,6 +118,7 @@ class RallyApiClient(
     fun clearCache() {
         queryCache.clear()
         imageCache.clear()
+        imageCacheBytes.set(0)
     }
 
     /**
@@ -73,7 +130,9 @@ class RallyApiClient(
         val iter = queryCache.keys.iterator()
         while (iter.hasNext()) {
             val key = iter.next()
-            if (key.startsWith("artifacts:") || key.startsWith("sprint:") || key.startsWith("currentIteration:")) {
+            if (key.startsWith("artifacts:") || key.startsWith("stories:") ||
+                key.startsWith("defects:") || key.startsWith("tasks:") ||
+                key.startsWith("sprint:") || key.startsWith("currentIteration:")) {
                 iter.remove()
             }
         }
@@ -84,6 +143,8 @@ class RallyApiClient(
         private const val DEFAULT_PAGE_SIZE = 200
         private const val MAX_PAGE_SIZE = 2000
         private const val ZSESSION_HEADER = "zsessionid"
+        private const val MAX_RETRIES = 3
+        private val RETRYABLE_STATUS_CODES = setOf(429, 502, 503, 504)
 
         // Fields for list queries (lightweight — no Description)
         private val LIST_FIELDS = listOf(
@@ -104,26 +165,14 @@ class RallyApiClient(
     }
 
     /**
-     * Normalize server URL to ensure proper format
-     */
-    private fun normalizeServerUrl(): String {
-        var url = serverUrl.trim().removeSuffix("/")
-        if (!url.startsWith("http://") && !url.startsWith("https://")) {
-            url = "https://$url"
-        }
-        return url
-    }
-
-    /**
      * Build the base API URL
      */
     private fun buildApiUrl(endpoint: String): String {
-        val baseUrl = normalizeServerUrl()
-        return "$baseUrl/slm/webservice/$API_VERSION/$endpoint"
+        return "$normalizedServerUrl/slm/webservice/$API_VERSION/$endpoint"
     }
 
     /**
-     * Execute HTTP GET request
+     * Execute HTTP GET request with retry for transient errors (429, 502, 503, 504).
      */
     private fun executeGet(url: String): HttpResponse<String> {
         val request = HttpRequest.newBuilder()
@@ -135,11 +184,7 @@ class RallyApiClient(
             .GET()
             .build()
 
-        return try {
-            httpClient.send(request, HttpResponse.BodyHandlers.ofString())
-        } catch (e: Exception) {
-            throw RallyConnectionException("Failed to connect to Rally server: ${e.message}", e)
-        }
+        return executeWithRetry(request)
     }
 
     /**
@@ -221,10 +266,10 @@ class RallyApiClient(
         if (trimmed.startsWith("http")) return trimmed
         // Already a ref path like /workspace/12345
         if (trimmed.startsWith("/")) {
-            return "${normalizeServerUrl()}/slm/webservice/$API_VERSION$trimmed"
+            return "$normalizedServerUrl/slm/webservice/$API_VERSION$trimmed"
         }
         // Just a number
-        return "${normalizeServerUrl()}/slm/webservice/$API_VERSION/$type/$trimmed"
+        return "$normalizedServerUrl/slm/webservice/$API_VERSION/$type/$trimmed"
     }
 
     /**
@@ -275,45 +320,73 @@ class RallyApiClient(
     }
 
     /**
+     * Fetch all pages for a query, up to maxResults total items.
+     * Rally paginates via start/pageSize params; this loops until all results are fetched.
+     */
+    private fun <T> queryAllPages(
+        endpoint: String,
+        typeToken: java.lang.reflect.Type,
+        query: String?,
+        pageSize: Int = DEFAULT_PAGE_SIZE,
+        maxResults: Int = MAX_PAGE_SIZE,
+        order: String? = "LastUpdateDate DESC",
+        fields: List<String> = LIST_FIELDS
+    ): List<T> {
+        val allResults = mutableListOf<T>()
+        var start = 1
+
+        do {
+            val url = buildApiUrl(endpoint) + "?" +
+                    buildQuery(query, pageSize, start, workspaceRef, projectRef, order, fields)
+            val response = executeGet(url)
+            handleResponse(response)
+            val result: RallyQueryResult<T> = gson.fromJson(response.body(), typeToken)
+            allResults.addAll(result.queryResult.results)
+            start += result.queryResult.pageSize
+        } while (allResults.size < result.queryResult.totalResultCount
+            && result.queryResult.results.isNotEmpty()
+            && allResults.size < maxResults)
+
+        return allResults
+    }
+
+    /**
      * Query User Stories (HierarchicalRequirement)
      */
-    fun queryUserStories(query: String? = null, pageSize: Int = DEFAULT_PAGE_SIZE): List<RallyUserStory> {
-        val url = buildApiUrl("hierarchicalrequirement") + "?" +
-                buildQuery(query, pageSize, workspace = workspaceRef, project = projectRef, order = "LastUpdateDate DESC")
-        val response = executeGet(url)
-        handleResponse(response)
+    fun queryUserStories(query: String? = null, pageSize: Int = DEFAULT_PAGE_SIZE, maxResults: Int = MAX_PAGE_SIZE): List<RallyUserStory> {
+        val cacheKey = "stories:${query}|${pageSize}|${maxResults}|${workspaceRef}|${projectRef}"
+        getCached<List<RallyUserStory>>(cacheKey)?.let { return it }
 
         val type = object : TypeToken<RallyQueryResult<RallyUserStory>>() {}.type
-        val result: RallyQueryResult<RallyUserStory> = gson.fromJson(response.body(), type)
-        return result.queryResult.results
+        val results: List<RallyUserStory> = queryAllPages("hierarchicalrequirement", type, query, pageSize, maxResults)
+        putCache(cacheKey, results)
+        return results
     }
 
     /**
      * Query Defects
      */
-    fun queryDefects(query: String? = null, pageSize: Int = DEFAULT_PAGE_SIZE): List<RallyDefect> {
-        val url = buildApiUrl("defect") + "?" +
-                buildQuery(query, pageSize, workspace = workspaceRef, project = projectRef, order = "LastUpdateDate DESC")
-        val response = executeGet(url)
-        handleResponse(response)
+    fun queryDefects(query: String? = null, pageSize: Int = DEFAULT_PAGE_SIZE, maxResults: Int = MAX_PAGE_SIZE): List<RallyDefect> {
+        val cacheKey = "defects:${query}|${pageSize}|${maxResults}|${workspaceRef}|${projectRef}"
+        getCached<List<RallyDefect>>(cacheKey)?.let { return it }
 
         val type = object : TypeToken<RallyQueryResult<RallyDefect>>() {}.type
-        val result: RallyQueryResult<RallyDefect> = gson.fromJson(response.body(), type)
-        return result.queryResult.results
+        val results: List<RallyDefect> = queryAllPages("defect", type, query, pageSize, maxResults)
+        putCache(cacheKey, results)
+        return results
     }
 
     /**
      * Query Tasks
      */
-    fun queryTasks(query: String? = null, pageSize: Int = DEFAULT_PAGE_SIZE): List<RallyTaskItem> {
-        val url = buildApiUrl("task") + "?" +
-                buildQuery(query, pageSize, workspace = workspaceRef, project = projectRef, order = "LastUpdateDate DESC")
-        val response = executeGet(url)
-        handleResponse(response)
+    fun queryTasks(query: String? = null, pageSize: Int = DEFAULT_PAGE_SIZE, maxResults: Int = MAX_PAGE_SIZE): List<RallyTaskItem> {
+        val cacheKey = "tasks:${query}|${pageSize}|${maxResults}|${workspaceRef}|${projectRef}"
+        getCached<List<RallyTaskItem>>(cacheKey)?.let { return it }
 
         val type = object : TypeToken<RallyQueryResult<RallyTaskItem>>() {}.type
-        val result: RallyQueryResult<RallyTaskItem> = gson.fromJson(response.body(), type)
-        return result.queryResult.results
+        val results: List<RallyTaskItem> = queryAllPages("task", type, query, pageSize, maxResults)
+        putCache(cacheKey, results)
+        return results
     }
 
     /**
@@ -376,34 +449,51 @@ class RallyApiClient(
      * Query all artifacts (User Stories and Defects combined)
      * This is useful for the main task browser
      */
-    fun queryAllArtifacts(query: String? = null, pageSize: Int = DEFAULT_PAGE_SIZE): List<RallyArtifact> {
-        val cacheKey = "artifacts:${query}|${pageSize}|${workspaceRef}|${projectRef}"
+    /**
+     * Query all artifacts (User Stories and Defects combined).
+     * @param scope Optional scope hint: "User Stories" fetches only stories, "Defects" fetches only defects,
+     *              anything else (null, "All Tickets", "My Tickets", etc.) fetches both.
+     * @param maxResults Maximum total items to return per type. Defaults to MAX_PAGE_SIZE (2000).
+     */
+    fun queryAllArtifacts(query: String? = null, pageSize: Int = DEFAULT_PAGE_SIZE, scope: String? = null, maxResults: Int = MAX_PAGE_SIZE): List<RallyArtifact> {
+        val cacheKey = "artifacts:${query}|${pageSize}|${maxResults}|${scope}|${workspaceRef}|${projectRef}"
         getCached<List<RallyArtifact>>(cacheKey)?.let { return it }
 
         val results = mutableListOf<RallyArtifact>()
         val errors = mutableListOf<String>()
 
-        // Query user stories and defects in parallel
-        val storiesFuture = java.util.concurrent.CompletableFuture.supplyAsync {
-            queryUserStories(query, pageSize)
-        }
-        val defectsFuture = java.util.concurrent.CompletableFuture.supplyAsync {
-            queryDefects(query, pageSize)
+        val fetchStories = scope != "Defects"
+        val fetchDefects = scope != "User Stories"
+
+        // Query user stories and defects in parallel using dedicated executor
+        val storiesFuture = if (fetchStories) {
+            java.util.concurrent.CompletableFuture.supplyAsync({
+                queryUserStories(query, pageSize, maxResults)
+            }, apiExecutor)
+        } else null
+        val defectsFuture = if (fetchDefects) {
+            java.util.concurrent.CompletableFuture.supplyAsync({
+                queryDefects(query, pageSize, maxResults)
+            }, apiExecutor)
+        } else null
+
+        if (storiesFuture != null) {
+            try {
+                results.addAll(storiesFuture.get())
+            } catch (e: Exception) {
+                errors.add("UserStories: ${e.cause?.message ?: e.message}")
+            }
         }
 
-        try {
-            results.addAll(storiesFuture.get())
-        } catch (e: Exception) {
-            errors.add("UserStories: ${e.cause?.message ?: e.message}")
+        if (defectsFuture != null) {
+            try {
+                results.addAll(defectsFuture.get())
+            } catch (e: Exception) {
+                errors.add("Defects: ${e.cause?.message ?: e.message}")
+            }
         }
 
-        try {
-            results.addAll(defectsFuture.get())
-        } catch (e: Exception) {
-            errors.add("Defects: ${e.cause?.message ?: e.message}")
-        }
-
-        // If both queries failed, throw so the UI can show the error
+        // If all queries failed, throw so the UI can show the error
         if (results.isEmpty() && errors.isNotEmpty()) {
             throw RallyApiException("Query failed - ${errors.joinToString("; ")}")
         }
@@ -419,7 +509,7 @@ class RallyApiClient(
      * Rally web UI URLs require the project OID: /#/<projectOID>d/detail/<type>/<objectID>
      */
     fun buildWebUrl(artifact: RallyArtifact): String {
-        val baseUrl = normalizeServerUrl()
+        val baseUrl = normalizedServerUrl
         val objectId = artifact.objectID ?: return baseUrl
 
         val detailPage = when (artifact.type) {
@@ -444,7 +534,7 @@ class RallyApiClient(
     }
 
     /**
-     * Execute HTTP POST request
+     * Execute HTTP POST request with retry for transient errors.
      */
     private fun executePost(url: String, jsonBody: String): HttpResponse<String> {
         val request = HttpRequest.newBuilder()
@@ -456,12 +546,42 @@ class RallyApiClient(
             .POST(HttpRequest.BodyPublishers.ofString(jsonBody))
             .build()
 
-        return try {
-            httpClient.send(request, HttpResponse.BodyHandlers.ofString())
-        } catch (e: Exception) {
-            throw RallyConnectionException("Failed to connect to Rally server: ${e.message}", e)
-        }
+        return executeWithRetry(request)
     }
+
+    /**
+     * Send an HTTP request with automatic retry + exponential backoff for transient errors.
+     * Retries up to MAX_RETRIES times for status codes 429, 502, 503, 504.
+     * Honors the Retry-After header when present (capped at 30s).
+     */
+    private fun executeWithRetry(request: HttpRequest): HttpResponse<String> {
+        var lastException: Exception? = null
+        for (attempt in 0..MAX_RETRIES) {
+            val response = try {
+                httpClient.send(request, HttpResponse.BodyHandlers.ofString())
+            } catch (e: Exception) {
+                lastException = e
+                if (attempt < MAX_RETRIES) {
+                    Thread.sleep(backoffMs(attempt))
+                    continue
+                }
+                throw RallyConnectionException("Failed to connect to Rally server: ${e.message}", e)
+            }
+
+            if (response.statusCode() !in RETRYABLE_STATUS_CODES || attempt == MAX_RETRIES) {
+                return response
+            }
+
+            // Respect Retry-After header if present, otherwise use exponential backoff
+            val retryAfter = response.headers().firstValueAsLong("Retry-After").orElse(-1)
+            val delayMs = if (retryAfter > 0) (retryAfter * 1000).coerceAtMost(30_000) else backoffMs(attempt)
+            Thread.sleep(delayMs)
+        }
+        // Should not reach here, but satisfy the compiler
+        throw RallyConnectionException("Failed after $MAX_RETRIES retries", lastException ?: Exception("Unknown error"))
+    }
+
+    private fun backoffMs(attempt: Int): Long = (1000L shl attempt).coerceAtMost(8000)
 
     /**
      * Update the state of an artifact.
@@ -636,6 +756,9 @@ class RallyApiClient(
      * Query test case steps for a given test case FormattedID.
      */
     fun queryTestSteps(testCaseFormattedId: String): List<RallyTestCaseStep> {
+        val cacheKey = "teststeps:$testCaseFormattedId"
+        getCached<List<RallyTestCaseStep>>(cacheKey)?.let { return it }
+
         val query = "(TestCase.FormattedID = \"$testCaseFormattedId\")"
         val encodedQuery = URLEncoder.encode(query, StandardCharsets.UTF_8)
 
@@ -652,6 +775,7 @@ class RallyApiClient(
 
         val type = object : TypeToken<RallyQueryResult<RallyTestCaseStep>>() {}.type
         val result: RallyQueryResult<RallyTestCaseStep> = gson.fromJson(response.body(), type)
+        putCache(cacheKey, result.queryResult.results)
         return result.queryResult.results
     }
 
@@ -771,7 +895,15 @@ class RallyApiClient(
         }
 
         val bytes = response.body()
+        // Evict 25% of image cache if over memory limit
+        if (imageCacheBytes.get() + bytes.size > maxImageCacheBytes) {
+            val toRemove = imageCache.keys.take(imageCache.size / 4)
+            toRemove.forEach { key ->
+                imageCache.remove(key)?.let { imageCacheBytes.addAndGet(-it.size.toLong()) }
+            }
+        }
         imageCache[url] = bytes
+        imageCacheBytes.addAndGet(bytes.size.toLong())
         return bytes
     }
 
