@@ -681,7 +681,7 @@ class RallyToolWindowPanel(private val project: Project) {
         val selectionListeners = artifactList.listSelectionListeners
         selectionListeners.forEach { artifactList.removeListSelectionListener(it) }
         listModel.clear()
-        filtered.forEach { listModel.addElement(it) }
+        listModel.addAll(filtered)
         selectionListeners.forEach { artifactList.addListSelectionListener(it) }
         updateStats(filtered)
     }
