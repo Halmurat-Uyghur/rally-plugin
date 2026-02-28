@@ -604,6 +604,27 @@ class RallyApiClient(
     }
 
     /**
+     * Update the Owner of a Rally artifact.
+     * @param artifactRef Full API URL ref of the artifact
+     * @param artifactType Rally type name (e.g., "HierarchicalRequirement", "Defect")
+     * @param ownerRef Full API URL ref of the user
+     */
+    fun updateArtifactOwner(artifactRef: String, artifactType: String, ownerRef: String) {
+        val body = """{"$artifactType":{"Owner":"$ownerRef"}}"""
+        val response = executePost(artifactRef, body)
+        handleResponse(response)
+
+        val json = JsonParser.parseString(response.body()).asJsonObject
+        val result = json.getAsJsonObject("OperationResult")
+        if (result != null) {
+            val errors = result.getAsJsonArray("Errors")
+            if (errors != null && errors.size() > 0) {
+                throw RallyApiException("Failed to update owner: ${errors.joinToString()}")
+            }
+        }
+    }
+
+    /**
      * Get the current iteration (sprint) by today's date.
      */
     fun queryCurrentIteration(workspaceRef: String? = null, projectRef: String? = null): RallyIteration? {

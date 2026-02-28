@@ -30,6 +30,7 @@
     ]]></description>
 
     <depends>com.intellij.modules.platform</depends>
+    <depends>Git4Idea</depends>
 
     <extensions defaultExtensionNs="com.intellij">
         <toolWindow
@@ -46,6 +47,9 @@
 
         <applicationService
             serviceImplementation="com.github.halmuratuyghur.rally.settings.RallySettings"/>
+
+        <projectService
+            serviceImplementation="com.github.halmuratuyghur.rally.vcs.RallyWorkSession"/>
     </extensions>
 
 </idea-plugin>
