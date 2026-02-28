@@ -50,6 +50,9 @@
 
         <projectService
             serviceImplementation="com.github.halmuratuyghur.rally.vcs.RallyWorkSession"/>
+
+        <checkinHandlerFactory
+            implementation="com.github.halmuratuyghur.rally.vcs.RallyCheckinHandlerFactory"/>
     </extensions>
 
 </idea-plugin>
