@@ -105,6 +105,7 @@ class RallyToolWindowPanel(private val project: Project) {
     private fun checkInitialConfiguration() {
         if (RallySettings.getInstance().isConfigured()) {
             loadTickets()
+            syncWorkSessionButtons()
         } else {
             showNotConfigured()
         }
@@ -1218,7 +1219,100 @@ class RallyToolWindowPanel(private val project: Project) {
     }
 
     private fun finishWorking() {
-        // Implemented in Task 6
+        val session = RallyWorkSession.getInstance(project)
+        if (!session.isActive) {
+            Messages.showInfoMessage(project, "No active work session.", "Rally")
+            return
+        }
+
+        val ticketId = session.activeTicketId!!
+        val ticketRef = session.activeTicketRef!!
+        val ticketType = session.activeTicketType!!
+
+        val confirm = Messages.showYesNoDialog(
+            project,
+            "Finish working on $ticketId?\n\n" +
+                    "This will:\n" +
+                    "  \u2022 Move ticket to Completed\n" +
+                    "  \u2022 Stop prefixing commit messages\n" +
+                    "  \u2022 Open the Create Pull Request dialog",
+            "Rally - Finish Working",
+            Messages.getQuestionIcon()
+        )
+        if (confirm != Messages.YES) return
+
+        statusLabel.text = "Finishing $ticketId..."
+
+        ApplicationManager.getApplication().executeOnPooledThread {
+            val client = getClient()
+
+            // 1. Move ticket to Completed
+            try {
+                client.updateArtifactState(ticketRef, ticketType, "Completed")
+            } catch (e: Exception) {
+                LOG.error("Failed to move $ticketId to Completed", e)
+            }
+
+            // 2. Clear work session
+            session.finish()
+
+            ApplicationManager.getApplication().invokeLater {
+                if (project.isDisposed) return@invokeLater
+
+                // Optimistic update
+                allArtifacts = allArtifacts.map { artifact ->
+                    if (artifact.ref == ticketRef) {
+                        when (artifact) {
+                            is RallyUserStory -> artifact.copy(scheduleState = "Completed")
+                            is RallyDefect -> artifact.copy(scheduleState = "Completed")
+                            else -> artifact
+                        }
+                    } else artifact
+                }
+                client.clearArtifactCache()
+                applySearchFilter()
+
+                startWorkingButton.isEnabled = true
+                finishWorkingButton.isEnabled = false
+                statusLabel.text = "Finished $ticketId"
+
+                // 3. Open IntelliJ's native Create Pull Request dialog
+                try {
+                    val actionManager = com.intellij.openapi.actionSystem.ActionManager.getInstance()
+                    val createPrAction = actionManager.getAction("Git.CreatePullRequest")
+                        ?: actionManager.getAction("Github.Create.Pull.Request")
+                    if (createPrAction != null) {
+                        val dataContext = com.intellij.openapi.actionSystem.impl.SimpleDataContext.getProjectContext(project)
+                        val event = com.intellij.openapi.actionSystem.AnActionEvent.createFromDataContext(
+                            "RallyFinishWorking", null, dataContext
+                        )
+                        createPrAction.actionPerformed(event)
+                    } else {
+                        Messages.showInfoMessage(
+                            project,
+                            "Ticket moved to Completed.\n\nCould not open PR dialog \u2014 install the GitHub or GitLab plugin for PR integration.",
+                            "Rally - Finish Working"
+                        )
+                    }
+                } catch (e: Exception) {
+                    LOG.warn("Could not open PR dialog", e)
+                    Messages.showInfoMessage(
+                        project,
+                        "Ticket $ticketId moved to Completed.\nOpen a pull request manually when ready.",
+                        "Rally - Finish Working"
+                    )
+                }
+            }
+        }
+    }
+
+    private fun syncWorkSessionButtons() {
+        val session = RallyWorkSession.getInstance(project)
+        startWorkingButton.isEnabled = !session.isActive
+        finishWorkingButton.isEnabled = session.isActive
+        if (session.isActive) {
+            statusLabel.text = "Working on ${session.activeTicketId}"
+        }
     }
 
     // ── Client ───────────────────────────────────────────────────
