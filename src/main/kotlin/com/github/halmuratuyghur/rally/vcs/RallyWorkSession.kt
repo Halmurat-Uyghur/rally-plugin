@@ -5,13 +5,18 @@ import com.intellij.openapi.project.Project
 
 @Service(Service.Level.PROJECT)
 class RallyWorkSession {
-    var activeTicketId: String? = null
-    var activeTicketRef: String? = null
-    var activeTicketType: String? = null
-    var activeBranchName: String? = null
+    @Volatile var activeTicketId: String? = null
+        private set
+    @Volatile var activeTicketRef: String? = null
+        private set
+    @Volatile var activeTicketType: String? = null
+        private set
+    @Volatile var activeBranchName: String? = null
+        private set
 
     val isActive: Boolean get() = activeTicketId != null
 
+    @Synchronized
     fun start(ticketId: String, ticketRef: String, ticketType: String, branchName: String) {
         activeTicketId = ticketId
         activeTicketRef = ticketRef
@@ -19,6 +24,7 @@ class RallyWorkSession {
         activeBranchName = branchName
     }
 
+    @Synchronized
     fun finish() {
         activeTicketId = null
         activeTicketRef = null

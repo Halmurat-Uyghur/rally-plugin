@@ -2,6 +2,9 @@ package com.github.halmuratuyghur.rally.ui
 
 import com.intellij.icons.AllIcons
 import com.intellij.ide.BrowserUtil
+import com.intellij.openapi.actionSystem.ActionManager
+import com.intellij.openapi.actionSystem.AnActionEvent
+import com.intellij.openapi.actionSystem.impl.SimpleDataContext
 import com.intellij.openapi.application.ApplicationManager
 import com.intellij.openapi.diagnostic.Logger
 import com.intellij.openapi.project.Project
@@ -1101,6 +1104,16 @@ class RallyToolWindowPanel(private val project: Project) {
     }
 
     private fun startWorking() {
+        val session = RallyWorkSession.getInstance(project)
+        if (session.isActive) {
+            Messages.showWarningDialog(
+                project,
+                "Already working on ${session.activeTicketId}. Finish that ticket first.",
+                "Rally"
+            )
+            return
+        }
+
         val selected = artifactList.selectedValue
         if (selected == null) {
             Messages.showInfoMessage(project, "Select a ticket first.", "Rally")
@@ -1138,7 +1151,7 @@ class RallyToolWindowPanel(private val project: Project) {
             val client = getClient()
             val errors = mutableListOf<String>()
 
-            // 1. Create & checkout git branch
+            // 1. Create & checkout git branch (synchronized via latch)
             try {
                 val repoManager = GitRepositoryManager.getInstance(project)
                 val repos = repoManager.repositories
@@ -1148,13 +1161,23 @@ class RallyToolWindowPanel(private val project: Project) {
                     val brancher = GitBrancher.getInstance(project)
                     val repo = repos.first()
                     val existingBranches = repo.branches.localBranches.map { it.name }
+                    val branchLatch = java.util.concurrent.CountDownLatch(1)
+                    var branchError: String? = null
                     ApplicationManager.getApplication().invokeLater {
-                        if (branchName in existingBranches) {
-                            brancher.checkout(branchName, false, repos, null)
-                        } else {
-                            brancher.createBranch(branchName, mapOf(repo to "HEAD"))
+                        try {
+                            if (branchName in existingBranches) {
+                                brancher.checkout(branchName, false, repos, null)
+                            } else {
+                                brancher.createBranch(branchName, mapOf(repo to "HEAD"))
+                            }
+                        } catch (e: Exception) {
+                            branchError = e.message
+                        } finally {
+                            branchLatch.countDown()
                         }
                     }
+                    branchLatch.await(10, java.util.concurrent.TimeUnit.SECONDS)
+                    branchError?.let { errors.add("Branch operation failed: $it") }
                 }
             } catch (e: Exception) {
                 LOG.error("Failed to create branch $branchName", e)
@@ -1245,12 +1268,14 @@ class RallyToolWindowPanel(private val project: Project) {
 
         ApplicationManager.getApplication().executeOnPooledThread {
             val client = getClient()
+            var stateChangeError: String? = null
 
             // 1. Move ticket to Completed
             try {
                 client.updateArtifactState(ticketRef, ticketType, "Completed")
             } catch (e: Exception) {
                 LOG.error("Failed to move $ticketId to Completed", e)
+                stateChangeError = e.message
             }
 
             // 2. Clear work session
@@ -1276,14 +1301,22 @@ class RallyToolWindowPanel(private val project: Project) {
                 finishWorkingButton.isEnabled = false
                 statusLabel.text = "Finished $ticketId"
 
+                if (stateChangeError != null) {
+                    Messages.showWarningDialog(
+                        project,
+                        "Work session ended but failed to move $ticketId to Completed on Rally:\n$stateChangeError",
+                        "Rally - Finish Working"
+                    )
+                }
+
                 // 3. Open IntelliJ's native Create Pull Request dialog
                 try {
-                    val actionManager = com.intellij.openapi.actionSystem.ActionManager.getInstance()
+                    val actionManager = ActionManager.getInstance()
                     val createPrAction = actionManager.getAction("Git.CreatePullRequest")
                         ?: actionManager.getAction("Github.Create.Pull.Request")
                     if (createPrAction != null) {
-                        val dataContext = com.intellij.openapi.actionSystem.impl.SimpleDataContext.getProjectContext(project)
-                        val event = com.intellij.openapi.actionSystem.AnActionEvent.createFromDataContext(
+                        val dataContext = SimpleDataContext.getProjectContext(project)
+                        val event = AnActionEvent.createFromDataContext(
                             "RallyFinishWorking", null, dataContext
                         )
                         createPrAction.actionPerformed(event)

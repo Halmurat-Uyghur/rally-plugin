@@ -15,12 +15,12 @@ private class RallyCheckinHandler(
     private val panel: CheckinProjectPanel
 ) : CheckinHandler() {
 
-    override fun getBeforeCheckinConfigurationPanel(): com.intellij.openapi.vcs.ui.RefreshableOnComponent? {
+    override fun beforeCheckin(): ReturnResult {
         val project = panel.project
         val session = RallyWorkSession.getInstance(project)
-        if (!session.isActive) return null
+        if (!session.isActive) return ReturnResult.COMMIT
 
-        val ticketId = session.activeTicketId ?: return null
+        val ticketId = session.activeTicketId ?: return ReturnResult.COMMIT
         val prefix = "[$ticketId]"
         val currentMessage = panel.commitMessage
 
@@ -28,6 +28,6 @@ private class RallyCheckinHandler(
             panel.commitMessage = "$prefix $currentMessage"
         }
 
-        return null
+        return ReturnResult.COMMIT
     }
 }
