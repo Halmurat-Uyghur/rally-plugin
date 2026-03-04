@@ -98,6 +98,7 @@ class RallyToolWindowPanel(private val project: Project) {
     private var lastState: String = ""
     private var lastProject: String = ""
     private var lastIteration: String = ""
+    @Volatile private var activeServerSearch: String? = null
 
     init {
         setupUI()
@@ -708,21 +709,65 @@ class RallyToolWindowPanel(private val project: Project) {
 
     private fun applySearchFilter() {
         val query = searchField.text.trim()
-        val filtered = if (query.isBlank()) {
-            allArtifacts
-        } else {
-            allArtifacts.filter {
-                it.formattedID?.contains(query, ignoreCase = true) == true ||
-                        it.name?.contains(query, ignoreCase = true) == true
+
+        if (query.isBlank()) {
+            // Search cleared — restore full list and cancel any pending server search
+            activeServerSearch = null
+            updateListModel(allArtifacts)
+            updateStats(allArtifacts)
+            return
+        }
+
+        // Client-side filter first
+        val filtered = allArtifacts.filter {
+            it.formattedID?.contains(query, ignoreCase = true) == true ||
+                    it.name?.contains(query, ignoreCase = true) == true
+        }
+
+        updateListModel(filtered)
+        updateStats(filtered)
+
+        // Server-side fallback: fire when client-side returns 0 results and query >= 3 chars
+        if (filtered.isEmpty() && query.length >= 3) {
+            activeServerSearch = query
+            statusLabel.text = "Searching Rally..."
+            val scope = scopeCombo.selectedItem as? String
+
+            ApplicationManager.getApplication().executeOnPooledThread {
+                try {
+                    val client = getClient()
+                    val serverResults = client.searchArtifacts(query, scope)
+                    ApplicationManager.getApplication().invokeLater {
+                        if (project.isDisposed) return@invokeLater
+                        // Only apply if this is still the active search
+                        if (activeServerSearch == query) {
+                            updateListModel(serverResults)
+                            updateStats(serverResults)
+                            statusLabel.text = if (serverResults.isEmpty()) {
+                                "No results found"
+                            } else {
+                                "${serverResults.size} found via server search"
+                            }
+                        }
+                    }
+                } catch (e: Exception) {
+                    ApplicationManager.getApplication().invokeLater {
+                        if (project.isDisposed) return@invokeLater
+                        if (activeServerSearch == query) {
+                            statusLabel.text = "Search failed: ${e.message}"
+                        }
+                    }
+                }
             }
         }
-        // Temporarily remove selection listener to avoid firing events during bulk update
+    }
+
+    private fun updateListModel(artifacts: List<RallyArtifact>) {
         val selectionListeners = artifactList.listSelectionListeners
         selectionListeners.forEach { artifactList.removeListSelectionListener(it) }
         listModel.clear()
-        listModel.addAll(filtered)
+        listModel.addAll(artifacts)
         selectionListeners.forEach { artifactList.addListSelectionListener(it) }
-        updateStats(filtered)
     }
 
     private fun updateStats(artifacts: List<RallyArtifact>) {

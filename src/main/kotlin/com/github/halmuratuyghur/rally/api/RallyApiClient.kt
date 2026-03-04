@@ -505,6 +505,41 @@ class RallyApiClient(
     }
 
     /**
+     * Search artifacts server-side using Rally "contains" query.
+     * Searches both Name and FormattedID fields across user stories and defects.
+     * @param searchText The text to search for
+     * @param scope Optional scope hint: "User Stories" or "Defects" to limit search
+     */
+    fun searchArtifacts(searchText: String, scope: String? = null): List<RallyArtifact> {
+        val cacheKey = "search:${searchText}|${scope}|${workspaceRef}|${projectRef}"
+        getCached<List<RallyArtifact>>(cacheKey)?.let { return it }
+
+        val query = "((Name contains \"$searchText\") OR (FormattedID contains \"$searchText\"))"
+
+        val results = mutableListOf<RallyArtifact>()
+        val fetchStories = scope != "Defects"
+        val fetchDefects = scope != "User Stories"
+
+        val storiesFuture = if (fetchStories) {
+            java.util.concurrent.CompletableFuture.supplyAsync({
+                queryUserStories(query)
+            }, apiExecutor)
+        } else null
+        val defectsFuture = if (fetchDefects) {
+            java.util.concurrent.CompletableFuture.supplyAsync({
+                queryDefects(query)
+            }, apiExecutor)
+        } else null
+
+        storiesFuture?.let { try { results.addAll(it.get()) } catch (_: Exception) {} }
+        defectsFuture?.let { try { results.addAll(it.get()) } catch (_: Exception) {} }
+
+        val sorted = results.sortedByDescending { it.lastUpdateDate }
+        putCache(cacheKey, sorted)
+        return sorted
+    }
+
+    /**
      * Build web URL for viewing an artifact in Rally.
      * Rally web UI URLs require the project OID: /#/<projectOID>d/detail/<type>/<objectID>
      */
