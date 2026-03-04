@@ -832,7 +832,7 @@ class RallyDetailPanel(private val project: Project) {
         ): Component {
             panel.background = if (isSelected) list.selectionBackground else list.background
 
-            badgeLabel.text = "#${value.stepIndex ?: (index + 1)}"
+            badgeLabel.text = "#${index + 1}"
             badgeLabel.foreground = if (isSelected) list.selectionForeground else list.foreground
 
             val inputText = stripHtml(value.input ?: "")
