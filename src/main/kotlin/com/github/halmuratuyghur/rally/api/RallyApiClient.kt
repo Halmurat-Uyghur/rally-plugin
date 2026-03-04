@@ -150,6 +150,7 @@ class RallyApiClient(
         private val LIST_FIELDS = listOf(
             "FormattedID",
             "Name",
+            "ObjectID",
             "CreationDate",
             "LastUpdateDate",
             "Owner",
