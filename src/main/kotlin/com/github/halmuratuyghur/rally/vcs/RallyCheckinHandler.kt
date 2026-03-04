@@ -21,11 +21,17 @@ private class RallyCheckinHandler(
         if (!session.isActive) return ReturnResult.COMMIT
 
         val ticketId = session.activeTicketId ?: return ReturnResult.COMMIT
-        val prefix = "[$ticketId]"
+        val trailer = "Refs: $ticketId"
         val currentMessage = panel.commitMessage
 
-        if (!currentMessage.startsWith(prefix)) {
-            panel.commitMessage = "$prefix $currentMessage"
+        if (!currentMessage.contains(trailer)) {
+            // Append as a git trailer after a blank line separator
+            val trimmed = currentMessage.trimEnd()
+            panel.commitMessage = if (trimmed.contains("\n\n")) {
+                "$trimmed\n$trailer"
+            } else {
+                "$trimmed\n\n$trailer"
+            }
         }
 
         return ReturnResult.COMMIT

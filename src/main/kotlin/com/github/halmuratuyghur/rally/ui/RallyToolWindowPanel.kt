@@ -1184,7 +1184,7 @@ class RallyToolWindowPanel(private val project: Project) {
                     "  \u2022 Create & checkout branch: $branchName\n" +
                     "  \u2022 Move ticket to In-Progress\n" +
                     "  \u2022 Assign you as owner\n" +
-                    "  \u2022 Prefix commit messages with [$ticketId]",
+                    "  \u2022 Append 'Refs: $ticketId' to commit messages",
             "Rally - Start Working",
             Messages.getQuestionIcon()
         )
