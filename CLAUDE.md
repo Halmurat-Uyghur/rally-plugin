@@ -133,6 +133,11 @@ All Tickets, My Tickets, User Stories, Defects, Recent Activity
 | `createUserStory()` | Create a new user story |
 | `clearCache()` / `clearArtifactCache()` | Cache invalidation |
 
+## Git Commit Rules
+
+- **Do NOT include `Co-Authored-By: Claude`** or any AI attribution in commit messages
+- Follow conventional commit format: `type(scope): description`
+
 ## Not Yet Implemented
 
 - Create User Story dialog (API exists in RallyApiClient, needs UI)
