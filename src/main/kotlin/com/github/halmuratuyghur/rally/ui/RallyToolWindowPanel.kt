@@ -1458,15 +1458,22 @@ class RallyToolWindowPanel(private val project: Project) {
             iconLabel.icon = when (value.type) {
                 "HierarchicalRequirement" -> AllIcons.Nodes.PpLib
                 "Defect" -> AllIcons.General.Error
+                "TestCase" -> AllIcons.RunConfigurations.TestState.Run
                 else -> AllIcons.FileTypes.Any_type
             }
 
             textLabel.text = "${value.formattedID ?: "?"}: ${value.name ?: "Untitled"}"
             textLabel.foreground = if (isSelected) list.selectionForeground else list.foreground
 
-            val state = value.scheduleState ?: value.state ?: "Unknown"
+            val state = if (value is RallyTestCase) {
+                value.lastVerdict ?: "No Verdict"
+            } else {
+                value.scheduleState ?: value.state ?: "Unknown"
+            }
             stateLabel.text = state
             stateLabel.foreground = if (isSelected) list.selectionForeground else when (state) {
+                "Pass" -> JBColor(Color(0, 128, 0), Color(100, 200, 100))
+                "Fail" -> JBColor(Color(180, 0, 0), Color(255, 100, 100))
                 "In-Progress" -> JBColor(Color(0, 128, 0), Color(100, 200, 100))
                 "Completed" -> JBColor(Color(0, 0, 180), Color(100, 150, 255))
                 "Accepted" -> JBColor.GRAY
