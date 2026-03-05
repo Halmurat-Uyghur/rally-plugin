@@ -132,6 +132,7 @@ class RallyApiClient(
             val key = iter.next()
             if (key.startsWith("artifacts:") || key.startsWith("stories:") ||
                 key.startsWith("defects:") || key.startsWith("tasks:") ||
+                key.startsWith("alltestcases:") ||
                 key.startsWith("sprint:") || key.startsWith("currentIteration:")) {
                 iter.remove()
             }
@@ -163,6 +164,23 @@ class RallyApiClient(
 
         // Fields for detail queries (includes Description)
         private val DETAIL_FIELDS = LIST_FIELDS + "Description"
+
+        // Fields for test case list queries
+        private val TC_LIST_FIELDS = listOf(
+            "FormattedID",
+            "Name",
+            "ObjectID",
+            "CreationDate",
+            "LastUpdateDate",
+            "Owner",
+            "Method",
+            "LastVerdict",
+            "LastRun",
+            "State",
+            "WorkProduct",
+            "Project",
+            "Priority"
+        )
     }
 
     /**
@@ -517,6 +535,13 @@ class RallyApiClient(
 
         val query = "((Name contains \"$searchText\") OR (FormattedID contains \"$searchText\"))"
 
+        if (scope == "Test Cases") {
+            val tcResults: List<RallyArtifact> = queryAllTestCases(query)
+            val sorted = tcResults.sortedByDescending { it.lastUpdateDate }
+            putCache(cacheKey, sorted)
+            return sorted
+        }
+
         val results = mutableListOf<RallyArtifact>()
         val fetchStories = scope != "Defects"
         val fetchDefects = scope != "User Stories"
@@ -538,6 +563,24 @@ class RallyApiClient(
         val sorted = results.sortedByDescending { it.lastUpdateDate }
         putCache(cacheKey, sorted)
         return sorted
+    }
+
+    /**
+     * Query all test cases in the current workspace/project.
+     * Used when scope is "Test Cases".
+     */
+    fun queryAllTestCases(query: String? = null, pageSize: Int = DEFAULT_PAGE_SIZE, maxResults: Int = MAX_PAGE_SIZE): List<RallyTestCase> {
+        val cacheKey = "alltestcases:${query}|${pageSize}|${maxResults}|${workspaceRef}|${projectRef}"
+        getCached<List<RallyTestCase>>(cacheKey)?.let { return it }
+
+        val type = object : TypeToken<RallyQueryResult<RallyTestCase>>() {}.type
+        val results: List<RallyTestCase> = queryAllPages(
+            "testcase", type, query, pageSize, maxResults,
+            order = "LastUpdateDate DESC",
+            fields = TC_LIST_FIELDS
+        )
+        putCache(cacheKey, results)
+        return results
     }
 
     /**
