@@ -595,6 +595,7 @@ class RallyApiClient(
             "HierarchicalRequirement" -> "userstory"
             "Defect" -> "defect"
             "Task" -> "task"
+            "TestCase" -> "testcase"
             else -> "detail"
         }
 
@@ -602,6 +603,7 @@ class RallyApiClient(
         val projectOid = when (artifact) {
             is RallyUserStory -> artifact.project?.ref
             is RallyDefect -> artifact.project?.ref
+            is RallyTestCase -> artifact.project?.ref
             else -> null
         }?.trimEnd('/')?.substringAfterLast('/')
 

@@ -33,7 +33,6 @@ class RallyDetailPanel(private val project: Project) {
         private const val TAB_TEST_CASES = 0
         private const val TAB_TASKS = 1
         private const val TAB_ATTACHMENTS = 2
-        private const val TAB_TEST_STEPS = 3
     }
 
     val component: JPanel = JPanel(BorderLayout())
@@ -148,13 +147,11 @@ class RallyDetailPanel(private val project: Project) {
         stepList.cellRenderer = StepCellRenderer()
         stepList.selectionMode = ListSelectionModel.SINGLE_SELECTION
         stepList.emptyText.text = "Select a test case to view steps"
-        val stepScrollPane = JBScrollPane(stepList)
 
-        // Tabbed pane with 4 tabs
+        // Tabbed pane with 3 standard tabs (Test Steps shown only when a test case is selected)
         tabbedPane.addTab("Test Cases", tcPanel)
         tabbedPane.addTab("Tasks", taskScrollPane)
         tabbedPane.addTab("Attachments", attachmentScrollPane)
-        tabbedPane.addTab("Test Steps (0)", stepScrollPane)
 
         // Split: description (40%) / tabbed pane (60%) with thin dark divider
         val splitPane = JSplitPane(JSplitPane.VERTICAL_SPLIT, descScrollPane, tabbedPane)
@@ -228,6 +225,14 @@ class RallyDetailPanel(private val project: Project) {
         currentArtifact = artifact
         currentClient = client
 
+        // Restore standard tabs if previously showing a test case
+        if (tabbedPane.tabCount != 3 || (tabbedPane.tabCount > 0 && tabbedPane.getTitleAt(0).startsWith("Test Steps"))) {
+            tabbedPane.removeAll()
+            tabbedPane.addTab("Test Cases", JBScrollPane(testCaseList))
+            tabbedPane.addTab("Tasks", JBScrollPane(taskList))
+            tabbedPane.addTab("Attachments", JBScrollPane(attachmentList))
+        }
+
         // Update header
         val id = artifact.formattedID ?: "?"
         val name = artifact.name ?: "Untitled"
@@ -235,7 +240,11 @@ class RallyDetailPanel(private val project: Project) {
         copyButton.isVisible = true
         browserButton.isVisible = true
 
-        val state = artifact.scheduleState ?: artifact.state ?: "Unknown"
+        val state = if (artifact is RallyTestCase) {
+            artifact.lastVerdict ?: "No Verdict"
+        } else {
+            artifact.scheduleState ?: artifact.state ?: "Unknown"
+        }
         stateBadge.text = state
         stateBadge.foreground = stateColor(state)
 
@@ -246,6 +255,55 @@ class RallyDetailPanel(private val project: Project) {
             descriptionPane.caretPosition = 0
         } else {
             descriptionPane.text = wrapHtml("<i>Loading description...</i>")
+        }
+
+        if (artifact is RallyTestCase) {
+            // For test cases: show description + test steps only
+            tabbedPane.removeAll()
+            tabbedPane.addTab("Test Steps", JBScrollPane(stepList))
+            stepListModel.clear()
+
+            ApplicationManager.getApplication().executeOnPooledThread {
+                val descFuture = CompletableFuture.supplyAsync({
+                    var resolved = desc
+                    if (resolved.isNullOrBlank()) {
+                        resolved = try { client.fetchDescription(artifactRef) } catch (e: Exception) { null }
+                    }
+                    val resolvedNonNull = resolved
+                    if (!resolvedNonNull.isNullOrBlank()) {
+                        try { resolveInlineImages(resolvedNonNull, client) } catch (_: Exception) { resolvedNonNull }
+                    } else null
+                }, client.apiExecutor)
+
+                val stepsFuture = CompletableFuture.supplyAsync({
+                    try { client.queryTestSteps(id) } catch (e: Exception) {
+                        LOG.warn("Failed to load test steps for $id", e)
+                        null
+                    }
+                }, client.apiExecutor)
+
+                descFuture.thenAccept { resolvedDesc ->
+                    ApplicationManager.getApplication().invokeLater {
+                        if (currentArtifactRef != artifactRef) return@invokeLater
+                        descriptionPane.text = wrapHtml(resolvedDesc ?: "<i>No description</i>")
+                        descriptionPane.caretPosition = 0
+                    }
+                }
+
+                stepsFuture.thenAccept { steps ->
+                    ApplicationManager.getApplication().invokeLater {
+                        if (currentArtifactRef != artifactRef) return@invokeLater
+                        stepListModel.clear()
+                        if (steps != null) {
+                            steps.forEach { stepListModel.addElement(it) }
+                            tabbedPane.setTitleAt(0, "Test Steps (${steps.size})")
+                        } else {
+                            tabbedPane.setTitleAt(0, "Test Steps (0)")
+                        }
+                    }
+                }
+            }
+            return  // Skip the normal story/defect detail loading
         }
 
         // Reset to first tab and clear all lists
@@ -270,10 +328,11 @@ class RallyDetailPanel(private val project: Project) {
                     }
                 }
                 // Resolve inline images
-                if (!resolved.isNullOrBlank()) {
-                    try { resolveInlineImages(resolved, client) } catch (e: Exception) {
+                val resolvedNonNull = resolved
+                if (!resolvedNonNull.isNullOrBlank()) {
+                    try { resolveInlineImages(resolvedNonNull, client) } catch (e: Exception) {
                         LOG.warn("Failed to resolve inline images for $id", e)
-                        resolved
+                        resolvedNonNull
                     }
                 } else null
             }, client.apiExecutor)
@@ -370,14 +429,22 @@ class RallyDetailPanel(private val project: Project) {
         taskListModel.clear()
         attachmentListModel.clear()
         stepListModel.clear()
+        // Restore standard tabs if previously showing a test case
+        if (tabbedPane.tabCount != 3 || (tabbedPane.tabCount > 0 && tabbedPane.getTitleAt(0).startsWith("Test Steps"))) {
+            tabbedPane.removeAll()
+            tabbedPane.addTab("Test Cases", JBScrollPane(testCaseList))
+            tabbedPane.addTab("Tasks", JBScrollPane(taskList))
+            tabbedPane.addTab("Attachments", JBScrollPane(attachmentList))
+        }
         updateTabTitles(0, 0, 0)
     }
 
     private fun updateTabTitles(testCases: Int, tasks: Int, attachments: Int) {
-        tabbedPane.setTitleAt(TAB_TEST_CASES, "Test Cases ($testCases)")
-        tabbedPane.setTitleAt(TAB_TASKS, "Tasks ($tasks)")
-        tabbedPane.setTitleAt(TAB_ATTACHMENTS, "Attachments ($attachments)")
-        tabbedPane.setTitleAt(TAB_TEST_STEPS, "Test Steps (0)")
+        if (tabbedPane.tabCount >= 3) {
+            tabbedPane.setTitleAt(TAB_TEST_CASES, "Test Cases ($testCases)")
+            tabbedPane.setTitleAt(TAB_TASKS, "Tasks ($tasks)")
+            tabbedPane.setTitleAt(TAB_ATTACHMENTS, "Attachments ($attachments)")
+        }
     }
 
     // ── Test Case Context Menu ──────────────────────────────────
@@ -449,8 +516,22 @@ class RallyDetailPanel(private val project: Project) {
         val artifactRef = currentArtifactRef
 
         stepListModel.clear()
-        tabbedPane.setTitleAt(TAB_TEST_STEPS, "Test Steps (...)")
-        tabbedPane.selectedIndex = TAB_TEST_STEPS
+
+        // Add Test Steps tab dynamically if not already present
+        var stepsTabIndex = -1
+        for (i in 0 until tabbedPane.tabCount) {
+            if (tabbedPane.getTitleAt(i).startsWith("Test Steps")) {
+                stepsTabIndex = i
+                break
+            }
+        }
+        if (stepsTabIndex < 0) {
+            tabbedPane.addTab("Test Steps (...)", JBScrollPane(stepList))
+            stepsTabIndex = tabbedPane.tabCount - 1
+        } else {
+            tabbedPane.setTitleAt(stepsTabIndex, "Test Steps (...)")
+        }
+        tabbedPane.selectedIndex = stepsTabIndex
 
         ApplicationManager.getApplication().executeOnPooledThread {
             val steps = try {
@@ -462,11 +543,21 @@ class RallyDetailPanel(private val project: Project) {
             ApplicationManager.getApplication().invokeLater {
                 if (currentArtifactRef != artifactRef) return@invokeLater
                 stepListModel.clear()
-                if (steps != null) {
-                    stepListModel.addAll(steps)
-                    tabbedPane.setTitleAt(TAB_TEST_STEPS, "Test Steps (${steps.size})")
-                } else {
-                    tabbedPane.setTitleAt(TAB_TEST_STEPS, "Test Steps (!)")
+                // Re-find the test steps tab index in case tabs changed
+                var currentStepsTab = -1
+                for (i in 0 until tabbedPane.tabCount) {
+                    if (tabbedPane.getTitleAt(i).startsWith("Test Steps")) {
+                        currentStepsTab = i
+                        break
+                    }
+                }
+                if (currentStepsTab >= 0) {
+                    if (steps != null) {
+                        stepListModel.addAll(steps)
+                        tabbedPane.setTitleAt(currentStepsTab, "Test Steps (${steps.size})")
+                    } else {
+                        tabbedPane.setTitleAt(currentStepsTab, "Test Steps (!)")
+                    }
                 }
             }
         }
