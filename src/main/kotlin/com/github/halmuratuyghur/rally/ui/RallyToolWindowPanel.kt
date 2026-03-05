@@ -15,6 +15,7 @@ import com.intellij.openapi.ui.ValidationInfo
 import com.github.halmuratuyghur.rally.api.RallyApiClient
 import com.github.halmuratuyghur.rally.api.RallyArtifact
 import com.github.halmuratuyghur.rally.api.RallyDefect
+import com.github.halmuratuyghur.rally.api.RallyTestCase
 import com.github.halmuratuyghur.rally.api.RallyIteration
 import com.github.halmuratuyghur.rally.api.RallyProject
 import com.github.halmuratuyghur.rally.api.RallyUserStory
@@ -49,6 +50,7 @@ class RallyToolWindowPanel(private val project: Project) {
             "My Tickets",
             "User Stories",
             "Defects",
+            "Test Cases",
             "Recent Activity"
         )
         private const val DIVIDER_THICKNESS = 3
@@ -308,6 +310,10 @@ class RallyToolWindowPanel(private val project: Project) {
                         sp.dividerSize = DIVIDER_THICKNESS
                         sp.dividerLocation = (sp.width * 0.55).toInt()
                     }
+                    val isTc = selected is RallyTestCase
+                    val session = RallyWorkSession.getInstance(project)
+                    startWorkingButton.isEnabled = !isTc && !session.isActive
+                    finishWorkingButton.isEnabled = !isTc && session.isActive
                 } else {
                     // Auto-collapse detail panel when nothing is selected
                     sp.dividerSize = 0
@@ -342,16 +348,19 @@ class RallyToolWindowPanel(private val project: Project) {
         if (!artifactList.isSelectedIndex(index)) {
             artifactList.selectedIndex = index
         }
+        val selected = artifactList.selectedValue
 
         val menu = JPopupMenu()
         menu.add(JMenuItem("Open in Browser").apply { addActionListener { openInBrowser() } })
         menu.add(JMenuItem("Copy FormattedID").apply { addActionListener { copyFormattedId() } })
-        menu.addSeparator()
-        menu.add(JMenuItem("Set In-Progress").apply { addActionListener { changeState("In-Progress") } })
-        menu.add(JMenuItem("Set Completed").apply { addActionListener { changeState("Completed") } })
-        menu.add(JMenuItem("Set Defined").apply { addActionListener { changeState("Defined") } })
-        menu.addSeparator()
-        menu.add(JMenuItem("Export to JSON/Markdown").apply { addActionListener { exportSelectedArtifact() } })
+        if (selected !is RallyTestCase) {
+            menu.addSeparator()
+            menu.add(JMenuItem("Set In-Progress").apply { addActionListener { changeState("In-Progress") } })
+            menu.add(JMenuItem("Set Completed").apply { addActionListener { changeState("Completed") } })
+            menu.add(JMenuItem("Set Defined").apply { addActionListener { changeState("Defined") } })
+            menu.addSeparator()
+            menu.add(JMenuItem("Export to JSON/Markdown").apply { addActionListener { exportSelectedArtifact() } })
+        }
         menu.show(artifactList, e.x, e.y)
     }
 
@@ -408,7 +417,11 @@ class RallyToolWindowPanel(private val project: Project) {
 
                 // Load artifacts; sprint summary runs in parallel only when it needs separate API calls
                 val artifactsFuture = java.util.concurrent.CompletableFuture.supplyAsync({
-                    client.queryAllArtifacts(query, pageSize, scope = scope, maxResults = pageSize)
+                    if (scope == "Test Cases") {
+                        client.queryAllTestCases(query, pageSize, maxResults = pageSize)
+                    } else {
+                        client.queryAllArtifacts(query, pageSize, scope = scope, maxResults = pageSize)
+                    }
                 }, client.apiExecutor)
                 val sprintFuture = if (!hasIterationFilter) {
                     // No iteration selected — sprint summary needs its own API calls
@@ -610,6 +623,7 @@ class RallyToolWindowPanel(private val project: Project) {
         val scopeFiltered = when (scope) {
             "User Stories" -> artifacts.filter { it.type == "HierarchicalRequirement" }
             "Defects" -> artifacts.filter { it.type == "Defect" }
+            "Test Cases" -> artifacts.filter { it.type == "TestCase" }
             else -> artifacts
         }
 
