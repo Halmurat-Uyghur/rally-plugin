@@ -54,7 +54,7 @@ class RallyExporter(private val client: RallyApiClient) {
             addProperty("name", tc.name ?: "")
             addProperty("description", tc.description ?: "")
             addProperty("priority", tc.priority ?: "")
-            addProperty("type", tc.type ?: "")
+            addProperty("type", tc.testType ?: "")
             addProperty("method", tc.method ?: "")
             addProperty("extractedAt", Instant.now().toString())
             add("steps", stepsToJsonArray(steps))

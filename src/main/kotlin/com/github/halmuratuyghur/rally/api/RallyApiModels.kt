@@ -299,22 +299,42 @@ data class RallyIteration(
  */
 data class RallyTestCase(
     @SerializedName("_ref")
-    val ref: String? = null,
+    override val ref: String? = null,
 
     @SerializedName("ObjectID")
-    val objectID: String? = null,
+    override val objectID: String? = null,
 
     @SerializedName("FormattedID")
-    val formattedID: String? = null,
+    override val formattedID: String? = null,
 
     @SerializedName("Name")
-    val name: String? = null,
+    override val name: String? = null,
+
+    @SerializedName("Description")
+    override val description: String? = null,
+
+    @SerializedName("CreationDate")
+    override val creationDate: String? = null,
+
+    @SerializedName("LastUpdateDate")
+    override val lastUpdateDate: String? = null,
+
+    @SerializedName("Owner")
+    override val owner: RallyUser? = null,
+
+    override val scheduleState: String? = null,
+
+    @SerializedName("State")
+    override val state: String? = null,
+
+    @SerializedName("_type")
+    override val type: String? = "TestCase",
 
     @SerializedName("Method")
     val method: String? = null,
 
     @SerializedName("Type")
-    val type: String? = null,
+    val testType: String? = null,
 
     @SerializedName("LastVerdict")
     val lastVerdict: String? = null,
@@ -322,18 +342,15 @@ data class RallyTestCase(
     @SerializedName("LastRun")
     val lastRun: String? = null,
 
-    @SerializedName("Owner")
-    val owner: RallyUser? = null,
-
     @SerializedName("WorkProduct")
     val workProduct: RallyRef? = null,
 
-    @SerializedName("Description")
-    val description: String? = null,
+    @SerializedName("Project")
+    val project: RallyRef? = null,
 
     @SerializedName("Priority")
     val priority: String? = null
-)
+) : RallyArtifact
 
 /**
  * Rally Test Case Step
