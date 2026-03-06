@@ -2,6 +2,9 @@ package com.github.halmuratuyghur.rally.ui
 
 import com.intellij.icons.AllIcons
 import com.intellij.ide.BrowserUtil
+import com.intellij.openapi.actionSystem.ActionManager
+import com.intellij.openapi.actionSystem.AnActionEvent
+import com.intellij.openapi.actionSystem.impl.SimpleDataContext
 import com.intellij.openapi.application.ApplicationManager
 import com.intellij.openapi.diagnostic.Logger
 import com.intellij.openapi.project.Project
@@ -12,11 +15,15 @@ import com.intellij.openapi.ui.ValidationInfo
 import com.github.halmuratuyghur.rally.api.RallyApiClient
 import com.github.halmuratuyghur.rally.api.RallyArtifact
 import com.github.halmuratuyghur.rally.api.RallyDefect
+import com.github.halmuratuyghur.rally.api.RallyTestCase
 import com.github.halmuratuyghur.rally.api.RallyIteration
 import com.github.halmuratuyghur.rally.api.RallyProject
 import com.github.halmuratuyghur.rally.api.RallyUserStory
 import com.github.halmuratuyghur.rally.export.RallyExporter
 import com.github.halmuratuyghur.rally.settings.RallySettings
+import com.github.halmuratuyghur.rally.vcs.RallyWorkSession
+import git4idea.branch.GitBrancher
+import git4idea.repo.GitRepositoryManager
 import com.intellij.ui.JBColor
 import com.intellij.ui.SearchTextField
 import com.intellij.ui.components.JBLabel
@@ -43,6 +50,7 @@ class RallyToolWindowPanel(private val project: Project) {
             "My Tickets",
             "User Stories",
             "Defects",
+            "Test Cases",
             "Recent Activity"
         )
         private const val DIVIDER_THICKNESS = 3
@@ -70,6 +78,11 @@ class RallyToolWindowPanel(private val project: Project) {
     private val statsLabel = JBLabel("0 items")
     private val sprintLabel = JBLabel("")
     private val statusLabel = JBLabel("Ready")
+    private val startWorkingButton = JButton("Start Working", AllIcons.Actions.Execute).apply { isFocusable = false }
+    private val finishWorkingButton = JButton("Finish Working", AllIcons.Actions.Suspend).apply {
+        isFocusable = false
+        isEnabled = false
+    }
 
     private val detailPanel = RallyDetailPanel(project)
     private var mainSplitPane: JSplitPane? = null
@@ -87,6 +100,7 @@ class RallyToolWindowPanel(private val project: Project) {
     private var lastState: String = ""
     private var lastProject: String = ""
     private var lastIteration: String = ""
+    @Volatile private var activeServerSearch: String? = null
 
     init {
         setupUI()
@@ -97,6 +111,7 @@ class RallyToolWindowPanel(private val project: Project) {
     private fun checkInitialConfiguration() {
         if (RallySettings.getInstance().isConfigured()) {
             loadTickets()
+            syncWorkSessionButtons()
         } else {
             showNotConfigured()
         }
@@ -127,6 +142,13 @@ class RallyToolWindowPanel(private val project: Project) {
         toolbar.add(createButton("Completed", AllIcons.Actions.Checked) { changeState("Completed") })
         toolbar.add(JSeparator(SwingConstants.VERTICAL).apply { preferredSize = java.awt.Dimension(2, 24) })
         toolbar.add(createButton("Export", AllIcons.ToolbarDecorator.Export) { exportSelectedArtifact() })
+        toolbar.add(JSeparator(SwingConstants.VERTICAL).apply { preferredSize = java.awt.Dimension(2, 24) })
+        toolbar.add(startWorkingButton)
+        toolbar.add(finishWorkingButton)
+
+        startWorkingButton.addActionListener { startWorking() }
+        finishWorkingButton.addActionListener { finishWorking() }
+
         toolbar.add(Box.createHorizontalGlue())
         toolbar.add(statsLabel)
 
@@ -288,6 +310,10 @@ class RallyToolWindowPanel(private val project: Project) {
                         sp.dividerSize = DIVIDER_THICKNESS
                         sp.dividerLocation = (sp.width * 0.55).toInt()
                     }
+                    val isTc = selected is RallyTestCase
+                    val session = RallyWorkSession.getInstance(project)
+                    startWorkingButton.isEnabled = !isTc && !session.isActive
+                    finishWorkingButton.isEnabled = !isTc && session.isActive
                 } else {
                     // Auto-collapse detail panel when nothing is selected
                     sp.dividerSize = 0
@@ -322,16 +348,19 @@ class RallyToolWindowPanel(private val project: Project) {
         if (!artifactList.isSelectedIndex(index)) {
             artifactList.selectedIndex = index
         }
+        val selected = artifactList.selectedValue
 
         val menu = JPopupMenu()
         menu.add(JMenuItem("Open in Browser").apply { addActionListener { openInBrowser() } })
         menu.add(JMenuItem("Copy FormattedID").apply { addActionListener { copyFormattedId() } })
-        menu.addSeparator()
-        menu.add(JMenuItem("Set In-Progress").apply { addActionListener { changeState("In-Progress") } })
-        menu.add(JMenuItem("Set Completed").apply { addActionListener { changeState("Completed") } })
-        menu.add(JMenuItem("Set Defined").apply { addActionListener { changeState("Defined") } })
-        menu.addSeparator()
-        menu.add(JMenuItem("Export to JSON/Markdown").apply { addActionListener { exportSelectedArtifact() } })
+        if (selected !is RallyTestCase) {
+            menu.addSeparator()
+            menu.add(JMenuItem("Set In-Progress").apply { addActionListener { changeState("In-Progress") } })
+            menu.add(JMenuItem("Set Completed").apply { addActionListener { changeState("Completed") } })
+            menu.add(JMenuItem("Set Defined").apply { addActionListener { changeState("Defined") } })
+            menu.addSeparator()
+            menu.add(JMenuItem("Export to JSON/Markdown").apply { addActionListener { exportSelectedArtifact() } })
+        }
         menu.show(artifactList, e.x, e.y)
     }
 
@@ -388,7 +417,11 @@ class RallyToolWindowPanel(private val project: Project) {
 
                 // Load artifacts; sprint summary runs in parallel only when it needs separate API calls
                 val artifactsFuture = java.util.concurrent.CompletableFuture.supplyAsync({
-                    client.queryAllArtifacts(query, pageSize, scope = scope, maxResults = pageSize)
+                    if (scope == "Test Cases") {
+                        client.queryAllTestCases(query, pageSize, maxResults = pageSize)
+                    } else {
+                        client.queryAllArtifacts(query, pageSize, scope = scope, maxResults = pageSize)
+                    }
                 }, client.apiExecutor)
                 val sprintFuture = if (!hasIterationFilter) {
                     // No iteration selected — sprint summary needs its own API calls
@@ -590,6 +623,7 @@ class RallyToolWindowPanel(private val project: Project) {
         val scopeFiltered = when (scope) {
             "User Stories" -> artifacts.filter { it.type == "HierarchicalRequirement" }
             "Defects" -> artifacts.filter { it.type == "Defect" }
+            "Test Cases" -> artifacts.filter { it.type == "TestCase" }
             else -> artifacts
         }
 
@@ -689,21 +723,65 @@ class RallyToolWindowPanel(private val project: Project) {
 
     private fun applySearchFilter() {
         val query = searchField.text.trim()
-        val filtered = if (query.isBlank()) {
-            allArtifacts
-        } else {
-            allArtifacts.filter {
-                it.formattedID?.contains(query, ignoreCase = true) == true ||
-                        it.name?.contains(query, ignoreCase = true) == true
+
+        if (query.isBlank()) {
+            // Search cleared — restore full list and cancel any pending server search
+            activeServerSearch = null
+            updateListModel(allArtifacts)
+            updateStats(allArtifacts)
+            return
+        }
+
+        // Client-side filter first
+        val filtered = allArtifacts.filter {
+            it.formattedID?.contains(query, ignoreCase = true) == true ||
+                    it.name?.contains(query, ignoreCase = true) == true
+        }
+
+        updateListModel(filtered)
+        updateStats(filtered)
+
+        // Server-side fallback: fire when client-side returns 0 results and query >= 3 chars
+        if (filtered.isEmpty() && query.length >= 3) {
+            activeServerSearch = query
+            statusLabel.text = "Searching Rally..."
+            val scope = scopeCombo.selectedItem as? String
+
+            ApplicationManager.getApplication().executeOnPooledThread {
+                try {
+                    val client = getClient()
+                    val serverResults = client.searchArtifacts(query, scope)
+                    ApplicationManager.getApplication().invokeLater {
+                        if (project.isDisposed) return@invokeLater
+                        // Only apply if this is still the active search
+                        if (activeServerSearch == query) {
+                            updateListModel(serverResults)
+                            updateStats(serverResults)
+                            statusLabel.text = if (serverResults.isEmpty()) {
+                                "No results found"
+                            } else {
+                                "${serverResults.size} found via server search"
+                            }
+                        }
+                    }
+                } catch (e: Exception) {
+                    ApplicationManager.getApplication().invokeLater {
+                        if (project.isDisposed) return@invokeLater
+                        if (activeServerSearch == query) {
+                            statusLabel.text = "Search failed: ${e.message}"
+                        }
+                    }
+                }
             }
         }
-        // Temporarily remove selection listener to avoid firing events during bulk update
+    }
+
+    private fun updateListModel(artifacts: List<RallyArtifact>) {
         val selectionListeners = artifactList.listSelectionListeners
         selectionListeners.forEach { artifactList.removeListSelectionListener(it) }
         listModel.clear()
-        listModel.addAll(filtered)
+        listModel.addAll(artifacts)
         selectionListeners.forEach { artifactList.addListSelectionListener(it) }
-        updateStats(filtered)
     }
 
     private fun updateStats(artifacts: List<RallyArtifact>) {
@@ -1084,6 +1162,251 @@ class RallyToolWindowPanel(private val project: Project) {
         }
     }
 
+    private fun startWorking() {
+        val session = RallyWorkSession.getInstance(project)
+        if (session.isActive) {
+            Messages.showWarningDialog(
+                project,
+                "Already working on ${session.activeTicketId}. Finish that ticket first.",
+                "Rally"
+            )
+            return
+        }
+
+        val selected = artifactList.selectedValue
+        if (selected == null) {
+            Messages.showInfoMessage(project, "Select a ticket first.", "Rally")
+            return
+        }
+
+        val ticketId = selected.formattedID
+        val ticketRef = selected.ref
+        val ticketType = selected.type
+        if (ticketId == null || ticketRef == null || ticketType == null) {
+            Messages.showErrorDialog(project, "Selected ticket is missing required data.", "Rally")
+            return
+        }
+
+        val branchName = "feature/$ticketId"
+        val settings = RallySettings.getInstance()
+        val username = settings.username
+
+        val confirm = Messages.showYesNoDialog(
+            project,
+            "Start working on $ticketId?\n\n" +
+                    "This will:\n" +
+                    "  \u2022 Create & checkout branch: $branchName\n" +
+                    "  \u2022 Move ticket to In-Progress\n" +
+                    "  \u2022 Assign you as owner\n" +
+                    "  \u2022 Append 'Refs: $ticketId' to commit messages",
+            "Rally - Start Working",
+            Messages.getQuestionIcon()
+        )
+        if (confirm != Messages.YES) return
+
+        statusLabel.text = "Starting work on $ticketId..."
+
+        ApplicationManager.getApplication().executeOnPooledThread {
+            val client = getClient()
+            val errors = mutableListOf<String>()
+
+            // 1. Create & checkout git branch (synchronized via latch)
+            try {
+                val repoManager = GitRepositoryManager.getInstance(project)
+                val repos = repoManager.repositories
+                if (repos.isEmpty()) {
+                    errors.add("No Git repository found in this project")
+                } else {
+                    val brancher = GitBrancher.getInstance(project)
+                    val repo = repos.first()
+                    val existingBranches = repo.branches.localBranches.map { it.name }
+                    val branchLatch = java.util.concurrent.CountDownLatch(1)
+                    var branchError: String? = null
+                    ApplicationManager.getApplication().invokeLater {
+                        try {
+                            if (branchName in existingBranches) {
+                                brancher.checkout(branchName, false, repos, null)
+                            } else {
+                                brancher.createBranch(branchName, mapOf(repo to "HEAD"))
+                            }
+                        } catch (e: Exception) {
+                            branchError = e.message
+                        } finally {
+                            branchLatch.countDown()
+                        }
+                    }
+                    branchLatch.await(10, java.util.concurrent.TimeUnit.SECONDS)
+                    branchError?.let { errors.add("Branch operation failed: $it") }
+                }
+            } catch (e: Exception) {
+                LOG.error("Failed to create branch $branchName", e)
+                errors.add("Branch creation failed: ${e.message}")
+            }
+
+            // 2. Move ticket to In-Progress
+            try {
+                client.updateArtifactState(ticketRef, ticketType, "In-Progress")
+            } catch (e: Exception) {
+                LOG.error("Failed to move $ticketId to In-Progress", e)
+                errors.add("State change failed: ${e.message}")
+            }
+
+            // 3. Assign owner
+            if (username.isNotBlank()) {
+                try {
+                    val user = client.getUserByUsername(username)
+                    val userRef = user.ref
+                    if (userRef != null) {
+                        client.updateArtifactOwner(ticketRef, ticketType, userRef)
+                    }
+                } catch (e: Exception) {
+                    LOG.error("Failed to assign owner for $ticketId", e)
+                    errors.add("Owner assignment failed: ${e.message}")
+                }
+            }
+
+            // 4. Activate work session
+            val session = RallyWorkSession.getInstance(project)
+            session.start(ticketId, ticketRef, ticketType, branchName)
+
+            ApplicationManager.getApplication().invokeLater {
+                if (project.isDisposed) return@invokeLater
+
+                // Optimistic update
+                allArtifacts = allArtifacts.map { artifact ->
+                    if (artifact.ref == ticketRef) {
+                        when (artifact) {
+                            is RallyUserStory -> artifact.copy(scheduleState = "In-Progress")
+                            is RallyDefect -> artifact.copy(scheduleState = "In-Progress")
+                            else -> artifact
+                        }
+                    } else artifact
+                }
+                client.clearArtifactCache()
+                applySearchFilter()
+
+                startWorkingButton.isEnabled = false
+                finishWorkingButton.isEnabled = true
+
+                if (errors.isNotEmpty()) {
+                    Messages.showWarningDialog(
+                        project,
+                        "Started working on $ticketId with issues:\n\n${errors.joinToString("\n")}",
+                        "Rally - Start Working"
+                    )
+                }
+                statusLabel.text = "Working on $ticketId"
+            }
+        }
+    }
+
+    private fun finishWorking() {
+        val session = RallyWorkSession.getInstance(project)
+        if (!session.isActive) {
+            Messages.showInfoMessage(project, "No active work session.", "Rally")
+            return
+        }
+
+        val ticketId = session.activeTicketId!!
+        val ticketRef = session.activeTicketRef!!
+        val ticketType = session.activeTicketType!!
+
+        val confirm = Messages.showYesNoDialog(
+            project,
+            "Finish working on $ticketId?\n\n" +
+                    "This will:\n" +
+                    "  \u2022 Move ticket to Completed\n" +
+                    "  \u2022 Stop prefixing commit messages\n" +
+                    "  \u2022 Open the Create Pull Request dialog",
+            "Rally - Finish Working",
+            Messages.getQuestionIcon()
+        )
+        if (confirm != Messages.YES) return
+
+        statusLabel.text = "Finishing $ticketId..."
+
+        ApplicationManager.getApplication().executeOnPooledThread {
+            val client = getClient()
+            var stateChangeError: String? = null
+
+            // 1. Move ticket to Completed
+            try {
+                client.updateArtifactState(ticketRef, ticketType, "Completed")
+            } catch (e: Exception) {
+                LOG.error("Failed to move $ticketId to Completed", e)
+                stateChangeError = e.message
+            }
+
+            // 2. Clear work session
+            session.finish()
+
+            ApplicationManager.getApplication().invokeLater {
+                if (project.isDisposed) return@invokeLater
+
+                // Optimistic update
+                allArtifacts = allArtifacts.map { artifact ->
+                    if (artifact.ref == ticketRef) {
+                        when (artifact) {
+                            is RallyUserStory -> artifact.copy(scheduleState = "Completed")
+                            is RallyDefect -> artifact.copy(scheduleState = "Completed")
+                            else -> artifact
+                        }
+                    } else artifact
+                }
+                client.clearArtifactCache()
+                applySearchFilter()
+
+                startWorkingButton.isEnabled = true
+                finishWorkingButton.isEnabled = false
+                statusLabel.text = "Finished $ticketId"
+
+                if (stateChangeError != null) {
+                    Messages.showWarningDialog(
+                        project,
+                        "Work session ended but failed to move $ticketId to Completed on Rally:\n$stateChangeError",
+                        "Rally - Finish Working"
+                    )
+                }
+
+                // 3. Open IntelliJ's native Create Pull Request dialog
+                try {
+                    val actionManager = ActionManager.getInstance()
+                    val createPrAction = actionManager.getAction("Git.CreatePullRequest")
+                        ?: actionManager.getAction("Github.Create.Pull.Request")
+                    if (createPrAction != null) {
+                        val dataContext = SimpleDataContext.getProjectContext(project)
+                        val event = AnActionEvent.createFromDataContext(
+                            "RallyFinishWorking", null, dataContext
+                        )
+                        createPrAction.actionPerformed(event)
+                    } else {
+                        Messages.showInfoMessage(
+                            project,
+                            "Ticket moved to Completed.\n\nCould not open PR dialog \u2014 install the GitHub or GitLab plugin for PR integration.",
+                            "Rally - Finish Working"
+                        )
+                    }
+                } catch (e: Exception) {
+                    LOG.warn("Could not open PR dialog", e)
+                    Messages.showInfoMessage(
+                        project,
+                        "Ticket $ticketId moved to Completed.\nOpen a pull request manually when ready.",
+                        "Rally - Finish Working"
+                    )
+                }
+            }
+        }
+    }
+
+    private fun syncWorkSessionButtons() {
+        val session = RallyWorkSession.getInstance(project)
+        startWorkingButton.isEnabled = !session.isActive
+        finishWorkingButton.isEnabled = session.isActive
+        if (session.isActive) {
+            statusLabel.text = "Working on ${session.activeTicketId}"
+        }
+    }
+
     // ── Client ───────────────────────────────────────────────────
 
     private fun getClient(): RallyApiClient {
@@ -1135,15 +1458,22 @@ class RallyToolWindowPanel(private val project: Project) {
             iconLabel.icon = when (value.type) {
                 "HierarchicalRequirement" -> AllIcons.Nodes.PpLib
                 "Defect" -> AllIcons.General.Error
+                "TestCase" -> AllIcons.RunConfigurations.TestState.Run
                 else -> AllIcons.FileTypes.Any_type
             }
 
             textLabel.text = "${value.formattedID ?: "?"}: ${value.name ?: "Untitled"}"
             textLabel.foreground = if (isSelected) list.selectionForeground else list.foreground
 
-            val state = value.scheduleState ?: value.state ?: "Unknown"
+            val state = if (value is RallyTestCase) {
+                value.lastVerdict ?: "No Verdict"
+            } else {
+                value.scheduleState ?: value.state ?: "Unknown"
+            }
             stateLabel.text = state
             stateLabel.foreground = if (isSelected) list.selectionForeground else when (state) {
+                "Pass" -> JBColor(Color(0, 128, 0), Color(100, 200, 100))
+                "Fail" -> JBColor(Color(180, 0, 0), Color(255, 100, 100))
                 "In-Progress" -> JBColor(Color(0, 128, 0), Color(100, 200, 100))
                 "Completed" -> JBColor(Color(0, 0, 180), Color(100, 150, 255))
                 "Accepted" -> JBColor.GRAY

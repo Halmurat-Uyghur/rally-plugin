@@ -132,6 +132,7 @@ class RallyApiClient(
             val key = iter.next()
             if (key.startsWith("artifacts:") || key.startsWith("stories:") ||
                 key.startsWith("defects:") || key.startsWith("tasks:") ||
+                key.startsWith("alltestcases:") ||
                 key.startsWith("sprint:") || key.startsWith("currentIteration:")) {
                 iter.remove()
             }
@@ -150,6 +151,7 @@ class RallyApiClient(
         private val LIST_FIELDS = listOf(
             "FormattedID",
             "Name",
+            "ObjectID",
             "CreationDate",
             "LastUpdateDate",
             "Owner",
@@ -162,6 +164,23 @@ class RallyApiClient(
 
         // Fields for detail queries (includes Description)
         private val DETAIL_FIELDS = LIST_FIELDS + "Description"
+
+        // Fields for test case list queries
+        private val TC_LIST_FIELDS = listOf(
+            "FormattedID",
+            "Name",
+            "ObjectID",
+            "CreationDate",
+            "LastUpdateDate",
+            "Owner",
+            "Method",
+            "LastVerdict",
+            "LastRun",
+            "State",
+            "WorkProduct",
+            "Project",
+            "Priority"
+        )
     }
 
     /**
@@ -505,6 +524,66 @@ class RallyApiClient(
     }
 
     /**
+     * Search artifacts server-side using Rally "contains" query.
+     * Searches both Name and FormattedID fields across user stories and defects.
+     * @param searchText The text to search for
+     * @param scope Optional scope hint: "User Stories" or "Defects" to limit search
+     */
+    fun searchArtifacts(searchText: String, scope: String? = null): List<RallyArtifact> {
+        val cacheKey = "search:${searchText}|${scope}|${workspaceRef}|${projectRef}"
+        getCached<List<RallyArtifact>>(cacheKey)?.let { return it }
+
+        val query = "((Name contains \"$searchText\") OR (FormattedID contains \"$searchText\"))"
+
+        if (scope == "Test Cases") {
+            val tcResults: List<RallyArtifact> = queryAllTestCases(query)
+            val sorted = tcResults.sortedByDescending { it.lastUpdateDate }
+            putCache(cacheKey, sorted)
+            return sorted
+        }
+
+        val results = mutableListOf<RallyArtifact>()
+        val fetchStories = scope != "Defects"
+        val fetchDefects = scope != "User Stories"
+
+        val storiesFuture = if (fetchStories) {
+            java.util.concurrent.CompletableFuture.supplyAsync({
+                queryUserStories(query)
+            }, apiExecutor)
+        } else null
+        val defectsFuture = if (fetchDefects) {
+            java.util.concurrent.CompletableFuture.supplyAsync({
+                queryDefects(query)
+            }, apiExecutor)
+        } else null
+
+        storiesFuture?.let { try { results.addAll(it.get()) } catch (_: Exception) {} }
+        defectsFuture?.let { try { results.addAll(it.get()) } catch (_: Exception) {} }
+
+        val sorted = results.sortedByDescending { it.lastUpdateDate }
+        putCache(cacheKey, sorted)
+        return sorted
+    }
+
+    /**
+     * Query all test cases in the current workspace/project.
+     * Used when scope is "Test Cases".
+     */
+    fun queryAllTestCases(query: String? = null, pageSize: Int = DEFAULT_PAGE_SIZE, maxResults: Int = MAX_PAGE_SIZE): List<RallyTestCase> {
+        val cacheKey = "alltestcases:${query}|${pageSize}|${maxResults}|${workspaceRef}|${projectRef}"
+        getCached<List<RallyTestCase>>(cacheKey)?.let { return it }
+
+        val type = object : TypeToken<RallyQueryResult<RallyTestCase>>() {}.type
+        val results: List<RallyTestCase> = queryAllPages(
+            "testcase", type, query, pageSize, maxResults,
+            order = "LastUpdateDate DESC",
+            fields = TC_LIST_FIELDS
+        )
+        putCache(cacheKey, results)
+        return results
+    }
+
+    /**
      * Build web URL for viewing an artifact in Rally.
      * Rally web UI URLs require the project OID: /#/<projectOID>d/detail/<type>/<objectID>
      */
@@ -516,6 +595,7 @@ class RallyApiClient(
             "HierarchicalRequirement" -> "userstory"
             "Defect" -> "defect"
             "Task" -> "task"
+            "TestCase" -> "testcase"
             else -> "detail"
         }
 
@@ -523,6 +603,7 @@ class RallyApiClient(
         val projectOid = when (artifact) {
             is RallyUserStory -> artifact.project?.ref
             is RallyDefect -> artifact.project?.ref
+            is RallyTestCase -> artifact.project?.ref
             else -> null
         }?.trimEnd('/')?.substringAfterLast('/')
 
@@ -599,6 +680,27 @@ class RallyApiClient(
             val errors = result.getAsJsonArray("Errors")
             if (errors != null && errors.size() > 0) {
                 throw RallyApiException("Failed to update state: ${errors.joinToString()}")
+            }
+        }
+    }
+
+    /**
+     * Update the Owner of a Rally artifact.
+     * @param artifactRef Full API URL ref of the artifact
+     * @param artifactType Rally type name (e.g., "HierarchicalRequirement", "Defect")
+     * @param ownerRef Full API URL ref of the user
+     */
+    fun updateArtifactOwner(artifactRef: String, artifactType: String, ownerRef: String) {
+        val body = """{"$artifactType":{"Owner":"$ownerRef"}}"""
+        val response = executePost(artifactRef, body)
+        handleResponse(response)
+
+        val json = JsonParser.parseString(response.body()).asJsonObject
+        val result = json.getAsJsonObject("OperationResult")
+        if (result != null) {
+            val errors = result.getAsJsonArray("Errors")
+            if (errors != null && errors.size() > 0) {
+                throw RallyApiException("Failed to update owner: ${errors.joinToString()}")
             }
         }
     }
