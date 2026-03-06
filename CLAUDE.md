@@ -44,8 +44,8 @@ src/main/kotlin/com/github/halmuratuyghur/rally/
 - **Lazy description loading** — List queries use `LIST_FIELDS` (no Description) for smaller payloads. Description is fetched on demand via `fetchDescription()` when the detail panel opens
 - **Parallel detail loading** — Description, test cases, tasks, and attachments all load concurrently via `CompletableFuture`. Generation-based cancellation (AtomicLong) prevents stale selections from continuing to update the UI
 - **Caching** — LRU query cache (access-ordered `LinkedHashMap`, max 500 entries) with 2-minute TTL. Downloaded images use a bounded in-memory cache (10 MB cap, 1 MB per-image cap). Bulk export mode extends TTL to 15 minutes
-- **Threading**: `executeOnPooledThread` for API calls, `invokeLater` for UI updates, `CompletableFuture.supplyAsync` for parallel operations. Dedicated `apiExecutor` thread pool in RallyApiClient (4 daemon threads)
-- **Disposal safety** — `RallyToolWindowPanel` implements `Disposable` with a `disposed` flag. `getClient()` throws after disposal; all call sites are guarded with try/catch to prevent late background tasks from crashing
+- **Threading**: `executeOnPooledThread` for API calls, `invokeLater` for UI updates, `CompletableFuture.supplyAsync` for parallel operations. Dedicated `apiExecutor` thread pool in RallyApiClient (8 daemon threads)
+- **Disposal safety** — `RallyToolWindowPanel` implements `Disposable` with a `disposed` flag. `dispose()` and `getClient()` are synchronized on `clientLock` so no client can be created after disposal begins. All `getClient()` call sites are guarded with try/catch to prevent late background tasks from crashing
 - **HTTP/2** — Enabled for connection multiplexing on parallel requests. Respects IDE proxy settings
 - **No external Rally SDK** — uses Java's built-in `HttpClient` with `zsessionid` header for API key auth
 - **State field logic**: User Stories and Defects use `ScheduleState`, Tasks use `State`

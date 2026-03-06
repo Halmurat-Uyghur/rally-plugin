@@ -13,7 +13,7 @@ The IntelliJ plugin code lives in `src/main/kotlin/com/github/halmuratuyghur/ral
 Follow Kotlin official style with 4-space indentation and trailing commas where JetBrains formatter inserts them. UI code favors explicit Swing types (`JBLabel`, `ComboBox`) and `val` over `var` except for mutable UI state. Keep packages singular (`settings`, not `setting`), align file names with public classes, and register extensions in `plugin.xml` using lowerCamelCase IDs. Run `./gradlew ktlintFormat` if you introduce ktlint; otherwise rely on IDE auto-format (`⌥⌘L`).
 
 ## Testing Guidelines
-Primary manual verification uses `./gradlew runIde`, as outlined in `TESTING_GUIDE.md`. When adding automated tests, place them under `src/test/kotlin`, mirror the production package path, and name files with the `*Test.kt` suffix. Favor JUnit 5 with Truth/Kotest style assertions. Keep API fixtures deterministic and gate network calls behind fakes.
+Primary manual verification uses `./gradlew runIde`, as outlined in `TESTING_GUIDE.md`. When adding automated tests, place them under `src/test/kotlin`, mirror the production package path, and name files with the `*Test.kt` suffix. Use JUnit 4 (as configured in Gradle) with Truth/Kotest style assertions. Keep API fixtures deterministic and gate network calls behind fakes.
 
 ## Performance & Lifecycle Notes
 - Treat the tool window as a real lifecycle boundary. `RallyToolWindowPanel` is disposable, is attached via `content.setDisposer(...)`, and must shut down its `RallyApiClient` executor on dispose. Temporary clients such as Settings "Test Connection" must also shut down their executors.

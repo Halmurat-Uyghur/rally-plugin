@@ -103,6 +103,7 @@ class RallyToolWindowPanel(private val project: Project) : Disposable {
     private var lastIteration: String = ""
     @Volatile private var activeServerSearch: String? = null
     @Volatile private var disposed = false
+    private val clientLock = Any()
 
     init {
         setupUI()
@@ -1095,6 +1096,9 @@ class RallyToolWindowPanel(private val project: Project) : Disposable {
             }
             } catch (e: Exception) {
                 LOG.warn("Export aborted", e)
+                ApplicationManager.getApplication().invokeLater {
+                    if (!disposed) statusLabel.text = "Export failed"
+                }
             }
         }
     }
@@ -1170,6 +1174,9 @@ class RallyToolWindowPanel(private val project: Project) : Disposable {
             }
             } catch (e: Exception) {
                 LOG.warn("State change aborted", e)
+                ApplicationManager.getApplication().invokeLater {
+                    if (!disposed) statusLabel.text = "State change failed"
+                }
             }
         }
     }
@@ -1312,6 +1319,9 @@ class RallyToolWindowPanel(private val project: Project) : Disposable {
             }
             } catch (e: Exception) {
                 LOG.warn("Start working aborted", e)
+                ApplicationManager.getApplication().invokeLater {
+                    if (!disposed) statusLabel.text = "Start working failed"
+                }
             }
         }
     }
@@ -1414,6 +1424,9 @@ class RallyToolWindowPanel(private val project: Project) : Disposable {
             }
             } catch (e: Exception) {
                 LOG.warn("Finish working aborted", e)
+                ApplicationManager.getApplication().invokeLater {
+                    if (!disposed) statusLabel.text = "Finish working failed"
+                }
             }
         }
     }
@@ -1428,18 +1441,20 @@ class RallyToolWindowPanel(private val project: Project) : Disposable {
     }
 
     override fun dispose() {
-        disposed = true
+        synchronized(clientLock) {
+            disposed = true
+            currentClient?.clearCache()
+            currentClient?.apiExecutor?.shutdownNow()
+            currentClient = null
+        }
         searchDebounceTimer.stop()
         activeServerSearch = null
         detailPanel.clear()
-        currentClient?.clearCache()
-        currentClient?.apiExecutor?.shutdownNow()
-        currentClient = null
     }
 
     // ── Client ───────────────────────────────────────────────────
 
-    private fun getClient(): RallyApiClient {
+    private fun getClient(): RallyApiClient = synchronized(clientLock) {
         check(!disposed) { "RallyToolWindowPanel has been disposed" }
         val settings = RallySettings.getInstance()
         if (currentClient == null ||
@@ -1456,7 +1471,7 @@ class RallyToolWindowPanel(private val project: Project) : Disposable {
         // Workspace always comes from settings
         currentClient!!.workspaceRef = settings.workspaceRef.ifBlank { null }
         // projectRef is managed by the project dropdown (updateClientProjectRef)
-        return currentClient!!
+        currentClient!!
     }
 
     // ── Cell Renderer ────────────────────────────────────────────
