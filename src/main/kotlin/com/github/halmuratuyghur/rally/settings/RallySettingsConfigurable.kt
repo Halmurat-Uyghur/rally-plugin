@@ -116,8 +116,9 @@ class RallySettingsConfigurable : Configurable {
         }
 
         ApplicationManager.getApplication().executeOnPooledThread {
+            var client: RallyApiClient? = null
             try {
-                val client = RallyApiClient(url, key)
+                client = RallyApiClient(url, key)
                 val apiKeyOwner = client.getCurrentUser()
                 val apiKeyName = apiKeyOwner.displayName ?: "Unknown"
                 val apiKeyUserName = apiKeyOwner.userName ?: "Unknown"
@@ -149,6 +150,8 @@ class RallySettingsConfigurable : Configurable {
                         "Rally Connection"
                     )
                 }
+            } finally {
+                client?.apiExecutor?.shutdownNow()
             }
         }
     }

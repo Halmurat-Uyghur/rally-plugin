@@ -2,6 +2,7 @@ package com.github.halmuratuyghur.rally.ui
 
 import com.intellij.icons.AllIcons
 import com.intellij.ide.BrowserUtil
+import com.intellij.openapi.Disposable
 import com.intellij.openapi.actionSystem.ActionManager
 import com.intellij.openapi.actionSystem.AnActionEvent
 import com.intellij.openapi.actionSystem.impl.SimpleDataContext
@@ -41,7 +42,7 @@ import java.awt.event.MouseAdapter
 import java.awt.event.MouseEvent
 import javax.swing.*
 
-class RallyToolWindowPanel(private val project: Project) {
+class RallyToolWindowPanel(private val project: Project) : Disposable {
 
     companion object {
         private val LOG = Logger.getInstance(RallyToolWindowPanel::class.java)
@@ -101,6 +102,7 @@ class RallyToolWindowPanel(private val project: Project) {
     private var lastProject: String = ""
     private var lastIteration: String = ""
     @Volatile private var activeServerSearch: String? = null
+    @Volatile private var disposed = false
 
     init {
         setupUI()
@@ -746,11 +748,12 @@ class RallyToolWindowPanel(private val project: Project) {
             activeServerSearch = query
             statusLabel.text = "Searching Rally..."
             val scope = scopeCombo.selectedItem as? String
+            val serverResultLimit = RallySettings.getInstance().pageSize.coerceIn(25, 100)
 
             ApplicationManager.getApplication().executeOnPooledThread {
                 try {
                     val client = getClient()
-                    val serverResults = client.searchArtifacts(query, scope)
+                    val serverResults = client.searchArtifacts(query, scope, serverResultLimit, serverResultLimit)
                     ApplicationManager.getApplication().invokeLater {
                         if (project.isDisposed) return@invokeLater
                         // Only apply if this is still the active search
@@ -998,7 +1001,8 @@ class RallyToolWindowPanel(private val project: Project) {
             Messages.showInfoMessage(project, "Select a ticket first.", "Rally")
             return
         }
-        val url = getClient().buildWebUrl(selected)
+        val client = try { getClient() } catch (_: Exception) { return }
+        val url = client.buildWebUrl(selected)
         LOG.info("Opening Rally URL: $url")
         BrowserUtil.browse(url)
     }
@@ -1025,6 +1029,7 @@ class RallyToolWindowPanel(private val project: Project) {
         statusLabel.text = "Exporting..."
 
         ApplicationManager.getApplication().executeOnPooledThread {
+            try {
             val client = getClient()
             val exporter = RallyExporter(client)
             val artifactSuccess = java.util.concurrent.atomic.AtomicInteger(0)
@@ -1088,6 +1093,9 @@ class RallyToolWindowPanel(private val project: Project) {
                     AllIcons.General.InspectionsOK
                 )
             }
+            } catch (e: Exception) {
+                LOG.warn("Export aborted", e)
+            }
         }
     }
 
@@ -1112,6 +1120,7 @@ class RallyToolWindowPanel(private val project: Project) {
         statusLabel.text = "Updating..."
 
         ApplicationManager.getApplication().executeOnPooledThread {
+            try {
             val client = getClient()
             val results = java.util.concurrent.atomic.AtomicInteger(0)
             val failures = java.util.concurrent.atomic.AtomicInteger(0)
@@ -1158,6 +1167,9 @@ class RallyToolWindowPanel(private val project: Project) {
                 client.clearArtifactCache()
                 applySearchFilter()
                 statusLabel.text = "Updated ${results.get()}"
+            }
+            } catch (e: Exception) {
+                LOG.warn("State change aborted", e)
             }
         }
     }
@@ -1207,6 +1219,7 @@ class RallyToolWindowPanel(private val project: Project) {
         statusLabel.text = "Starting work on $ticketId..."
 
         ApplicationManager.getApplication().executeOnPooledThread {
+            try {
             val client = getClient()
             val errors = mutableListOf<String>()
 
@@ -1297,6 +1310,9 @@ class RallyToolWindowPanel(private val project: Project) {
                 }
                 statusLabel.text = "Working on $ticketId"
             }
+            } catch (e: Exception) {
+                LOG.warn("Start working aborted", e)
+            }
         }
     }
 
@@ -1326,6 +1342,7 @@ class RallyToolWindowPanel(private val project: Project) {
         statusLabel.text = "Finishing $ticketId..."
 
         ApplicationManager.getApplication().executeOnPooledThread {
+            try {
             val client = getClient()
             var stateChangeError: String? = null
 
@@ -1395,6 +1412,9 @@ class RallyToolWindowPanel(private val project: Project) {
                     )
                 }
             }
+            } catch (e: Exception) {
+                LOG.warn("Finish working aborted", e)
+            }
         }
     }
 
@@ -1407,9 +1427,20 @@ class RallyToolWindowPanel(private val project: Project) {
         }
     }
 
+    override fun dispose() {
+        disposed = true
+        searchDebounceTimer.stop()
+        activeServerSearch = null
+        detailPanel.clear()
+        currentClient?.clearCache()
+        currentClient?.apiExecutor?.shutdownNow()
+        currentClient = null
+    }
+
     // ── Client ───────────────────────────────────────────────────
 
     private fun getClient(): RallyApiClient {
+        check(!disposed) { "RallyToolWindowPanel has been disposed" }
         val settings = RallySettings.getInstance()
         if (currentClient == null ||
             currentClient?.serverUrl != settings.serverUrl ||
@@ -1431,6 +1462,14 @@ class RallyToolWindowPanel(private val project: Project) {
     // ── Cell Renderer ────────────────────────────────────────────
 
     private class ArtifactCellRenderer : ListCellRenderer<RallyArtifact> {
+        companion object {
+            private val COLOR_IN_PROGRESS = JBColor(Color(0, 128, 0), Color(100, 200, 100))
+            private val COLOR_COMPLETED = JBColor(Color(0, 0, 180), Color(100, 150, 255))
+            private val COLOR_DEFINED = JBColor(Color(200, 120, 0), Color(255, 180, 80))
+            private val COLOR_PASS = JBColor(Color(0, 128, 0), Color(100, 200, 100))
+            private val COLOR_FAIL = JBColor(Color(180, 0, 0), Color(255, 100, 100))
+        }
+
         private val panel = JPanel(BorderLayout(8, 0)).apply { border = JBUI.Borders.empty(4, 6) }
         private val iconLabel = JLabel()
         private val textLabel = JLabel()
@@ -1472,12 +1511,12 @@ class RallyToolWindowPanel(private val project: Project) {
             }
             stateLabel.text = state
             stateLabel.foreground = if (isSelected) list.selectionForeground else when (state) {
-                "Pass" -> JBColor(Color(0, 128, 0), Color(100, 200, 100))
-                "Fail" -> JBColor(Color(180, 0, 0), Color(255, 100, 100))
-                "In-Progress" -> JBColor(Color(0, 128, 0), Color(100, 200, 100))
-                "Completed" -> JBColor(Color(0, 0, 180), Color(100, 150, 255))
+                "Pass" -> COLOR_PASS
+                "Fail" -> COLOR_FAIL
+                "In-Progress" -> COLOR_IN_PROGRESS
+                "Completed" -> COLOR_COMPLETED
                 "Accepted" -> JBColor.GRAY
-                "Defined" -> JBColor(Color(200, 120, 0), Color(255, 180, 80))
+                "Defined" -> COLOR_DEFINED
                 else -> JBColor.DARK_GRAY
             }
 

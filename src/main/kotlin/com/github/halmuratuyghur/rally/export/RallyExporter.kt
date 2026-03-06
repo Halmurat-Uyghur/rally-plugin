@@ -33,6 +33,14 @@ class RallyExporter(private val client: RallyApiClient) {
             .setPrettyPrinting()
             .serializeNulls()
             .create()
+
+        // Pre-compiled regex patterns for stripHtml (avoid re-creating per call during bulk export)
+        private val RE_BR = Regex("<br\\s*/?>", RegexOption.IGNORE_CASE)
+        private val RE_P_OPEN = Regex("<p[^>]*>", RegexOption.IGNORE_CASE)
+        private val RE_P_CLOSE = Regex("</p>", RegexOption.IGNORE_CASE)
+        private val RE_LI = Regex("<li[^>]*>", RegexOption.IGNORE_CASE)
+        private val RE_TAG = Regex("<[^>]+>")
+        private val RE_MULTI_NEWLINE = Regex("\n{3,}")
     }
 
     /** Per-session cache for downloaded attachment paths (deduplicates across JSON+Markdown export). */
@@ -283,17 +291,17 @@ class RallyExporter(private val client: RallyApiClient) {
     private fun stripHtml(html: String): String {
         if (html.isBlank()) return ""
         return html
-            .replace(Regex("<br\\s*/?>", RegexOption.IGNORE_CASE), "\n")
-            .replace(Regex("<p[^>]*>", RegexOption.IGNORE_CASE), "\n")
-            .replace(Regex("</p>", RegexOption.IGNORE_CASE), "")
-            .replace(Regex("<li[^>]*>", RegexOption.IGNORE_CASE), "- ")
-            .replace(Regex("<[^>]+>"), "")
-            .replace(Regex("&nbsp;"), " ")
-            .replace(Regex("&amp;"), "&")
-            .replace(Regex("&lt;"), "<")
-            .replace(Regex("&gt;"), ">")
-            .replace(Regex("&quot;"), "\"")
-            .replace(Regex("\n{3,}"), "\n\n")
+            .replace(RE_BR, "\n")
+            .replace(RE_P_OPEN, "\n")
+            .replace(RE_P_CLOSE, "")
+            .replace(RE_LI, "- ")
+            .replace(RE_TAG, "")
+            .replace("&nbsp;", " ")
+            .replace("&amp;", "&")
+            .replace("&lt;", "<")
+            .replace("&gt;", ">")
+            .replace("&quot;", "\"")
+            .replace(RE_MULTI_NEWLINE, "\n\n")
             .trim()
     }
 

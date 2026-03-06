@@ -65,10 +65,10 @@ class RallyApiClient(
 
     private data class CacheEntry<T>(val data: T, val timestamp: Long)
 
-    /** LRU query cache: insertion-ordered LinkedHashMap with automatic eldest-entry eviction. */
+    /** LRU query cache: access-ordered LinkedHashMap with automatic eldest-entry eviction. */
     private val maxQueryCacheSize = 500
     private val queryCache: MutableMap<String, CacheEntry<Any>> = Collections.synchronizedMap(
-        object : LinkedHashMap<String, CacheEntry<Any>>(maxQueryCacheSize * 4 / 3 + 1, 0.75f, false) {
+        object : LinkedHashMap<String, CacheEntry<Any>>(maxQueryCacheSize * 4 / 3 + 1, 0.75f, true) {
             override fun removeEldestEntry(eldest: MutableMap.MutableEntry<String, CacheEntry<Any>>?): Boolean {
                 return size > maxQueryCacheSize
             }
@@ -80,8 +80,11 @@ class RallyApiClient(
     /** Default TTL for query caches (2 minutes). */
     private val queryTtlMs = 2 * 60 * 1000L
 
-    /** Maximum image cache size in bytes (50 MB). */
-    private val maxImageCacheBytes = 50L * 1024 * 1024
+    /** Maximum image cache size in bytes (10 MB). */
+    private val maxImageCacheBytes = 10L * 1024 * 1024
+
+    /** Do not keep very large attachment images in memory between selections. */
+    private val maxCacheableImageBytes = 1L * 1024 * 1024
 
     /** Extended TTL for bulk mode (null = use default). */
     @Volatile private var bulkModeTtlMs: Long? = null
@@ -127,14 +130,18 @@ class RallyApiClient(
      * but detail data we just wrote is still correct.
      */
     fun clearArtifactCache() {
-        val iter = queryCache.keys.iterator()
-        while (iter.hasNext()) {
-            val key = iter.next()
-            if (key.startsWith("artifacts:") || key.startsWith("stories:") ||
-                key.startsWith("defects:") || key.startsWith("tasks:") ||
-                key.startsWith("alltestcases:") ||
-                key.startsWith("sprint:") || key.startsWith("currentIteration:")) {
-                iter.remove()
+        // Must synchronize on the map for iteration — Collections.synchronizedMap
+        // only guards individual operations, and with accessOrder=true even get() mutates.
+        synchronized(queryCache) {
+            val iter = queryCache.keys.iterator()
+            while (iter.hasNext()) {
+                val key = iter.next()
+                if (key.startsWith("artifacts:") || key.startsWith("stories:") ||
+                    key.startsWith("defects:") || key.startsWith("tasks:") ||
+                    key.startsWith("alltestcases:") ||
+                    key.startsWith("sprint:") || key.startsWith("currentIteration:")) {
+                    iter.remove()
+                }
             }
         }
     }
@@ -529,14 +536,19 @@ class RallyApiClient(
      * @param searchText The text to search for
      * @param scope Optional scope hint: "User Stories" or "Defects" to limit search
      */
-    fun searchArtifacts(searchText: String, scope: String? = null): List<RallyArtifact> {
-        val cacheKey = "search:${searchText}|${scope}|${workspaceRef}|${projectRef}"
+    fun searchArtifacts(
+        searchText: String,
+        scope: String? = null,
+        pageSize: Int = 50,
+        maxResults: Int = 100
+    ): List<RallyArtifact> {
+        val cacheKey = "search:${searchText}|${scope}|${pageSize}|${maxResults}|${workspaceRef}|${projectRef}"
         getCached<List<RallyArtifact>>(cacheKey)?.let { return it }
 
         val query = "((Name contains \"$searchText\") OR (FormattedID contains \"$searchText\"))"
 
         if (scope == "Test Cases") {
-            val tcResults: List<RallyArtifact> = queryAllTestCases(query)
+            val tcResults: List<RallyArtifact> = queryAllTestCases(query, pageSize, maxResults)
             val sorted = tcResults.sortedByDescending { it.lastUpdateDate }
             putCache(cacheKey, sorted)
             return sorted
@@ -548,12 +560,12 @@ class RallyApiClient(
 
         val storiesFuture = if (fetchStories) {
             java.util.concurrent.CompletableFuture.supplyAsync({
-                queryUserStories(query)
+                queryUserStories(query, pageSize, maxResults)
             }, apiExecutor)
         } else null
         val defectsFuture = if (fetchDefects) {
             java.util.concurrent.CompletableFuture.supplyAsync({
-                queryDefects(query)
+                queryDefects(query, pageSize, maxResults)
             }, apiExecutor)
         } else null
 
@@ -976,7 +988,7 @@ class RallyApiClient(
      * Returns raw bytes.
      */
     fun downloadAttachment(url: String): ByteArray {
-        // Images rarely change — use permanent cache
+        // Small images rarely change, so keep a bounded in-memory cache for repeat views
         imageCache[url]?.let { return it }
 
         val request = HttpRequest.newBuilder()
@@ -997,6 +1009,9 @@ class RallyApiClient(
         }
 
         val bytes = response.body()
+        if (bytes.size.toLong() > maxCacheableImageBytes) {
+            return bytes
+        }
         // Evict 25% of image cache if over memory limit
         if (imageCacheBytes.get() + bytes.size > maxImageCacheBytes) {
             val toRemove = imageCache.keys.take(imageCache.size / 4)
