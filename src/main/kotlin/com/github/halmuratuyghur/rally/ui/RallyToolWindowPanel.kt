@@ -1248,6 +1248,7 @@ class RallyToolWindowPanel(private val project: Project) : Disposable {
                                 brancher.checkout(branchName, false, repos, null)
                             } else {
                                 brancher.createBranch(branchName, mapOf(repo to "HEAD"))
+                                brancher.checkout(branchName, false, repos, null)
                             }
                         } catch (e: Exception) {
                             branchError = e.message
