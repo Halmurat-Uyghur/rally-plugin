@@ -23,6 +23,7 @@ import java.awt.event.MouseEvent
 import java.io.File
 import java.util.Base64
 import java.util.concurrent.CompletableFuture
+import java.util.concurrent.atomic.AtomicLong
 import java.util.regex.Pattern
 import javax.swing.*
 
@@ -33,6 +34,13 @@ class RallyDetailPanel(private val project: Project) {
         private const val TAB_TEST_CASES = 0
         private const val TAB_TASKS = 1
         private const val TAB_ATTACHMENTS = 2
+
+        // Pre-allocated colors to avoid creating JBColor instances on every cell render
+        private val COLOR_IN_PROGRESS = JBColor(Color(0, 128, 0), Color(100, 200, 100))
+        private val COLOR_COMPLETED = JBColor(Color(0, 0, 180), Color(100, 150, 255))
+        private val COLOR_DEFINED = JBColor(Color(200, 120, 0), Color(255, 180, 80))
+        private val COLOR_PASS = JBColor(Color(0, 128, 0), Color(100, 200, 100))
+        private val COLOR_FAIL = JBColor(Color(180, 0, 0), Color(255, 100, 100))
     }
 
     val component: JPanel = JPanel(BorderLayout())
@@ -68,6 +76,9 @@ class RallyDetailPanel(private val project: Project) {
     @Volatile private var currentArtifactRef: String? = null
     @Volatile private var currentArtifact: RallyArtifact? = null
     @Volatile private var currentClient: RallyApiClient? = null
+
+    /** Incremented on every showArtifact/clear call; background workers check this to bail out early. */
+    private val generation = AtomicLong(0)
 
     // Header action buttons
     private val copyButton = JLabel(AllIcons.Actions.Copy).apply {
@@ -221,6 +232,7 @@ class RallyDetailPanel(private val project: Project) {
         }
 
         val artifactRef = artifact.ref ?: return
+        val gen = generation.incrementAndGet()
         currentArtifactRef = artifactRef
         currentArtifact = artifact
         currentClient = client
@@ -265,17 +277,20 @@ class RallyDetailPanel(private val project: Project) {
 
             ApplicationManager.getApplication().executeOnPooledThread {
                 val descFuture = CompletableFuture.supplyAsync({
+                    if (generation.get() != gen) return@supplyAsync null
                     var resolved = desc
                     if (resolved.isNullOrBlank()) {
                         resolved = try { client.fetchDescription(artifactRef) } catch (e: Exception) { null }
                     }
+                    if (generation.get() != gen) return@supplyAsync null
                     val resolvedNonNull = resolved
                     if (!resolvedNonNull.isNullOrBlank()) {
-                        try { resolveInlineImages(resolvedNonNull, client) } catch (_: Exception) { resolvedNonNull }
+                        try { resolveInlineImages(resolvedNonNull, client, gen) } catch (_: Exception) { resolvedNonNull }
                     } else null
                 }, client.apiExecutor)
 
                 val stepsFuture = CompletableFuture.supplyAsync({
+                    if (generation.get() != gen) return@supplyAsync null
                     try { client.queryTestSteps(id) } catch (e: Exception) {
                         LOG.warn("Failed to load test steps for $id", e)
                         null
@@ -284,7 +299,7 @@ class RallyDetailPanel(private val project: Project) {
 
                 descFuture.thenAccept { resolvedDesc ->
                     ApplicationManager.getApplication().invokeLater {
-                        if (currentArtifactRef != artifactRef) return@invokeLater
+                        if (generation.get() != gen) return@invokeLater
                         descriptionPane.text = wrapHtml(resolvedDesc ?: "<i>No description</i>")
                         descriptionPane.caretPosition = 0
                     }
@@ -292,7 +307,7 @@ class RallyDetailPanel(private val project: Project) {
 
                 stepsFuture.thenAccept { steps ->
                     ApplicationManager.getApplication().invokeLater {
-                        if (currentArtifactRef != artifactRef) return@invokeLater
+                        if (generation.get() != gen) return@invokeLater
                         stepListModel.clear()
                         if (steps != null) {
                             steps.forEach { stepListModel.addElement(it) }
@@ -319,7 +334,7 @@ class RallyDetailPanel(private val project: Project) {
         ApplicationManager.getApplication().executeOnPooledThread {
             // Launch all four queries concurrently
             val descFuture = CompletableFuture.supplyAsync({
-                // Fetch description on demand if not included in list query
+                if (generation.get() != gen) return@supplyAsync null
                 var resolved = desc
                 if (resolved.isNullOrBlank()) {
                     resolved = try { client.fetchDescription(artifactRef) } catch (e: Exception) {
@@ -327,10 +342,10 @@ class RallyDetailPanel(private val project: Project) {
                         null
                     }
                 }
-                // Resolve inline images
+                if (generation.get() != gen) return@supplyAsync null
                 val resolvedNonNull = resolved
                 if (!resolvedNonNull.isNullOrBlank()) {
-                    try { resolveInlineImages(resolvedNonNull, client) } catch (e: Exception) {
+                    try { resolveInlineImages(resolvedNonNull, client, gen) } catch (e: Exception) {
                         LOG.warn("Failed to resolve inline images for $id", e)
                         resolvedNonNull
                     }
@@ -338,6 +353,7 @@ class RallyDetailPanel(private val project: Project) {
             }, client.apiExecutor)
 
             val tcFuture = CompletableFuture.supplyAsync({
+                if (generation.get() != gen) return@supplyAsync null
                 try { client.queryTestCases(artifactRef) } catch (e: Exception) {
                     LOG.warn("Failed to load test cases for $id", e)
                     null
@@ -345,6 +361,7 @@ class RallyDetailPanel(private val project: Project) {
             }, client.apiExecutor)
 
             val taskFuture = CompletableFuture.supplyAsync({
+                if (generation.get() != gen) return@supplyAsync null
                 try { client.queryTasksForWorkProduct(artifactRef) } catch (e: Exception) {
                     LOG.warn("Failed to load tasks for $id", e)
                     null
@@ -352,6 +369,7 @@ class RallyDetailPanel(private val project: Project) {
             }, client.apiExecutor)
 
             val attachFuture = CompletableFuture.supplyAsync({
+                if (generation.get() != gen) return@supplyAsync null
                 try { client.queryAttachments(id) } catch (e: Exception) {
                     LOG.warn("Failed to load attachments for $id", e)
                     null
@@ -361,7 +379,7 @@ class RallyDetailPanel(private val project: Project) {
             // Update UI as each completes
             descFuture.thenAccept { resolvedDesc ->
                 ApplicationManager.getApplication().invokeLater {
-                    if (currentArtifactRef != artifactRef) return@invokeLater
+                    if (generation.get() != gen) return@invokeLater
                     if (!resolvedDesc.isNullOrBlank()) {
                         descriptionPane.text = wrapHtml(resolvedDesc)
                     } else {
@@ -373,7 +391,7 @@ class RallyDetailPanel(private val project: Project) {
 
             tcFuture.thenAccept { testCases ->
                 ApplicationManager.getApplication().invokeLater {
-                    if (currentArtifactRef != artifactRef) return@invokeLater
+                    if (generation.get() != gen) return@invokeLater
                     testCaseListModel.clear()
                     if (testCases != null) {
                         testCaseListModel.addAll(testCases)
@@ -389,7 +407,7 @@ class RallyDetailPanel(private val project: Project) {
 
             taskFuture.thenAccept { tasks ->
                 ApplicationManager.getApplication().invokeLater {
-                    if (currentArtifactRef != artifactRef) return@invokeLater
+                    if (generation.get() != gen) return@invokeLater
                     taskListModel.clear()
                     if (tasks != null) {
                         taskListModel.addAll(tasks)
@@ -402,7 +420,7 @@ class RallyDetailPanel(private val project: Project) {
 
             attachFuture.thenAccept { attachments ->
                 ApplicationManager.getApplication().invokeLater {
-                    if (currentArtifactRef != artifactRef) return@invokeLater
+                    if (generation.get() != gen) return@invokeLater
                     attachmentListModel.clear()
                     if (attachments != null) {
                         attachmentListModel.addAll(attachments)
@@ -416,6 +434,7 @@ class RallyDetailPanel(private val project: Project) {
     }
 
     fun clear() {
+        generation.incrementAndGet()
         currentArtifactRef = null
         currentArtifact = null
         currentClient = null
@@ -691,10 +710,10 @@ class RallyDetailPanel(private val project: Project) {
     }
 
     private fun stateColor(state: String): Color = when (state) {
-        "In-Progress" -> JBColor(Color(0, 128, 0), Color(100, 200, 100))
-        "Completed" -> JBColor(Color(0, 0, 180), Color(100, 150, 255))
+        "In-Progress" -> COLOR_IN_PROGRESS
+        "Completed" -> COLOR_COMPLETED
         "Accepted" -> JBColor.GRAY
-        "Defined" -> JBColor(Color(200, 120, 0), Color(255, 180, 80))
+        "Defined" -> COLOR_DEFINED
         else -> JBColor.DARK_GRAY
     }
 
@@ -706,7 +725,10 @@ class RallyDetailPanel(private val project: Project) {
      * Download Rally inline images and replace src URLs with base64 data URIs
      * so JTextPane can display them without authentication.
      */
-    private fun resolveInlineImages(html: String, client: RallyApiClient): String {
+    /** Maximum inline images to download per description (prevents thread pool saturation). */
+    private val maxInlineImages = 10
+
+    private fun resolveInlineImages(html: String, client: RallyApiClient, gen: Long): String {
         // Match src attributes pointing to Rally attachment URLs
         val pattern = Pattern.compile(
             """src="((?:https?://[^/]+)?/slm/attachment/(\d+)/([^"]+))"""",
@@ -719,11 +741,11 @@ class RallyDetailPanel(private val project: Project) {
         val baseUrl = client.serverUrl.trimEnd('/')
         val normalizedBase = if (!baseUrl.startsWith("http")) "https://$baseUrl" else baseUrl
 
-        // Phase 1: Collect all image matches
+        // Phase 1: Collect image matches (capped to prevent thread pool saturation)
         data class ImageMatch(val start: Int, val end: Int, val fullMatch: String,
                               val originalSrc: String, val objectId: String, val fileName: String)
         val matches = mutableListOf<ImageMatch>()
-        while (matcher.find()) {
+        while (matcher.find() && matches.size < maxInlineImages) {
             matches.add(ImageMatch(
                 matcher.start(), matcher.end(), matcher.group(),
                 matcher.group(1), matcher.group(2), matcher.group(3)
@@ -731,9 +753,10 @@ class RallyDetailPanel(private val project: Project) {
         }
         if (matches.isEmpty()) return html
 
-        // Phase 2: Download all images in parallel on the plugin's executor
+        // Phase 2: Download images in parallel, bailing out early if selection changed
         val futures = matches.map { match ->
             CompletableFuture.supplyAsync({
+                if (generation.get() != gen) return@supplyAsync null
                 try {
                     val fullUrl = if (match.originalSrc.startsWith("http")) {
                         match.originalSrc
@@ -741,6 +764,7 @@ class RallyDetailPanel(private val project: Project) {
                         "$normalizedBase${match.originalSrc}"
                     }
                     val bytes = client.downloadAttachment(fullUrl)
+                    if (generation.get() != gen) return@supplyAsync null
                     val base64 = Base64.getEncoder().encodeToString(bytes)
                     val ext = match.fileName.substringAfterLast('.', "png").lowercase()
                     val contentType = when (ext) {
@@ -758,6 +782,7 @@ class RallyDetailPanel(private val project: Project) {
             }, client.apiExecutor)
         }
         val results = futures.map { it.join() }
+        if (generation.get() != gen) return html
 
         // Phase 3: Replace in reverse order to preserve string indices
         val sb = StringBuilder(html)
@@ -815,17 +840,17 @@ class RallyDetailPanel(private val project: Project) {
             val method = value.method ?: "Manual"
             methodLabel.text = method
             methodLabel.foreground = if (isSelected) list.selectionForeground else if (method == "Automated") {
-                JBColor(Color(0, 128, 0), Color(100, 200, 100))
+                COLOR_IN_PROGRESS
             } else {
-                JBColor(Color(200, 120, 0), Color(255, 180, 80))
+                COLOR_DEFINED
             }
 
             val verdict = value.lastVerdict ?: ""
             verdictLabel.isVisible = verdict.isNotBlank()
             verdictLabel.text = verdict
             verdictLabel.foreground = if (isSelected) list.selectionForeground else when (verdict) {
-                "Pass" -> JBColor(Color(0, 128, 0), Color(100, 200, 100))
-                "Fail" -> JBColor(Color(180, 0, 0), Color(255, 100, 100))
+                "Pass" -> COLOR_PASS
+                "Fail" -> COLOR_FAIL
                 else -> JBColor.GRAY
             }
 
@@ -869,9 +894,9 @@ class RallyDetailPanel(private val project: Project) {
             stateLabel.isVisible = state.isNotBlank()
             stateLabel.text = state
             stateLabel.foreground = if (isSelected) list.selectionForeground else when (state) {
-                "In-Progress" -> JBColor(Color(0, 128, 0), Color(100, 200, 100))
-                "Completed" -> JBColor(Color(0, 0, 180), Color(100, 150, 255))
-                "Defined" -> JBColor(Color(200, 120, 0), Color(255, 180, 80))
+                "In-Progress" -> COLOR_IN_PROGRESS
+                "Completed" -> COLOR_COMPLETED
+                "Defined" -> COLOR_DEFINED
                 else -> JBColor.DARK_GRAY
             }
 

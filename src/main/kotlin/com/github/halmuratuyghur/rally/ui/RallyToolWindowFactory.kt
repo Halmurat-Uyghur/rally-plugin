@@ -15,6 +15,7 @@ class RallyToolWindowFactory : ToolWindowFactory, DumbAware {
             "",
             false
         )
+        content.setDisposer(rallyPanel)
         toolWindow.contentManager.addContent(content)
     }
 }
