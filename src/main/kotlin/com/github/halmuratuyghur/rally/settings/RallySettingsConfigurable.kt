@@ -22,6 +22,7 @@ class RallySettingsConfigurable : Configurable {
     private var usernameField: JBTextField? = null
     private var exportDirField: TextFieldWithBrowseButton? = null
     @Volatile private var loadedApiKey: String = ""
+    @Volatile private var apiKeyLoaded = false
 
     override fun getDisplayName(): String = "Rally"
 
@@ -59,11 +60,17 @@ class RallySettingsConfigurable : Configurable {
         exportDirField!!.text = settings.exportDirectory
 
         // Load API key off-EDT to avoid blocking and to prevent writing blank on early apply
+        apiKeyLoaded = false
         ApplicationManager.getApplication().executeOnPooledThread {
             val key = settings.apiKey
             loadedApiKey = key
             ApplicationManager.getApplication().invokeLater {
-                apiKeyField?.text = key
+                val field = apiKeyField ?: return@invokeLater
+                // Only populate if user hasn't started typing
+                if (field.password.isEmpty()) {
+                    field.text = key
+                }
+                apiKeyLoaded = true
             }
         }
 
@@ -94,10 +101,13 @@ class RallySettingsConfigurable : Configurable {
         state.workspaceRef = workspaceRefField?.text?.trim() ?: ""
         state.username = usernameField?.text?.trim() ?: ""
         state.exportDirectory = exportDirField?.text?.trim() ?: ""
-        // API key stored in PasswordSafe, not in XML
-        val newKey = String(apiKeyField?.password ?: charArrayOf()).trim()
-        loadedApiKey = newKey
-        settings.apiKey = newKey
+        // Only save API key if the async load completed (so we know the field has real data)
+        // or if the user explicitly typed a new key
+        val fieldKey = String(apiKeyField?.password ?: charArrayOf()).trim()
+        if (apiKeyLoaded || fieldKey.isNotBlank()) {
+            loadedApiKey = fieldKey
+            settings.apiKey = fieldKey
+        }
     }
 
     override fun reset() {
@@ -107,11 +117,13 @@ class RallySettingsConfigurable : Configurable {
         usernameField?.text = settings.username
         exportDirField?.text = settings.exportDirectory
         // Load API key off-EDT
+        apiKeyLoaded = false
         ApplicationManager.getApplication().executeOnPooledThread {
             val key = settings.apiKey
             loadedApiKey = key
             ApplicationManager.getApplication().invokeLater {
                 apiKeyField?.text = key
+                apiKeyLoaded = true
             }
         }
     }
