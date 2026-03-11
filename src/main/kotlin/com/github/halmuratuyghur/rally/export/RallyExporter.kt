@@ -458,24 +458,49 @@ class RallyExporter(private val client: RallyApiClient) {
         return array
     }
 
+    private fun sanitizeFileName(name: String): String {
+        // Strip path separators and parent-directory references to prevent traversal
+        val sanitized = name.replace(Regex("[/\\\\]"), "_").replace("..", "_")
+        return sanitized.ifBlank { "unnamed" }
+    }
+
     private fun downloadAttachmentContent(
         attachment: RallyAttachment,
         attachDir: String,
         fileName: String
     ): String? {
         val contentRef = attachment.content?.ref ?: return null
-        val cacheKey = "$contentRef:$attachDir:$fileName"
+        val safeFileName = sanitizeFileName(fileName)
+        val cacheKey = "$contentRef:$attachDir:$safeFileName"
 
         // Check per-session dedup cache (avoids re-downloading for JSON+Markdown exports)
         downloadedPaths[cacheKey]?.let { return it }
 
         return try {
-            Files.createDirectories(Paths.get(attachDir))
+            val attachDirPath = Paths.get(attachDir)
+            Files.createDirectories(attachDirPath)
 
             val base64Content = client.getAttachmentContent(contentRef)
             val fileBytes = Base64.getDecoder().decode(base64Content)
 
-            val outputFile = File(attachDir, fileName)
+            // Deduplicate: append counter if file already exists
+            var outputFile = File(attachDir, safeFileName)
+            if (outputFile.exists()) {
+                val baseName = safeFileName.substringBeforeLast(".", safeFileName)
+                val ext = if (safeFileName.contains(".")) ".${safeFileName.substringAfterLast(".")}" else ""
+                var counter = 1
+                while (outputFile.exists()) {
+                    outputFile = File(attachDir, "${baseName}_$counter$ext")
+                    counter++
+                }
+            }
+
+            // Final safety check: ensure resolved path is inside attachDir
+            if (!outputFile.canonicalPath.startsWith(attachDirPath.toFile().canonicalPath)) {
+                LOG.warn("Attachment filename resolved outside target directory: $fileName")
+                return null
+            }
+
             Files.write(outputFile.toPath(), fileBytes)
             LOG.info("Saved attachment: ${outputFile.absolutePath} (${fileBytes.size} bytes)")
             val path = outputFile.absolutePath
@@ -575,12 +600,16 @@ class RallyExporter(private val client: RallyApiClient) {
             val contentType = att.contentType ?: ""
             val savedPath = downloadAttachmentContent(att, attachDir, attName)
 
-            if (savedPath != null && contentType.startsWith("image/")) {
-                md.appendLine("### $attName")
-                md.appendLine("![$attName]($attachDirName/$attName)")
-                md.appendLine()
-            } else if (savedPath != null) {
-                md.appendLine("- [$attName]($attachDirName/$attName)")
+            if (savedPath != null) {
+                // Use the actual saved filename (may differ from attName due to sanitization/dedup)
+                val savedFileName = File(savedPath).name
+                if (contentType.startsWith("image/")) {
+                    md.appendLine("### $attName")
+                    md.appendLine("![$attName]($attachDirName/$savedFileName)")
+                    md.appendLine()
+                } else {
+                    md.appendLine("- [$attName]($attachDirName/$savedFileName)")
+                }
             } else {
                 md.appendLine("- $attName *(download failed)*")
             }

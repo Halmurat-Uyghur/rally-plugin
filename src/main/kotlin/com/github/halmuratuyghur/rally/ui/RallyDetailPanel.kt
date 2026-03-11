@@ -533,6 +533,7 @@ class RallyDetailPanel(private val project: Project) {
         val tcId = selected.formattedID ?: return
         val client = currentClient ?: return
         val artifactRef = currentArtifactRef
+        val requestedTcId = tcId  // capture to detect stale responses
 
         stepListModel.clear()
 
@@ -561,6 +562,9 @@ class RallyDetailPanel(private val project: Project) {
             }
             ApplicationManager.getApplication().invokeLater {
                 if (currentArtifactRef != artifactRef) return@invokeLater
+                // Also check that the selected test case hasn't changed
+                val currentTcId = testCaseList.selectedValue?.formattedID
+                if (currentTcId != requestedTcId) return@invokeLater
                 stepListModel.clear()
                 // Re-find the test steps tab index in case tabs changed
                 var currentStepsTab = -1

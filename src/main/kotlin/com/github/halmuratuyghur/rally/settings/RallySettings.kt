@@ -28,16 +28,27 @@ class RallySettings : PersistentStateComponent<RallySettings.State> {
     )
 
     private var myState = State()
+    @Volatile
+    private var cachedApiKey: String? = null
 
     override fun getState(): State = myState
 
     override fun loadState(state: State) {
         myState = state
-        // Migrate cleartext API key to PasswordSafe on first load
+        // Migrate cleartext API key to PasswordSafe off-EDT
         @Suppress("DEPRECATION")
         if (state.apiKey.isNotBlank()) {
-            apiKey = state.apiKey
+            val keyToMigrate = state.apiKey
             state.apiKey = ""
+            cachedApiKey = keyToMigrate
+            ApplicationManager.getApplication().executeOnPooledThread {
+                PasswordSafe.instance.set(credentialAttributes, Credentials(CREDENTIAL_USER, keyToMigrate))
+            }
+        } else {
+            // Eagerly load the API key from PasswordSafe off-EDT
+            ApplicationManager.getApplication().executeOnPooledThread {
+                cachedApiKey = PasswordSafe.instance.getPassword(credentialAttributes) ?: ""
+            }
         }
     }
 
@@ -47,9 +58,12 @@ class RallySettings : PersistentStateComponent<RallySettings.State> {
     val pageSize: Int get() = myState.pageSize
 
     var apiKey: String
-        get() = PasswordSafe.instance.getPassword(credentialAttributes) ?: ""
+        get() = cachedApiKey ?: PasswordSafe.instance.getPassword(credentialAttributes) ?: ""
         set(value) {
-            PasswordSafe.instance.set(credentialAttributes, Credentials(CREDENTIAL_USER, value))
+            cachedApiKey = value
+            ApplicationManager.getApplication().executeOnPooledThread {
+                PasswordSafe.instance.set(credentialAttributes, Credentials(CREDENTIAL_USER, value))
+            }
         }
 
     var selectedProject: String

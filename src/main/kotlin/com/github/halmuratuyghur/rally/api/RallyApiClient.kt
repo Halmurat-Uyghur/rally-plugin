@@ -138,7 +138,7 @@ class RallyApiClient(
                 val key = iter.next()
                 if (key.startsWith("artifacts:") || key.startsWith("stories:") ||
                     key.startsWith("defects:") || key.startsWith("tasks:") ||
-                    key.startsWith("alltestcases:") ||
+                    key.startsWith("alltestcases:") || key.startsWith("search:") ||
                     key.startsWith("sprint:") || key.startsWith("currentIteration:")) {
                     iter.remove()
                 }
@@ -147,6 +147,13 @@ class RallyApiClient(
     }
 
     companion object {
+        /**
+         * Escape a value for use inside Rally WSAPI query strings.
+         * Strips quotes and backslashes that could break query syntax.
+         */
+        fun escapeQueryValue(value: String): String =
+            value.replace("\\", "").replace("\"", "")
+
         private const val API_VERSION = "v2.0"
         private const val DEFAULT_PAGE_SIZE = 200
         private const val MAX_PAGE_SIZE = 2000
@@ -332,8 +339,9 @@ class RallyApiClient(
      * Uses the Rally user query endpoint instead of /user (which always returns the API key owner).
      */
     fun getUserByUsername(username: String): RallyUser {
+        val safeUsername = escapeQueryValue(username)
         val url = buildApiUrl("user") + "?" +
-                buildQuery("(UserName = \"$username\")", pageSize = 1, workspace = workspaceRef)
+                buildQuery("(UserName = \"$safeUsername\")", pageSize = 1, workspace = workspaceRef)
         val response = executeGet(url)
         handleResponse(response)
 
@@ -545,7 +553,8 @@ class RallyApiClient(
         val cacheKey = "search:${searchText}|${scope}|${pageSize}|${maxResults}|${workspaceRef}|${projectRef}"
         getCached<List<RallyArtifact>>(cacheKey)?.let { return it }
 
-        val query = "((Name contains \"$searchText\") OR (FormattedID contains \"$searchText\"))"
+        val safeText = escapeQueryValue(searchText)
+        val query = "((Name contains \"$safeText\") OR (FormattedID contains \"$safeText\"))"
 
         if (scope == "Test Cases") {
             val tcResults: List<RallyArtifact> = queryAllTestCases(query, pageSize, maxResults)
@@ -555,6 +564,7 @@ class RallyApiClient(
         }
 
         val results = mutableListOf<RallyArtifact>()
+        val errors = mutableListOf<String>()
         val fetchStories = scope != "Defects"
         val fetchDefects = scope != "User Stories"
 
@@ -569,8 +579,21 @@ class RallyApiClient(
             }, apiExecutor)
         } else null
 
-        storiesFuture?.let { try { results.addAll(it.get()) } catch (_: Exception) {} }
-        defectsFuture?.let { try { results.addAll(it.get()) } catch (_: Exception) {} }
+        if (storiesFuture != null) {
+            try { results.addAll(storiesFuture.get()) } catch (e: Exception) {
+                errors.add("UserStories: ${e.cause?.message ?: e.message}")
+            }
+        }
+        if (defectsFuture != null) {
+            try { results.addAll(defectsFuture.get()) } catch (e: Exception) {
+                errors.add("Defects: ${e.cause?.message ?: e.message}")
+            }
+        }
+
+        // If all queries failed, throw so the UI can show the error
+        if (results.isEmpty() && errors.isNotEmpty()) {
+            throw RallyApiException("Search failed - ${errors.joinToString("; ")}")
+        }
 
         val sorted = results.sortedByDescending { it.lastUpdateDate }
         putCache(cacheKey, sorted)
@@ -752,7 +775,7 @@ class RallyApiClient(
      * Get all artifacts in a specific iteration by name.
      */
     fun queryIterationArtifacts(iterationName: String, pageSize: Int = DEFAULT_PAGE_SIZE): List<RallyArtifact> {
-        val query = "(Iteration.Name = \"$iterationName\")"
+        val query = "(Iteration.Name = \"${escapeQueryValue(iterationName)}\")"
         return queryAllArtifacts(query, pageSize)
     }
 
