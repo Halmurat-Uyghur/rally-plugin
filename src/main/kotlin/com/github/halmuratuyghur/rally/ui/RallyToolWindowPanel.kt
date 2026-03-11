@@ -107,10 +107,17 @@ class RallyToolWindowPanel(private val project: Project) : Disposable {
     }
 
     private fun checkInitialConfiguration() {
-        if (RallySettings.getInstance().isConfigured()) {
-            loadTickets()
-        } else {
-            showNotConfigured()
+        // Check configuration off-EDT so the PasswordSafe preload can complete
+        ApplicationManager.getApplication().executeOnPooledThread {
+            val configured = RallySettings.getInstance().isConfigured()
+            ApplicationManager.getApplication().invokeLater {
+                if (disposed) return@invokeLater
+                if (configured) {
+                    loadTickets()
+                } else {
+                    showNotConfigured()
+                }
+            }
         }
     }
 
@@ -1290,16 +1297,17 @@ class RallyToolWindowPanel(private val project: Project) : Disposable {
                 } else {
                     val brancher = GitBrancher.getInstance(project)
                     val repo = repos.first()
+                    val targetRepos = listOf(repo)
                     val existingBranches = repo.branches.localBranches.map { it.name }
                     val branchLatch = java.util.concurrent.CountDownLatch(1)
                     var branchError: String? = null
                     ApplicationManager.getApplication().invokeLater {
                         try {
                             if (branchName in existingBranches) {
-                                brancher.checkout(branchName, false, repos, null)
+                                brancher.checkout(branchName, false, targetRepos, null)
                             } else {
                                 brancher.createBranch(branchName, mapOf(repo to "HEAD"))
-                                brancher.checkout(branchName, false, repos, null)
+                                brancher.checkout(branchName, false, targetRepos, null)
                             }
                             // Verify checkout on EDT where VCS state is reliable
                             repo.update()

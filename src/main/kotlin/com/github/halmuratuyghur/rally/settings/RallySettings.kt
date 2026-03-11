@@ -64,7 +64,7 @@ class RallySettings : PersistentStateComponent<RallySettings.State> {
 
     var apiKey: String
         get() {
-            if (cachedApiKey == null) {
+            if (cachedApiKey == null && !ApplicationManager.getApplication().isDispatchThread) {
                 apiKeyLatch.await(2, TimeUnit.SECONDS)
             }
             return cachedApiKey ?: ""
