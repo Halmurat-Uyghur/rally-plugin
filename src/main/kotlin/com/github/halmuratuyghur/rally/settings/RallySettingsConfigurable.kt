@@ -21,6 +21,7 @@ class RallySettingsConfigurable : Configurable {
     private var workspaceRefField: JBTextField? = null
     private var usernameField: JBTextField? = null
     private var exportDirField: TextFieldWithBrowseButton? = null
+    @Volatile private var loadedApiKey: String = ""
 
     override fun getDisplayName(): String = "Rally"
 
@@ -53,10 +54,18 @@ class RallySettingsConfigurable : Configurable {
 
         val settings = RallySettings.getInstance()
         serverUrlField!!.text = settings.serverUrl
-        apiKeyField!!.text = settings.apiKey
         workspaceRefField!!.text = settings.workspaceRef
         usernameField!!.text = settings.username
         exportDirField!!.text = settings.exportDirectory
+
+        // Load API key off-EDT to avoid blocking and to prevent writing blank on early apply
+        ApplicationManager.getApplication().executeOnPooledThread {
+            val key = settings.apiKey
+            loadedApiKey = key
+            ApplicationManager.getApplication().invokeLater {
+                apiKeyField?.text = key
+            }
+        }
 
         return FormBuilder.createFormBuilder()
             .addLabeledComponent(JBLabel("Server URL:"), serverUrlField!!)
@@ -72,7 +81,7 @@ class RallySettingsConfigurable : Configurable {
     override fun isModified(): Boolean {
         val settings = RallySettings.getInstance()
         return serverUrlField?.text != settings.serverUrl ||
-                String(apiKeyField?.password ?: charArrayOf()) != settings.apiKey ||
+                String(apiKeyField?.password ?: charArrayOf()) != loadedApiKey ||
                 workspaceRefField?.text != settings.workspaceRef ||
                 usernameField?.text != settings.username ||
                 exportDirField?.text != settings.exportDirectory
@@ -86,16 +95,25 @@ class RallySettingsConfigurable : Configurable {
         state.username = usernameField?.text?.trim() ?: ""
         state.exportDirectory = exportDirField?.text?.trim() ?: ""
         // API key stored in PasswordSafe, not in XML
-        settings.apiKey = String(apiKeyField?.password ?: charArrayOf()).trim()
+        val newKey = String(apiKeyField?.password ?: charArrayOf()).trim()
+        loadedApiKey = newKey
+        settings.apiKey = newKey
     }
 
     override fun reset() {
         val settings = RallySettings.getInstance()
         serverUrlField?.text = settings.serverUrl
-        apiKeyField?.text = settings.apiKey
         workspaceRefField?.text = settings.workspaceRef
         usernameField?.text = settings.username
         exportDirField?.text = settings.exportDirectory
+        // Load API key off-EDT
+        ApplicationManager.getApplication().executeOnPooledThread {
+            val key = settings.apiKey
+            loadedApiKey = key
+            ApplicationManager.getApplication().invokeLater {
+                apiKeyField?.text = key
+            }
+        }
     }
 
     override fun disposeUIResources() {
