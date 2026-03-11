@@ -30,9 +30,6 @@ src/main/kotlin/com/github/halmuratuyghur/rally/
 │   ├── RallyToolWindowPanel.kt    # Main UI: toolbar, filters, project switcher, ticket list, detail panel, sprint summary
 │   ├── RallyDetailPanel.kt        # Detail panel: description (HTML) + tabbed pane (Test Cases/Steps, Tasks, Attachments)
 │   └── RallyIcons.kt             # Icon loader for /icons/rally.svg
-└── vcs/
-    ├── RallyWorkSession.kt        # Project-level service tracking active work session (ticket ID, branch, type)
-    └── RallyCheckinHandler.kt     # VCS checkin handler that appends "Refs: <ticketID>" to commit messages
 ```
 
 ## Key Design Decisions
@@ -121,7 +118,7 @@ Any State, Idea, Defined, In-Progress, Completed, Accepted, Deployed, Active (ex
 - **Export** — toolbar Export button exports selected artifact(s) + their linked test cases to JSON and Markdown. Also available via right-click context menu
 - Inline image downloading during export (replaces Rally image URLs with local paths)
 - Attachment downloading during export (via base64 content API, deduplicated across JSON+Markdown)
-- **Start Working** — dialog lets user choose branch prefix (feature, bugfix, hotfix, refactor, chore, test) with auto-selection based on ticket type. Creates/checks out branch, moves ticket to In-Progress, assigns owner, activates work session (commit message prefixing via `RallyCheckinHandler`). Guards against duplicate sessions, defers cleanup on ticket switch, verifies branch checkout before proceeding
+- **Start Working** — dialog lets user choose branch prefix (feature, bugfix, hotfix, refactor, chore, test) with auto-selection based on ticket type. Creates/checks out branch, moves ticket to In-Progress, assigns owner. Verifies branch checkout before proceeding with Rally state changes
 - **Security** — Rally query value escaping, attachment filename sanitization with path traversal prevention, canonical path verification
 - **Threading safety** — PasswordSafe access cached off-EDT, project/iteration selection read from cached data instead of Swing state, generation-based stale result prevention
 - **Performance** — caching, parallel queries, lazy description loading, HTTP/2, generation-based cancellation, disposed-client guards (see Performance Optimizations table)

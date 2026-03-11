@@ -7,7 +7,6 @@ import com.intellij.openapi.Disposable
 import com.intellij.openapi.application.ApplicationManager
 import com.intellij.openapi.diagnostic.Logger
 import com.intellij.openapi.project.Project
-import com.github.halmuratuyghur.rally.vcs.RallyWorkSession
 import com.intellij.openapi.ui.ComboBox
 import com.intellij.openapi.ui.DialogWrapper
 import com.intellij.openapi.ui.Messages
@@ -79,7 +78,6 @@ class RallyToolWindowPanel(private val project: Project) : Disposable {
     private val sprintLabel = JBLabel("")
     private val statusLabel = JBLabel("Ready")
     private val startWorkingButton = JButton("Start Working", AllIcons.Actions.Execute).apply { isFocusable = false }
-    private val stopWorkingButton = JButton("Stop Working", AllIcons.Actions.Suspend).apply { isFocusable = false; isVisible = false }
 
 
     private val detailPanel = RallyDetailPanel(project)
@@ -143,10 +141,8 @@ class RallyToolWindowPanel(private val project: Project) : Disposable {
         toolbar.add(createButton("Export", AllIcons.ToolbarDecorator.Export) { exportSelectedArtifact() })
         toolbar.add(JSeparator(SwingConstants.VERTICAL).apply { preferredSize = java.awt.Dimension(2, 24) })
         toolbar.add(startWorkingButton)
-        toolbar.add(stopWorkingButton)
 
         startWorkingButton.addActionListener { startWorking() }
-        stopWorkingButton.addActionListener { stopWorking() }
 
         toolbar.add(Box.createHorizontalGlue())
         toolbar.add(statsLabel)
@@ -1225,26 +1221,6 @@ class RallyToolWindowPanel(private val project: Project) : Disposable {
             return
         }
 
-        // Guard against already-active session
-        val session = RallyWorkSession.getInstance(project)
-        if (session.isActive) {
-            if (session.activeTicketId == ticketId) {
-                Messages.showInfoMessage(project, "Already working on $ticketId.", "Rally")
-                return
-            }
-            val prevId = session.activeTicketId
-            val answer = Messages.showYesNoDialog(
-                project,
-                "You are currently working on $prevId.\n\n" +
-                        "Switch to $ticketId? This will stop appending 'Refs: $prevId' to commits.",
-                "Rally - Already Working",
-                Messages.getQuestionIcon()
-            )
-            if (answer != Messages.YES) return
-            // Don't call session.finish() here — defer to background thread
-            // so that cancelling the branch dialog doesn't destroy the old session
-        }
-
         val settings = RallySettings.getInstance()
         val username = settings.username
 
@@ -1288,7 +1264,6 @@ class RallyToolWindowPanel(private val project: Project) : Disposable {
                     add(javax.swing.JLabel("<html><br>This will also:<ul>" +
                             "<li>Move ticket to In-Progress</li>" +
                             "<li>Assign you as owner</li>" +
-                            "<li>Append 'Refs: $ticketId' to commit messages</li>" +
                             "</ul></html>"), gbc)
                 }
             }
@@ -1390,12 +1365,6 @@ class RallyToolWindowPanel(private val project: Project) : Disposable {
                 }
             }
 
-            // 4. Activate work session (enables commit message trailers)
-            // Finish any previous session before starting the new one
-            val session = RallyWorkSession.getInstance(project)
-            if (session.isActive) session.finish()
-            session.start(ticketId, ticketRef, ticketType, branchName)
-
             ApplicationManager.getApplication().invokeLater {
                 if (project.isDisposed) return@invokeLater
 
@@ -1423,7 +1392,6 @@ class RallyToolWindowPanel(private val project: Project) : Disposable {
                 }
                 statusLabel.text = if (errors.isEmpty()) "Working on $ticketId"
                     else "Working on $ticketId (with issues)"
-                stopWorkingButton.isVisible = true
             }
             } catch (e: Exception) {
                 LOG.warn("Start working aborted", e)
@@ -1432,15 +1400,6 @@ class RallyToolWindowPanel(private val project: Project) : Disposable {
                 }
             }
         }
-    }
-
-    private fun stopWorking() {
-        val session = RallyWorkSession.getInstance(project)
-        if (!session.isActive) return
-        val ticketId = session.activeTicketId ?: return
-        session.finish()
-        stopWorkingButton.isVisible = false
-        statusLabel.text = "Stopped working on $ticketId"
     }
 
     override fun dispose() {
