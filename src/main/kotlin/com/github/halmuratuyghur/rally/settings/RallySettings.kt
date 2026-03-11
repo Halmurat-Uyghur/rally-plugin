@@ -8,6 +8,8 @@ import com.intellij.openapi.application.ApplicationManager
 import com.intellij.openapi.components.PersistentStateComponent
 import com.intellij.openapi.components.State
 import com.intellij.openapi.components.Storage
+import java.util.concurrent.CountDownLatch
+import java.util.concurrent.TimeUnit
 
 @State(
     name = "com.github.halmuratuyghur.rally.settings.RallySettings",
@@ -30,6 +32,7 @@ class RallySettings : PersistentStateComponent<RallySettings.State> {
     private var myState = State()
     @Volatile
     private var cachedApiKey: String? = null
+    private val apiKeyLatch = CountDownLatch(1)
 
     override fun getState(): State = myState
 
@@ -41,6 +44,7 @@ class RallySettings : PersistentStateComponent<RallySettings.State> {
             val keyToMigrate = state.apiKey
             state.apiKey = ""
             cachedApiKey = keyToMigrate
+            apiKeyLatch.countDown()
             ApplicationManager.getApplication().executeOnPooledThread {
                 PasswordSafe.instance.set(credentialAttributes, Credentials(CREDENTIAL_USER, keyToMigrate))
             }
@@ -48,6 +52,7 @@ class RallySettings : PersistentStateComponent<RallySettings.State> {
             // Eagerly load the API key from PasswordSafe off-EDT
             ApplicationManager.getApplication().executeOnPooledThread {
                 cachedApiKey = PasswordSafe.instance.getPassword(credentialAttributes) ?: ""
+                apiKeyLatch.countDown()
             }
         }
     }
@@ -58,7 +63,12 @@ class RallySettings : PersistentStateComponent<RallySettings.State> {
     val pageSize: Int get() = myState.pageSize
 
     var apiKey: String
-        get() = cachedApiKey ?: ""
+        get() {
+            if (cachedApiKey == null) {
+                apiKeyLatch.await(2, TimeUnit.SECONDS)
+            }
+            return cachedApiKey ?: ""
+        }
         set(value) {
             cachedApiKey = value
             ApplicationManager.getApplication().executeOnPooledThread {
