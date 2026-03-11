@@ -79,6 +79,7 @@ class RallyToolWindowPanel(private val project: Project) : Disposable {
     private val sprintLabel = JBLabel("")
     private val statusLabel = JBLabel("Ready")
     private val startWorkingButton = JButton("Start Working", AllIcons.Actions.Execute).apply { isFocusable = false }
+    private val stopWorkingButton = JButton("Stop Working", AllIcons.Actions.Suspend).apply { isFocusable = false; isVisible = false }
 
 
     private val detailPanel = RallyDetailPanel(project)
@@ -142,8 +143,10 @@ class RallyToolWindowPanel(private val project: Project) : Disposable {
         toolbar.add(createButton("Export", AllIcons.ToolbarDecorator.Export) { exportSelectedArtifact() })
         toolbar.add(JSeparator(SwingConstants.VERTICAL).apply { preferredSize = java.awt.Dimension(2, 24) })
         toolbar.add(startWorkingButton)
+        toolbar.add(stopWorkingButton)
 
         startWorkingButton.addActionListener { startWorking() }
+        stopWorkingButton.addActionListener { stopWorking() }
 
         toolbar.add(Box.createHorizontalGlue())
         toolbar.add(statsLabel)
@@ -1420,6 +1423,7 @@ class RallyToolWindowPanel(private val project: Project) : Disposable {
                 }
                 statusLabel.text = if (errors.isEmpty()) "Working on $ticketId"
                     else "Working on $ticketId (with issues)"
+                stopWorkingButton.isVisible = true
             }
             } catch (e: Exception) {
                 LOG.warn("Start working aborted", e)
@@ -1430,7 +1434,14 @@ class RallyToolWindowPanel(private val project: Project) : Disposable {
         }
     }
 
-
+    private fun stopWorking() {
+        val session = RallyWorkSession.getInstance(project)
+        if (!session.isActive) return
+        val ticketId = session.activeTicketId ?: return
+        session.finish()
+        stopWorkingButton.isVisible = false
+        statusLabel.text = "Stopped working on $ticketId"
+    }
 
     override fun dispose() {
         synchronized(clientLock) {

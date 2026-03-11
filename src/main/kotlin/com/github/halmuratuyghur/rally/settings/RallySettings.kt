@@ -58,7 +58,7 @@ class RallySettings : PersistentStateComponent<RallySettings.State> {
     val pageSize: Int get() = myState.pageSize
 
     var apiKey: String
-        get() = cachedApiKey ?: PasswordSafe.instance.getPassword(credentialAttributes) ?: ""
+        get() = cachedApiKey ?: ""
         set(value) {
             cachedApiKey = value
             ApplicationManager.getApplication().executeOnPooledThread {
