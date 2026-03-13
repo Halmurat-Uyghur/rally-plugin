@@ -1301,27 +1301,38 @@ class RallyToolWindowPanel(private val project: Project) : Disposable {
                     val existingBranches = repo.branches.localBranches.map { it.name }
                     val branchLatch = java.util.concurrent.CountDownLatch(1)
                     var branchError: String? = null
-                    ApplicationManager.getApplication().invokeLater {
-                        try {
-                            if (branchName in existingBranches) {
-                                brancher.checkout(branchName, false, targetRepos, null)
-                            } else {
-                                brancher.createBranch(branchName, mapOf(repo to "HEAD"))
-                                brancher.checkout(branchName, false, targetRepos, null)
+
+                    // GitBrancher handles its own threading/progress — call from background thread.
+                    // The checkout callback fires on EDT after completion; verify on pooled thread.
+                    val verifyCheckout = Runnable {
+                        ApplicationManager.getApplication().executeOnPooledThread {
+                            try {
+                                repo.update()
+                                val currentBranch = repo.currentBranchName
+                                if (currentBranch != branchName) {
+                                    branchError = "Checkout not confirmed (expected: $branchName, current: $currentBranch)"
+                                }
+                            } catch (e: Exception) {
+                                branchError = e.message
+                            } finally {
+                                branchLatch.countDown()
                             }
-                            // Verify checkout on EDT where VCS state is reliable
-                            repo.update()
-                            val currentBranch = repo.currentBranchName
-                            if (currentBranch != branchName) {
-                                branchError = "Checkout not confirmed (expected: $branchName, current: $currentBranch)"
-                            }
-                        } catch (e: Exception) {
-                            branchError = e.message
-                        } finally {
-                            branchLatch.countDown()
                         }
                     }
-                    val completed = branchLatch.await(10, java.util.concurrent.TimeUnit.SECONDS)
+
+                    try {
+                        if (branchName in existingBranches) {
+                            brancher.checkout(branchName, false, targetRepos, verifyCheckout)
+                        } else {
+                            brancher.createBranch(branchName, mapOf(repo to "HEAD"))
+                            brancher.checkout(branchName, false, targetRepos, verifyCheckout)
+                        }
+                    } catch (e: Exception) {
+                        branchError = e.message
+                        branchLatch.countDown()
+                    }
+
+                    val completed = branchLatch.await(30, java.util.concurrent.TimeUnit.SECONDS)
                     if (!completed) {
                         errors.add("Branch operation timed out")
                     } else if (branchError != null) {
