@@ -76,6 +76,9 @@ Transient errors (network timeout, 5xx) should be shown in the status bar with a
 
 **For critical failures — use IntelliJ Notifications API:**
 ```kotlin
+import com.intellij.notification.Notification
+import com.intellij.notification.NotificationType
+
 Notification("Rally", "Rally API Error",
     "Failed to authenticate. Please check your API key in Settings > Tools > Rally.",
     NotificationType.ERROR).notify(project)

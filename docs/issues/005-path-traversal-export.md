@@ -40,7 +40,7 @@ An attachment named `../../.bashrc` passes the current sanitizer (replacing `/` 
 
 ### Impact
 - Arbitrary file write to attacker-controlled paths on the developer's machine
-- Potential overwrite of configuration files or shell initialisation scripts
+- Potential overwrite of configuration files or shell initialization scripts
 - CWE-22 (Path Traversal)
 
 ### Suggested Fix

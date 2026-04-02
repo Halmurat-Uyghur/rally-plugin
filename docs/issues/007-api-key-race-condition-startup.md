@@ -31,7 +31,7 @@ val apiKey: String get() {
 ```
 
 ### Impact
-- Plugin initialises and immediately attempts API calls with an empty key
+- Plugin initializes and immediately attempts API calls with an empty key
 - `RallyAuthenticationException` (or silent failure) on the very first query after IDE start
 - 2-second timeout is also insufficient on slow systems or when PasswordSafe vault unlocking takes time
 - Users see blank ticket lists with no clear error message
