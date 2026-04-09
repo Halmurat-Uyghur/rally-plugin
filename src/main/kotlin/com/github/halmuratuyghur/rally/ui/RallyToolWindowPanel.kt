@@ -394,7 +394,7 @@ class RallyToolWindowPanel(private val project: Project) : Disposable {
                 val client = getClient()
 
                 // Load projects if not yet loaded or settings changed
-                val snapshot = "${settings.serverUrl}|${settings.apiKey}|${settings.workspaceRef}"
+                val snapshot = "${settings.serverUrl}|${settings.apiKey.hashCode()}|${settings.workspaceRef}"
                 if (!projectsLoaded || snapshot != lastSettingsSnapshot) {
                     lastSettingsSnapshot = snapshot
                     loadProjects(client)
@@ -625,7 +625,7 @@ class RallyToolWindowPanel(private val project: Project) : Disposable {
             1 -> conditions[0]
             else -> conditions.reduce { acc, cond -> "($acc AND $cond)" }
         }
-        LOG.info("Rally query: $query (scope=$scope, iteration='$selectedIter', username='${settings.username}')")
+        LOG.info("Rally query: $query (scope=$scope, iteration='$selectedIter')")
         return query
     }
 
@@ -1438,26 +1438,33 @@ class RallyToolWindowPanel(private val project: Project) : Disposable {
 
     // ── Client ───────────────────────────────────────────────────
 
-    private fun getClient(): RallyApiClient = synchronized(clientLock) {
-        check(!disposed) { "RallyToolWindowPanel has been disposed" }
+    private fun getClient(): RallyApiClient {
+        // Read settings BEFORE acquiring the lock — apiKey getter may block
+        // up to 2s on PasswordSafe, which would prevent dispose() from acquiring clientLock.
         val settings = RallySettings.getInstance()
-        val newWorkspaceRef = settings.workspaceRef.ifBlank { null }
-        if (currentClient == null ||
-            currentClient?.serverUrl != settings.serverUrl ||
-            currentClient?.apiKey != settings.apiKey ||
-            currentClient?.workspaceRef != newWorkspaceRef
-        ) {
-            // Shut down the old client's thread pool to prevent thread leaks
-            currentClient?.apiExecutor?.shutdown()
-            currentClient = RallyApiClient(settings.serverUrl, settings.apiKey)
-            // Reset caches when client changes
-            projectsLoaded = false
-            iterationsLoaded = false
+        val serverUrl = settings.serverUrl
+        val apiKey = settings.apiKey
+        val workspaceRef = settings.workspaceRef.ifBlank { null }
+
+        return synchronized(clientLock) {
+            check(!disposed) { "RallyToolWindowPanel has been disposed" }
+            if (currentClient == null ||
+                currentClient?.serverUrl != serverUrl ||
+                currentClient?.apiKey != apiKey ||
+                currentClient?.workspaceRef != workspaceRef
+            ) {
+                // Shut down the old client's thread pool to prevent thread leaks
+                currentClient?.apiExecutor?.shutdown()
+                currentClient = RallyApiClient(serverUrl, apiKey)
+                // Reset caches when client changes
+                projectsLoaded = false
+                iterationsLoaded = false
+            }
+            // Workspace always comes from settings
+            currentClient!!.workspaceRef = workspaceRef
+            // projectRef is managed by the project dropdown (updateClientProjectRef)
+            currentClient!!
         }
-        // Workspace always comes from settings
-        currentClient!!.workspaceRef = newWorkspaceRef
-        // projectRef is managed by the project dropdown (updateClientProjectRef)
-        currentClient!!
     }
 
     // ── Cell Renderer ────────────────────────────────────────────

@@ -33,9 +33,6 @@ open class RallyApiException : Exception {
             if (statusCode != null) {
                 append(" (HTTP $statusCode)")
             }
-            if (responseBody != null) {
-                append("\nResponse: $responseBody")
-            }
         }
     }
 }

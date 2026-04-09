@@ -148,9 +148,11 @@ class RallyApiClient(
      * Call on manual Refresh to get fully fresh data from Rally.
      */
     fun clearCache() {
-        queryCache.clear()
-        imageCache.clear()
-        imageCacheBytes.set(0)
+        synchronized(queryCache) { queryCache.clear() }
+        synchronized(imageCache) {
+            imageCache.clear()
+            imageCacheBytes.set(0)
+        }
     }
 
     /**
@@ -176,6 +178,8 @@ class RallyApiClient(
     }
 
     companion object {
+        private val LOG = com.intellij.openapi.diagnostic.Logger.getInstance(RallyApiClient::class.java)
+
         /**
          * Escape a value for use inside Rally WSAPI query strings.
          * Strips quotes and backslashes that could break query syntax.
@@ -379,7 +383,7 @@ class RallyApiClient(
         if (results != null && results.size() > 0) {
             return gson.fromJson(results.get(0), RallyUser::class.java)
         }
-        throw RallyApiException("No user found with UserName: $username")
+        throw RallyApiException("No user found with the configured username")
     }
 
     /**
@@ -474,7 +478,14 @@ class RallyApiClient(
             val desc = obj?.get("Description")?.asString
             if (desc != null) putCache(cacheKey, desc)
             desc
+        } catch (e: RallyAuthenticationException) {
+            LOG.warn("Auth failure fetching description for $artifactRef", e)
+            null
+        } catch (e: RallyApiException) {
+            LOG.warn("API error fetching description for $artifactRef: ${e.message}")
+            null
         } catch (e: Exception) {
+            LOG.warn("Unexpected error fetching description for $artifactRef", e)
             null
         }
     }
@@ -483,6 +494,9 @@ class RallyApiClient(
      * Get artifact by FormattedID (e.g., "S-1234", "DE5678", "TA9012")
      */
     fun getArtifactByFormattedId(formattedId: String): RallyArtifact? {
+        val cacheKey = "artifact:$formattedId"
+        getCached<RallyArtifact>(cacheKey)?.let { return it }
+
         // Determine artifact type from FormattedID prefix
         val (endpoint, type) = when {
             formattedId.startsWith("S-", ignoreCase = true) ||
@@ -506,8 +520,14 @@ class RallyApiClient(
             handleResponse(response)
 
             val result: RallyQueryResult<out RallyArtifact> = gson.fromJson(response.body(), type)
-            result.queryResult.safeResults.firstOrNull()
+            val artifact = result.queryResult.safeResults.firstOrNull()
+            if (artifact != null) putCache(cacheKey, artifact)
+            artifact
         } catch (e: RallyApiException) {
+            LOG.warn("API error fetching artifact $formattedId: ${e.message}")
+            null
+        } catch (e: Exception) {
+            LOG.warn("Unexpected error fetching artifact $formattedId", e)
             null
         }
     }
@@ -729,11 +749,10 @@ class RallyApiClient(
 
         val json = JsonParser.parseString(response.body()).asJsonObject
         val result = json.getAsJsonObject("OperationResult")
-        if (result != null) {
-            val errors = result.getAsJsonArray("Errors")
-            if (errors != null && errors.size() > 0) {
-                throw RallyApiException("Failed to update state: ${errors.joinToString()}")
-            }
+            ?: throw RallyApiException("Unexpected response: missing OperationResult")
+        val errors = result.getAsJsonArray("Errors")
+        if (errors != null && errors.size() > 0) {
+            throw RallyApiException("Failed to update state: ${errors.joinToString()}")
         }
     }
 
@@ -750,11 +769,10 @@ class RallyApiClient(
 
         val json = JsonParser.parseString(response.body()).asJsonObject
         val result = json.getAsJsonObject("OperationResult")
-        if (result != null) {
-            val errors = result.getAsJsonArray("Errors")
-            if (errors != null && errors.size() > 0) {
-                throw RallyApiException("Failed to update owner: ${errors.joinToString()}")
-            }
+            ?: throw RallyApiException("Unexpected response: missing OperationResult")
+        val errors = result.getAsJsonArray("Errors")
+        if (errors != null && errors.size() > 0) {
+            throw RallyApiException("Failed to update owner: ${errors.joinToString()}")
         }
     }
 
@@ -965,6 +983,9 @@ class RallyApiClient(
      * Query a single test case by FormattedID.
      */
     fun queryTestCaseByFormattedId(formattedId: String): RallyTestCase? {
+        val cacheKey = "testcase:id:$formattedId"
+        getCached<RallyTestCase>(cacheKey)?.let { return it }
+
         val query = "(FormattedID = \"$formattedId\")"
         val encodedQuery = URLEncoder.encode(query, StandardCharsets.UTF_8)
 
@@ -981,7 +1002,9 @@ class RallyApiClient(
 
         val type = object : TypeToken<RallyQueryResult<RallyTestCase>>() {}.type
         val result: RallyQueryResult<RallyTestCase> = gson.fromJson(response.body(), type)
-        return result.queryResult.safeResults.firstOrNull()
+        val tc = result.queryResult.safeResults.firstOrNull()
+        if (tc != null) putCache(cacheKey, tc)
+        return tc
     }
 
     /**

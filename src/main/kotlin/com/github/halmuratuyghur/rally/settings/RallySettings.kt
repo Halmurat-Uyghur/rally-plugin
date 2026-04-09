@@ -27,7 +27,7 @@ class RallySettings : PersistentStateComponent<RallySettings.State> {
         var exportDirectory: String = ""
     )
 
-    private var myState = State()
+    @Volatile private var myState = State()
     @Volatile
     private var cachedApiKey: String? = null
     private val apiKeyReady = Object()

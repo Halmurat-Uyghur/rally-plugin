@@ -29,7 +29,7 @@ import java.util.concurrent.atomic.AtomicLong
 import java.util.regex.Pattern
 import javax.swing.*
 
-class RallyDetailPanel(private val project: Project) {
+class RallyDetailPanel(private val project: Project) : com.intellij.openapi.Disposable {
 
     private val imageExecutor: ExecutorService = Executors.newFixedThreadPool(4) { r ->
         Thread(r, "rally-image-worker").apply { isDaemon = true }
@@ -103,7 +103,7 @@ class RallyDetailPanel(private val project: Project) {
     private val generation = AtomicLong(0)
     @Volatile private var disposed = false
 
-    fun dispose() {
+    override fun dispose() {
         disposed = true
         generation.incrementAndGet()
         imageExecutor.shutdownNow()
