@@ -434,18 +434,12 @@ class RallyExporter(private val client: RallyApiClient) {
     ): JsonArray {
         val attachDir = "$outputDir${File.separator}${artifactId}_attachments"
 
-        // Download all attachments in parallel
-        val futures = attachments.map { att ->
-            val attName = att.name ?: "unnamed"
-            CompletableFuture.supplyAsync({
-                val savedPath = downloadAttachmentContent(att, attachDir, attName)
-                Triple(att, attName, savedPath)
-            }, client.apiExecutor)
-        }
-
+        // Download attachments sequentially to avoid apiExecutor self-deadlock
+        // (this method is called from within an apiExecutor task during export)
         val array = JsonArray()
-        for (future in futures) {
-            val (att, attName, savedPath) = future.join()
+        for (att in attachments) {
+            val attName = att.name ?: "unnamed"
+            val savedPath = downloadAttachmentContent(att, attachDir, attName)
             val obj = JsonObject().apply {
                 addProperty("name", attName)
                 addProperty("contentType", att.contentType ?: "")

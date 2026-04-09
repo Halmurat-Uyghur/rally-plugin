@@ -37,7 +37,6 @@ class RallyApiClient(
     private val httpClient: HttpClient = HttpClient.newBuilder()
         .connectTimeout(Duration.ofSeconds(30))
         .version(HttpClient.Version.HTTP_2)
-        .executor(apiExecutor)
         .apply {
             // Respect IDE proxy settings (Settings → Appearance & Behavior → System Settings → HTTP Proxy)
             try {
@@ -405,10 +404,14 @@ class RallyApiClient(
             val response = executeGet(url)
             handleResponse(response)
             val result: RallyQueryResult<T> = gson.fromJson(response.body(), typeToken)
-            allResults.addAll(result.queryResult.results)
-            start += result.queryResult.pageSize
+            if (!result.queryResult.errors.isNullOrEmpty()) {
+                throw RallyApiException("Rally query error: ${result.queryResult.errors.joinToString("; ")}")
+            }
+            allResults.addAll(result.queryResult.safeResults)
+            val effectivePageSize = result.queryResult.pageSize.takeIf { it > 0 } ?: pageSize
+            start += effectivePageSize
         } while (allResults.size < result.queryResult.totalResultCount
-            && result.queryResult.results.isNotEmpty()
+            && result.queryResult.safeResults.isNotEmpty()
             && allResults.size < maxResults)
 
         return allResults
@@ -503,7 +506,7 @@ class RallyApiClient(
             handleResponse(response)
 
             val result: RallyQueryResult<out RallyArtifact> = gson.fromJson(response.body(), type)
-            result.queryResult.results.firstOrNull()
+            result.queryResult.safeResults.firstOrNull()
         } catch (e: RallyApiException) {
             null
         }
@@ -529,31 +532,22 @@ class RallyApiClient(
         val fetchStories = scope != "Defects"
         val fetchDefects = scope != "User Stories"
 
-        // Query user stories and defects in parallel using dedicated executor
-        val storiesFuture = if (fetchStories) {
-            java.util.concurrent.CompletableFuture.supplyAsync({
-                queryUserStories(query, pageSize, maxResults)
-            }, apiExecutor)
-        } else null
-        val defectsFuture = if (fetchDefects) {
-            java.util.concurrent.CompletableFuture.supplyAsync({
-                queryDefects(query, pageSize, maxResults)
-            }, apiExecutor)
-        } else null
-
-        if (storiesFuture != null) {
+        // Query user stories and defects sequentially to avoid apiExecutor self-deadlock
+        // (this method is often called from an apiExecutor thread; submitting inner tasks
+        // to the same pool and blocking on .get() can exhaust the fixed 8-thread pool)
+        if (fetchStories) {
             try {
-                results.addAll(storiesFuture.get())
+                results.addAll(queryUserStories(query, pageSize, maxResults))
             } catch (e: Exception) {
-                errors.add("UserStories: ${e.cause?.message ?: e.message}")
+                errors.add("UserStories: ${e.message}")
             }
         }
 
-        if (defectsFuture != null) {
+        if (fetchDefects) {
             try {
-                results.addAll(defectsFuture.get())
+                results.addAll(queryDefects(query, pageSize, maxResults))
             } catch (e: Exception) {
-                errors.add("Defects: ${e.cause?.message ?: e.message}")
+                errors.add("Defects: ${e.message}")
             }
         }
 
@@ -598,29 +592,15 @@ class RallyApiClient(
         val fetchStories = scope != "Defects"
         val fetchDefects = scope != "User Stories"
 
-        val storiesFuture = if (fetchStories) {
-            java.util.concurrent.CompletableFuture.supplyAsync({
-                queryUserStories(query, pageSize, maxResults)
-            }, apiExecutor)
-        } else null
-        val defectsFuture = if (fetchDefects) {
-            java.util.concurrent.CompletableFuture.supplyAsync({
-                queryDefects(query, pageSize, maxResults)
-            }, apiExecutor)
-        } else null
-
-        if (storiesFuture != null) {
-            try { results.addAll(storiesFuture.get()) } catch (e: Exception) {
-                errors.add("UserStories: ${e.cause?.message ?: e.message}")
-            }
+        if (fetchStories) {
+            try { results.addAll(queryUserStories(query, pageSize, maxResults)) }
+            catch (e: Exception) { errors.add("UserStories: ${e.message}") }
         }
-        if (defectsFuture != null) {
-            try { results.addAll(defectsFuture.get()) } catch (e: Exception) {
-                errors.add("Defects: ${e.cause?.message ?: e.message}")
-            }
+        if (fetchDefects) {
+            try { results.addAll(queryDefects(query, pageSize, maxResults)) }
+            catch (e: Exception) { errors.add("Defects: ${e.message}") }
         }
 
-        // If all queries failed, throw so the UI can show the error
         if (results.isEmpty() && errors.isNotEmpty()) {
             throw RallyApiException("Search failed - ${errors.joinToString("; ")}")
         }
@@ -804,7 +784,7 @@ class RallyApiClient(
 
         val type = object : TypeToken<RallyQueryResult<RallyIteration>>() {}.type
         val result: RallyQueryResult<RallyIteration> = gson.fromJson(response.body(), type)
-        val iteration = result.queryResult.results.firstOrNull()
+        val iteration = result.queryResult.safeResults.firstOrNull()
         if (iteration != null) putCache(cacheKey, iteration)
         return iteration
     }
@@ -837,7 +817,7 @@ class RallyApiClient(
 
         val type = object : TypeToken<RallyQueryResult<RallyProject>>() {}.type
         val result: RallyQueryResult<RallyProject> = gson.fromJson(response.body(), type)
-        return result.queryResult.results.sortedBy { it.name?.lowercase() }
+        return result.queryResult.safeResults.sortedBy { it.name?.lowercase() }
     }
 
     /**
@@ -870,7 +850,7 @@ class RallyApiClient(
 
         val type = object : TypeToken<RallyQueryResult<RallyIteration>>() {}.type
         val result: RallyQueryResult<RallyIteration> = gson.fromJson(response.body(), type)
-        return result.queryResult.results
+        return result.queryResult.safeResults
     }
 
     /**
@@ -896,8 +876,8 @@ class RallyApiClient(
 
         val type = object : TypeToken<RallyQueryResult<RallyTaskItem>>() {}.type
         val result: RallyQueryResult<RallyTaskItem> = gson.fromJson(response.body(), type)
-        putCache(cacheKey, result.queryResult.results)
-        return result.queryResult.results
+        putCache(cacheKey, result.queryResult.safeResults)
+        return result.queryResult.safeResults
     }
 
     /**
@@ -923,8 +903,8 @@ class RallyApiClient(
 
         val type = object : TypeToken<RallyQueryResult<RallyTestCase>>() {}.type
         val result: RallyQueryResult<RallyTestCase> = gson.fromJson(response.body(), type)
-        putCache(cacheKey, result.queryResult.results)
-        return result.queryResult.results
+        putCache(cacheKey, result.queryResult.safeResults)
+        return result.queryResult.safeResults
     }
 
     /**
@@ -950,8 +930,8 @@ class RallyApiClient(
 
         val type = object : TypeToken<RallyQueryResult<RallyTestCaseStep>>() {}.type
         val result: RallyQueryResult<RallyTestCaseStep> = gson.fromJson(response.body(), type)
-        putCache(cacheKey, result.queryResult.results)
-        return result.queryResult.results
+        putCache(cacheKey, result.queryResult.safeResults)
+        return result.queryResult.safeResults
     }
 
     /**
@@ -977,8 +957,8 @@ class RallyApiClient(
 
         val type = object : TypeToken<RallyQueryResult<RallyAttachment>>() {}.type
         val result: RallyQueryResult<RallyAttachment> = gson.fromJson(response.body(), type)
-        putCache(cacheKey, result.queryResult.results)
-        return result.queryResult.results
+        putCache(cacheKey, result.queryResult.safeResults)
+        return result.queryResult.safeResults
     }
 
     /**
@@ -1001,7 +981,7 @@ class RallyApiClient(
 
         val type = object : TypeToken<RallyQueryResult<RallyTestCase>>() {}.type
         val result: RallyQueryResult<RallyTestCase> = gson.fromJson(response.body(), type)
-        return result.queryResult.results.firstOrNull()
+        return result.queryResult.safeResults.firstOrNull()
     }
 
     /**
@@ -1027,7 +1007,7 @@ class RallyApiClient(
 
         val type = object : TypeToken<RallyQueryResult<RallyTestCase>>() {}.type
         val result: RallyQueryResult<RallyTestCase> = gson.fromJson(response.body(), type)
-        return result.queryResult.results
+        return result.queryResult.safeResults
     }
 
     /**

@@ -12,17 +12,26 @@ data class RallyQueryResult<T>(
 
 data class QueryResultData<T>(
     @SerializedName("Results")
-    val results: List<T> = emptyList(),
+    val results: List<T>? = null,
 
     @SerializedName("TotalResultCount")
-    val totalResultCount: Int,
+    val totalResultCount: Int = 0,
 
     @SerializedName("PageSize")
-    val pageSize: Int,
+    val pageSize: Int = 0,
 
     @SerializedName("StartIndex")
-    val startIndex: Int
-)
+    val startIndex: Int = 0,
+
+    @SerializedName("Errors")
+    val errors: List<String>? = null,
+
+    @SerializedName("Warnings")
+    val warnings: List<String>? = null
+) {
+    /** Null-safe accessor for results — Gson bypasses Kotlin defaults and can inject null. */
+    val safeResults: List<T> get() = results ?: emptyList()
+}
 
 /**
  * Base interface for all Rally artifacts

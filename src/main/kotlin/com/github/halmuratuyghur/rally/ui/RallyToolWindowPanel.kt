@@ -457,7 +457,7 @@ class RallyToolWindowPanel(private val project: Project) : Disposable {
                 val filtered = applyClientFilter(scope, stateFilter, artifacts)
 
                 ApplicationManager.getApplication().invokeLater {
-                    if (project.isDisposed) return@invokeLater
+                    if (project.isDisposed || disposed) return@invokeLater
                     allArtifacts = filtered
                     detailPanel.clear()
                     applySearchFilter()
@@ -484,7 +484,7 @@ class RallyToolWindowPanel(private val project: Project) : Disposable {
             } catch (e: Exception) {
                 LOG.error("Failed to load Rally tickets", e)
                 ApplicationManager.getApplication().invokeLater {
-                    if (project.isDisposed) return@invokeLater
+                    if (project.isDisposed || disposed) return@invokeLater
                     loading = false
                     if (pendingReload) {
                         pendingReload = false
@@ -505,7 +505,7 @@ class RallyToolWindowPanel(private val project: Project) : Disposable {
             cachedProjects = projects
 
             ApplicationManager.getApplication().invokeLater {
-                if (project.isDisposed) return@invokeLater
+                if (project.isDisposed || disposed) return@invokeLater
 
                 // Temporarily remove listener to avoid triggering loadTickets during population
                 val listeners = projectCombo.actionListeners
@@ -537,7 +537,7 @@ class RallyToolWindowPanel(private val project: Project) : Disposable {
         } catch (e: Exception) {
             LOG.warn("Failed to load projects", e)
             ApplicationManager.getApplication().invokeLater {
-                if (project.isDisposed) return@invokeLater
+                if (project.isDisposed || disposed) return@invokeLater
                 projectCombo.removeAllItems()
                 projectCombo.addItem("All Projects")
                 projectCombo.isEnabled = false
@@ -553,7 +553,7 @@ class RallyToolWindowPanel(private val project: Project) : Disposable {
 
             // Use invokeLater to populate combo on EDT without blocking the pooled thread
             ApplicationManager.getApplication().invokeLater {
-                if (project.isDisposed) return@invokeLater
+                if (project.isDisposed || disposed) return@invokeLater
 
                 val listeners = iterationCombo.actionListeners
                 listeners.forEach { iterationCombo.removeActionListener(it) }
@@ -583,7 +583,7 @@ class RallyToolWindowPanel(private val project: Project) : Disposable {
         } catch (e: Exception) {
             LOG.warn("Failed to load iterations", e)
             ApplicationManager.getApplication().invokeLater {
-                if (project.isDisposed) return@invokeLater
+                if (project.isDisposed || disposed) return@invokeLater
                 iterationCombo.removeAllItems()
                 iterationCombo.addItem("All Sprints")
                 iterationCombo.isEnabled = false
@@ -675,7 +675,7 @@ class RallyToolWindowPanel(private val project: Project) : Disposable {
 
             if (iteration == null) {
                 ApplicationManager.getApplication().invokeLater {
-                    if (project.isDisposed) return@invokeLater
+                    if (project.isDisposed || disposed) return@invokeLater
                     sprintLabel.text = "No active sprint"
                 }
                 return
@@ -686,7 +686,7 @@ class RallyToolWindowPanel(private val project: Project) : Disposable {
         } catch (e: Exception) {
             LOG.warn("Failed to load sprint summary", e)
             ApplicationManager.getApplication().invokeLater {
-                if (project.isDisposed) return@invokeLater
+                if (project.isDisposed || disposed) return@invokeLater
                 sprintLabel.text = "Sprint: unable to load"
             }
         }
@@ -700,7 +700,7 @@ class RallyToolWindowPanel(private val project: Project) : Disposable {
         val iteration = cachedIterations.firstOrNull { it.name == iterationName }
         if (iteration == null) {
             ApplicationManager.getApplication().invokeLater {
-                if (project.isDisposed) return@invokeLater
+                if (project.isDisposed || disposed) return@invokeLater
                 sprintLabel.text = "No active sprint"
             }
             return
@@ -728,7 +728,7 @@ class RallyToolWindowPanel(private val project: Project) : Disposable {
         val endDate = iteration.endDate?.take(10) ?: ""
 
         ApplicationManager.getApplication().invokeLater {
-            if (project.isDisposed) return@invokeLater
+            if (project.isDisposed || disposed) return@invokeLater
             sprintLabel.text = "Sprint: ${iteration.name} ($startDate to $endDate) | $countsText | ${totalPoints.toInt()} pts"
         }
     }
@@ -789,7 +789,7 @@ class RallyToolWindowPanel(private val project: Project) : Disposable {
                         }
                     }
                     ApplicationManager.getApplication().invokeLater {
-                        if (project.isDisposed) return@invokeLater
+                        if (project.isDisposed || disposed) return@invokeLater
                         // Only apply if this is still the active search (check current search field)
                         if (activeServerSearch == query && searchField.text.trim() == query) {
                             updateListModel(filteredResults)
@@ -804,7 +804,7 @@ class RallyToolWindowPanel(private val project: Project) : Disposable {
                     }
                 } catch (e: Exception) {
                     ApplicationManager.getApplication().invokeLater {
-                        if (project.isDisposed) return@invokeLater
+                        if (project.isDisposed || disposed) return@invokeLater
                         if (activeServerSearch == query) {
                             statusLabel.text = "Search failed: ${e.message}"
                             activeServerSearch = null
@@ -882,14 +882,14 @@ class RallyToolWindowPanel(private val project: Project) : Disposable {
                 // Upload attachment if a file was selected
                 if (attachment != null && created.ref != null) {
                     ApplicationManager.getApplication().invokeLater {
-                        if (project.isDisposed) return@invokeLater
+                        if (project.isDisposed || disposed) return@invokeLater
                         statusLabel.text = "Uploading attachment..."
                     }
                     client.uploadAttachment(created.ref, attachment.toPath())
                 }
 
                 ApplicationManager.getApplication().invokeLater {
-                    if (project.isDisposed) return@invokeLater
+                    if (project.isDisposed || disposed) return@invokeLater
                     val attachMsg = if (attachment != null) " with attachment" else ""
                     statusLabel.text = "Created $createdId$attachMsg"
                     Messages.showInfoMessage(project, "Created user story: $createdId$attachMsg", "Rally")
@@ -904,7 +904,7 @@ class RallyToolWindowPanel(private val project: Project) : Disposable {
             } catch (e: Exception) {
                 LOG.error("Failed to create user story", e)
                 ApplicationManager.getApplication().invokeLater {
-                    if (project.isDisposed) return@invokeLater
+                    if (project.isDisposed || disposed) return@invokeLater
                     statusLabel.text = "Create failed"
                     Messages.showErrorDialog(project, "Failed to create user story: ${e.message}", "Rally - Error")
                 }
@@ -1113,7 +1113,7 @@ class RallyToolWindowPanel(private val project: Project) : Disposable {
             java.util.concurrent.CompletableFuture.allOf(*futures.toTypedArray()).join()
 
             ApplicationManager.getApplication().invokeLater {
-                if (project.isDisposed) return@invokeLater
+                if (project.isDisposed || disposed) return@invokeLater
                 statusLabel.text = "Exported ${artifactSuccess.get()} artifact(s), ${tcExported.get()} test case(s)"
                 val summary = buildString {
                     append("Exported to:\n$outputDir\n\n")
@@ -1185,7 +1185,7 @@ class RallyToolWindowPanel(private val project: Project) : Disposable {
             java.util.concurrent.CompletableFuture.allOf(*futures.toTypedArray()).join()
 
             ApplicationManager.getApplication().invokeLater {
-                if (project.isDisposed) return@invokeLater
+                if (project.isDisposed || disposed) return@invokeLater
                 if (failures.get() > 0) {
                     Messages.showWarningDialog(
                         project,
@@ -1352,7 +1352,7 @@ class RallyToolWindowPanel(private val project: Project) : Disposable {
             // Only proceed with Rally state changes if branch was created successfully
             if (!branchSucceeded) {
                 ApplicationManager.getApplication().invokeLater {
-                    if (project.isDisposed) return@invokeLater
+                    if (project.isDisposed || disposed) return@invokeLater
                     Messages.showErrorDialog(
                         project,
                         "Could not create/checkout branch $branchName:\n\n${errors.joinToString("\n")}\n\nRally ticket state was not changed.",
@@ -1388,7 +1388,7 @@ class RallyToolWindowPanel(private val project: Project) : Disposable {
             }
 
             ApplicationManager.getApplication().invokeLater {
-                if (project.isDisposed) return@invokeLater
+                if (project.isDisposed || disposed) return@invokeLater
 
                 // Only update local state if Rally accepted the state change
                 if (stateChangeSucceeded) {

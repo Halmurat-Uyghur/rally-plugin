@@ -550,6 +550,7 @@ class RallyDetailPanel(private val project: Project) {
             }
 
             ApplicationManager.getApplication().invokeLater {
+                if (disposed || project.isDisposed) return@invokeLater
                 Messages.showMessageDialog(
                     project,
                     "Exported $success/${selected.size} test case(s) to:\n$outputDir",
@@ -703,6 +704,7 @@ class RallyDetailPanel(private val project: Project) {
                 targetFile.writeBytes(bytes)
 
                 ApplicationManager.getApplication().invokeLater {
+                    if (disposed || project.isDisposed) return@invokeLater
                     Messages.showMessageDialog(
                         project,
                         "Saved to: ${targetFile.absolutePath}",
@@ -713,6 +715,7 @@ class RallyDetailPanel(private val project: Project) {
             } catch (e: Exception) {
                 LOG.error("Failed to download attachment ${selected.name}", e)
                 ApplicationManager.getApplication().invokeLater {
+                    if (disposed || project.isDisposed) return@invokeLater
                     Messages.showErrorDialog(
                         project,
                         "Failed to download: ${e.message}",
