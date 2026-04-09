@@ -317,7 +317,7 @@ class RallyDetailPanel(private val project: Project) : com.intellij.openapi.Disp
                     if (!resolvedNonNull.isNullOrBlank()) {
                         try { resolveInlineImages(resolvedNonNull, client, gen) } catch (_: Exception) { resolvedNonNull }
                     } else null
-                }, imageExecutor)
+                }, client.apiExecutor)
 
                 val stepsFuture = CompletableFuture.supplyAsync({
                     if (generation.get() != gen) return@supplyAsync null
@@ -380,7 +380,7 @@ class RallyDetailPanel(private val project: Project) : com.intellij.openapi.Disp
                         resolvedNonNull
                     }
                 } else null
-            }, imageExecutor)
+            }, client.apiExecutor)
 
             val tcFuture = CompletableFuture.supplyAsync({
                 if (generation.get() != gen) return@supplyAsync null

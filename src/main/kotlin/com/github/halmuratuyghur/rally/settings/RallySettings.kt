@@ -78,7 +78,11 @@ class RallySettings : PersistentStateComponent<RallySettings.State> {
                     while (!apiKeyLoaded) {
                         val remaining = deadline - System.currentTimeMillis()
                         if (remaining <= 0) break
-                        apiKeyReady.wait(remaining)
+                        try { apiKeyReady.wait(remaining) }
+                        catch (_: InterruptedException) {
+                            Thread.currentThread().interrupt()
+                            break
+                        }
                     }
                 }
             }
