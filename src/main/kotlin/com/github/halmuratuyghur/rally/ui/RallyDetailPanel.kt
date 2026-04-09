@@ -317,7 +317,7 @@ class RallyDetailPanel(private val project: Project) : com.intellij.openapi.Disp
                     if (!resolvedNonNull.isNullOrBlank()) {
                         try { resolveInlineImages(resolvedNonNull, client, gen) } catch (_: Exception) { resolvedNonNull }
                     } else null
-                }, client.apiExecutor)
+                }, imageExecutor)
 
                 val stepsFuture = CompletableFuture.supplyAsync({
                     if (generation.get() != gen) return@supplyAsync null
@@ -380,7 +380,7 @@ class RallyDetailPanel(private val project: Project) : com.intellij.openapi.Disp
                         resolvedNonNull
                     }
                 } else null
-            }, client.apiExecutor)
+            }, imageExecutor)
 
             val tcFuture = CompletableFuture.supplyAsync({
                 if (generation.get() != gen) return@supplyAsync null
@@ -945,7 +945,9 @@ class RallyDetailPanel(private val project: Project) : com.intellij.openapi.Disp
     // ── Test Step Cell Renderer ────────────────────────────────
 
     private class StepCellRenderer : ListCellRenderer<RallyTestCaseStep> {
-        private val htmlTagPattern = Pattern.compile("<[^>]+>")
+        companion object {
+            private val htmlTagPattern = Pattern.compile("<[^>]+>")
+        }
         private val panel = JPanel(BorderLayout(8, 0)).apply { border = JBUI.Borders.empty(4, 6) }
         private val badgeLabel = JLabel().apply {
             font = font.deriveFont(Font.BOLD)

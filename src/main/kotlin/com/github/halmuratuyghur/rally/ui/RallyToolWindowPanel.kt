@@ -35,7 +35,6 @@ import java.awt.BorderLayout
 import java.awt.Color
 import java.awt.Component
 import java.awt.FlowLayout
-import java.awt.event.ActionEvent
 import java.awt.event.MouseAdapter
 import java.awt.event.MouseEvent
 import javax.swing.*
@@ -625,7 +624,7 @@ class RallyToolWindowPanel(private val project: Project) : Disposable {
             1 -> conditions[0]
             else -> conditions.reduce { acc, cond -> "($acc AND $cond)" }
         }
-        LOG.info("Rally query: $query (scope=$scope, iteration='$selectedIter')")
+        LOG.info("Rally query built (scope=$scope, iteration='$selectedIter', conditions=${conditions.size})")
         return query
     }
 
