@@ -52,7 +52,7 @@ class RallySettings : PersistentStateComponent<RallySettings.State> {
                 PasswordSafe.instance.set(credentialAttributes, Credentials(CREDENTIAL_USER, keyToMigrate))
             }
         } else {
-            synchronized(apiKeyReady) { apiKeyLoaded = false }
+            synchronized(apiKeyReady) { cachedApiKey = null; apiKeyLoaded = false }
             // Eagerly load the API key from PasswordSafe off-EDT
             ApplicationManager.getApplication().executeOnPooledThread {
                 val key = PasswordSafe.instance.getPassword(credentialAttributes) ?: ""

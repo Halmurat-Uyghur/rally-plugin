@@ -431,6 +431,7 @@ class RallyDetailPanel(private val project: Project) {
                         tabbedPane.setTitleAt(TAB_TEST_CASES, "Test Cases (${testCases.size})")
                     } else {
                         testCaseSummaryLabel.text = "Failed to load test cases"
+                        tabbedPane.setTitleAt(TAB_TEST_CASES, "Test Cases (!)")
                     }
                 }
             }.exceptionally { t -> LOG.warn("Detail panel test cases update failed", t); null }

@@ -142,36 +142,7 @@ class RallyApiClient(
         }
     }
 
-    /** Tracks in-flight fetches to deduplicate concurrent cache misses for the same key. */
-    private val inFlight = ConcurrentHashMap<String, CompletableFuture<Any?>>()
 
-    @Suppress("UNCHECKED_CAST")
-    private fun <T : Any> getOrCompute(key: String, fetch: () -> T?): T? {
-        getCached<T>(key)?.let { return it }
-
-        var isOwner = false
-        val future = inFlight.computeIfAbsent(key) {
-            isOwner = true
-            CompletableFuture()
-        }
-
-        if (isOwner) {
-            return try {
-                val result = fetch()
-                if (result != null) putCache(key, result)
-                future.complete(result)
-                result
-            } catch (e: Throwable) {
-                future.completeExceptionally(e)
-                throw e
-            } finally {
-                inFlight.remove(key)
-            }
-        } else {
-            try { future.join() } catch (_: Exception) {}
-            return getCached(key)
-        }
-    }
 
     /**
      * Clear all caches including images.
