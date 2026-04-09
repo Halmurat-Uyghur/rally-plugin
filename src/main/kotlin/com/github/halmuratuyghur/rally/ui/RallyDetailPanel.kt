@@ -23,11 +23,17 @@ import java.awt.event.MouseEvent
 import java.io.File
 import java.util.Base64
 import java.util.concurrent.CompletableFuture
+import java.util.concurrent.ExecutorService
+import java.util.concurrent.Executors
 import java.util.concurrent.atomic.AtomicLong
 import java.util.regex.Pattern
 import javax.swing.*
 
 class RallyDetailPanel(private val project: Project) {
+
+    private val imageExecutor: ExecutorService = Executors.newFixedThreadPool(4) { r ->
+        Thread(r, "rally-image-worker").apply { isDaemon = true }
+    }
 
     companion object {
         private val LOG = Logger.getInstance(RallyDetailPanel::class.java)
@@ -41,6 +47,22 @@ class RallyDetailPanel(private val project: Project) {
         private val COLOR_DEFINED = JBColor(Color(200, 120, 0), Color(255, 180, 80))
         private val COLOR_PASS = JBColor(Color(0, 128, 0), Color(100, 200, 100))
         private val COLOR_FAIL = JBColor(Color(180, 0, 0), Color(255, 100, 100))
+        private val COLOR_DIVIDER = JBColor(Color(80, 80, 80), Color(70, 70, 70))
+        private val EXTERNAL_SRC_PATTERN = Pattern.compile("""src="https?://[^"]*"""", Pattern.CASE_INSENSITIVE)
+        private val INLINE_IMG_PATTERN = Pattern.compile(
+            """src="((?:https?://[^/]+)?/slm/attachment/(\d+)/([^"]+))"""",
+            Pattern.CASE_INSENSITIVE
+        )
+
+        fun formatFileSize(bytes: Long?): String {
+            if (bytes == null || bytes <= 0) return ""
+            return when {
+                bytes < 1024 -> "$bytes B"
+                bytes < 1024 * 1024 -> String.format("%.1f KB", bytes / 1024.0)
+                bytes < 1024 * 1024 * 1024 -> String.format("%.1f MB", bytes / (1024.0 * 1024.0))
+                else -> String.format("%.1f GB", bytes / (1024.0 * 1024.0 * 1024.0))
+            }
+        }
     }
 
     val component: JPanel = JPanel(BorderLayout())
@@ -79,6 +101,13 @@ class RallyDetailPanel(private val project: Project) {
 
     /** Incremented on every showArtifact/clear call; background workers check this to bail out early. */
     private val generation = AtomicLong(0)
+    @Volatile private var disposed = false
+
+    fun dispose() {
+        disposed = true
+        generation.incrementAndGet()
+        imageExecutor.shutdownNow()
+    }
 
     // Header action buttons
     private val copyButton = JLabel(AllIcons.Actions.Copy).apply {
@@ -173,7 +202,7 @@ class RallyDetailPanel(private val project: Project) {
             override fun createDefaultDivider(): javax.swing.plaf.basic.BasicSplitPaneDivider {
                 return object : javax.swing.plaf.basic.BasicSplitPaneDivider(this) {
                     override fun paint(g: Graphics) {
-                        g.color = JBColor(Color(80, 80, 80), Color(70, 70, 70))
+                        g.color = COLOR_DIVIDER
                         g.fillRect(0, 0, width, height)
                     }
                 }
@@ -226,6 +255,7 @@ class RallyDetailPanel(private val project: Project) {
     }
 
     fun showArtifact(artifact: RallyArtifact?, client: RallyApiClient?) {
+        if (disposed) return
         if (artifact == null || client == null) {
             clear()
             return
@@ -299,15 +329,15 @@ class RallyDetailPanel(private val project: Project) {
 
                 descFuture.thenAccept { resolvedDesc ->
                     ApplicationManager.getApplication().invokeLater {
-                        if (generation.get() != gen) return@invokeLater
+                        if (generation.get() != gen || disposed) return@invokeLater
                         descriptionPane.text = wrapHtml(resolvedDesc ?: "<i>No description</i>")
                         descriptionPane.caretPosition = 0
                     }
-                }
+                }.exceptionally { t -> LOG.warn("Detail panel description update failed", t); null }
 
                 stepsFuture.thenAccept { steps ->
                     ApplicationManager.getApplication().invokeLater {
-                        if (generation.get() != gen) return@invokeLater
+                        if (generation.get() != gen || disposed) return@invokeLater
                         stepListModel.clear()
                         if (steps != null) {
                             steps.forEach { stepListModel.addElement(it) }
@@ -316,7 +346,7 @@ class RallyDetailPanel(private val project: Project) {
                             tabbedPane.setTitleAt(0, "Test Steps (0)")
                         }
                     }
-                }
+                }.exceptionally { t -> LOG.warn("Detail panel steps update failed", t); null }
             }
             return  // Skip the normal story/defect detail loading
         }
@@ -379,7 +409,7 @@ class RallyDetailPanel(private val project: Project) {
             // Update UI as each completes
             descFuture.thenAccept { resolvedDesc ->
                 ApplicationManager.getApplication().invokeLater {
-                    if (generation.get() != gen) return@invokeLater
+                    if (generation.get() != gen || disposed) return@invokeLater
                     if (!resolvedDesc.isNullOrBlank()) {
                         descriptionPane.text = wrapHtml(resolvedDesc)
                     } else {
@@ -387,11 +417,11 @@ class RallyDetailPanel(private val project: Project) {
                     }
                     descriptionPane.caretPosition = 0
                 }
-            }
+            }.exceptionally { t -> LOG.warn("Detail panel description update failed", t); null }
 
             tcFuture.thenAccept { testCases ->
                 ApplicationManager.getApplication().invokeLater {
-                    if (generation.get() != gen) return@invokeLater
+                    if (generation.get() != gen || disposed) return@invokeLater
                     testCaseListModel.clear()
                     if (testCases != null) {
                         testCaseListModel.addAll(testCases)
@@ -403,11 +433,11 @@ class RallyDetailPanel(private val project: Project) {
                         testCaseSummaryLabel.text = "Failed to load test cases"
                     }
                 }
-            }
+            }.exceptionally { t -> LOG.warn("Detail panel test cases update failed", t); null }
 
             taskFuture.thenAccept { tasks ->
                 ApplicationManager.getApplication().invokeLater {
-                    if (generation.get() != gen) return@invokeLater
+                    if (generation.get() != gen || disposed) return@invokeLater
                     taskListModel.clear()
                     if (tasks != null) {
                         taskListModel.addAll(tasks)
@@ -416,11 +446,11 @@ class RallyDetailPanel(private val project: Project) {
                         tabbedPane.setTitleAt(TAB_TASKS, "Tasks (!)")
                     }
                 }
-            }
+            }.exceptionally { t -> LOG.warn("Detail panel tasks update failed", t); null }
 
             attachFuture.thenAccept { attachments ->
                 ApplicationManager.getApplication().invokeLater {
-                    if (generation.get() != gen) return@invokeLater
+                    if (generation.get() != gen || disposed) return@invokeLater
                     attachmentListModel.clear()
                     if (attachments != null) {
                         attachmentListModel.addAll(attachments)
@@ -429,11 +459,12 @@ class RallyDetailPanel(private val project: Project) {
                         tabbedPane.setTitleAt(TAB_ATTACHMENTS, "Attachments (!)")
                     }
                 }
-            }
+            }.exceptionally { t -> LOG.warn("Detail panel attachments update failed", t); null }
         }
     }
 
     fun clear() {
+        if (disposed) return
         generation.incrementAndGet()
         currentArtifactRef = null
         currentArtifact = null
@@ -561,7 +592,7 @@ class RallyDetailPanel(private val project: Project) {
                 null
             }
             ApplicationManager.getApplication().invokeLater {
-                if (currentArtifactRef != artifactRef) return@invokeLater
+                if (disposed || currentArtifactRef != artifactRef) return@invokeLater
                 // Also check that the selected test case hasn't changed
                 val currentTcId = testCaseList.selectedValue?.formattedID
                 if (currentTcId != requestedTcId) return@invokeLater
@@ -654,7 +685,7 @@ class RallyDetailPanel(private val project: Project) {
             Messages.showErrorDialog(project, "No content reference for this attachment.", "Rally - Download Error")
             return
         }
-        val fileName = selected.name ?: "attachment"
+        val fileName = (selected.name ?: "attachment").replace(Regex("[/\\\\]"), "_")
 
         val descriptor = FileSaverDescriptor("Save Attachment", "Choose where to save the attachment")
         val wrapper = FileChooserFactory.getInstance().createSaveFileDialog(descriptor, project)
@@ -733,12 +764,7 @@ class RallyDetailPanel(private val project: Project) {
     private val maxInlineImages = 10
 
     private fun resolveInlineImages(html: String, client: RallyApiClient, gen: Long): String {
-        // Match src attributes pointing to Rally attachment URLs
-        val pattern = Pattern.compile(
-            """src="((?:https?://[^/]+)?/slm/attachment/(\d+)/([^"]+))"""",
-            Pattern.CASE_INSENSITIVE
-        )
-        val matcher = pattern.matcher(html)
+        val matcher = INLINE_IMG_PATTERN.matcher(html)
         if (!matcher.find()) return html
 
         matcher.reset()
@@ -783,7 +809,7 @@ class RallyDetailPanel(private val project: Project) {
                     LOG.warn("Failed to download inline image OID=${match.objectId} (${match.fileName})", e)
                     null
                 }
-            }, client.apiExecutor)
+            }, imageExecutor)
         }
         val results = futures.map { it.join() }
         if (generation.get() != gen) return html
@@ -796,18 +822,12 @@ class RallyDetailPanel(private val project: Project) {
             val replacement = match.fullMatch.replace(match.originalSrc, dataUri)
             sb.replace(match.start, match.end, replacement)
         }
-        return sb.toString()
+        val resolved = sb.toString()
+        // Neutralize any remaining external http(s) src attributes to prevent JTextPane network fetches
+        return EXTERNAL_SRC_PATTERN.matcher(resolved).replaceAll("""src="" """)
     }
 
-    private fun formatFileSize(bytes: Long?): String {
-        if (bytes == null || bytes <= 0) return ""
-        return when {
-            bytes < 1024 -> "$bytes B"
-            bytes < 1024 * 1024 -> String.format("%.1f KB", bytes / 1024.0)
-            bytes < 1024 * 1024 * 1024 -> String.format("%.1f MB", bytes / (1024.0 * 1024.0))
-            else -> String.format("%.1f GB", bytes / (1024.0 * 1024.0 * 1024.0))
-        }
-    }
+
 
     // ── Test Case Cell Renderer ─────────────────────────────────
 
@@ -974,7 +994,7 @@ class RallyDetailPanel(private val project: Project) {
 
     // ── Attachment Cell Renderer ─────────────────────────────────
 
-    private inner class AttachmentCellRenderer : ListCellRenderer<RallyAttachment> {
+    private class AttachmentCellRenderer : ListCellRenderer<RallyAttachment> {
         private val panel = JPanel(BorderLayout(8, 0)).apply { border = JBUI.Borders.empty(3, 6) }
         private val iconLabel = JLabel()
         private val textLabel = JLabel()

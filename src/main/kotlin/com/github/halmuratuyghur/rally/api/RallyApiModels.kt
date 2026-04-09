@@ -12,7 +12,7 @@ data class RallyQueryResult<T>(
 
 data class QueryResultData<T>(
     @SerializedName("Results")
-    val results: List<T>,
+    val results: List<T> = emptyList(),
 
     @SerializedName("TotalResultCount")
     val totalResultCount: Int,
@@ -322,6 +322,7 @@ data class RallyTestCase(
     @SerializedName("Owner")
     override val owner: RallyUser? = null,
 
+    @SerializedName("ScheduleState")
     override val scheduleState: String? = null,
 
     @SerializedName("State")

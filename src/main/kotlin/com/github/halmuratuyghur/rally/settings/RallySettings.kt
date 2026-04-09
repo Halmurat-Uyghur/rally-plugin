@@ -8,8 +8,6 @@ import com.intellij.openapi.application.ApplicationManager
 import com.intellij.openapi.components.PersistentStateComponent
 import com.intellij.openapi.components.State
 import com.intellij.openapi.components.Storage
-import java.util.concurrent.CountDownLatch
-import java.util.concurrent.TimeUnit
 
 @State(
     name = "com.github.halmuratuyghur.rally.settings.RallySettings",
@@ -32,7 +30,9 @@ class RallySettings : PersistentStateComponent<RallySettings.State> {
     private var myState = State()
     @Volatile
     private var cachedApiKey: String? = null
-    private val apiKeyLatch = CountDownLatch(1)
+    private val apiKeyReady = Object()
+    @Volatile
+    private var apiKeyLoaded = false
 
     override fun getState(): State = myState
 
@@ -43,16 +43,24 @@ class RallySettings : PersistentStateComponent<RallySettings.State> {
         if (state.apiKey.isNotBlank()) {
             val keyToMigrate = state.apiKey
             state.apiKey = ""
-            cachedApiKey = keyToMigrate
-            apiKeyLatch.countDown()
+            synchronized(apiKeyReady) {
+                cachedApiKey = keyToMigrate
+                apiKeyLoaded = true
+                apiKeyReady.notifyAll()
+            }
             ApplicationManager.getApplication().executeOnPooledThread {
                 PasswordSafe.instance.set(credentialAttributes, Credentials(CREDENTIAL_USER, keyToMigrate))
             }
         } else {
+            synchronized(apiKeyReady) { apiKeyLoaded = false }
             // Eagerly load the API key from PasswordSafe off-EDT
             ApplicationManager.getApplication().executeOnPooledThread {
-                cachedApiKey = PasswordSafe.instance.getPassword(credentialAttributes) ?: ""
-                apiKeyLatch.countDown()
+                val key = PasswordSafe.instance.getPassword(credentialAttributes) ?: ""
+                synchronized(apiKeyReady) {
+                    cachedApiKey = key
+                    apiKeyLoaded = true
+                    apiKeyReady.notifyAll()
+                }
             }
         }
     }
@@ -64,13 +72,24 @@ class RallySettings : PersistentStateComponent<RallySettings.State> {
 
     var apiKey: String
         get() {
-            if (cachedApiKey == null && !ApplicationManager.getApplication().isDispatchThread) {
-                apiKeyLatch.await(2, TimeUnit.SECONDS)
+            if (!ApplicationManager.getApplication().isDispatchThread) {
+                synchronized(apiKeyReady) {
+                    val deadline = System.currentTimeMillis() + 2_000L
+                    while (!apiKeyLoaded) {
+                        val remaining = deadline - System.currentTimeMillis()
+                        if (remaining <= 0) break
+                        apiKeyReady.wait(remaining)
+                    }
+                }
             }
             return cachedApiKey ?: ""
         }
         set(value) {
-            cachedApiKey = value
+            synchronized(apiKeyReady) {
+                cachedApiKey = value
+                apiKeyLoaded = true
+                apiKeyReady.notifyAll()
+            }
             ApplicationManager.getApplication().executeOnPooledThread {
                 PasswordSafe.instance.set(credentialAttributes, Credentials(CREDENTIAL_USER, value))
             }

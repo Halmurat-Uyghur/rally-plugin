@@ -34,6 +34,8 @@ class RallyExporter(private val client: RallyApiClient) {
             .serializeNulls()
             .create()
 
+        private val RE_UNSAFE_FILENAME = Regex("[^a-zA-Z0-9._\\-()\\[\\] ]")
+
         // Pre-compiled regex patterns for stripHtml (avoid re-creating per call during bulk export)
         private val RE_BR = Regex("<br\\s*/?>", RegexOption.IGNORE_CASE)
         private val RE_P_OPEN = Regex("<p[^>]*>", RegexOption.IGNORE_CASE)
@@ -44,7 +46,7 @@ class RallyExporter(private val client: RallyApiClient) {
     }
 
     /** Per-session cache for downloaded attachment paths (deduplicates across JSON+Markdown export). */
-    private val downloadedPaths = ConcurrentHashMap<String, String?>()
+    private val downloadedPaths = ConcurrentHashMap<String, String>()
 
     // ── Test Case Export ─────────────────────────────────────────
 
@@ -234,7 +236,6 @@ class RallyExporter(private val client: RallyApiClient) {
                     }
 
                     writer.write("\n---\n\n")
-                    writer.flush()
                     count++
                 } catch (e: Exception) {
                     LOG.warn("Failed to process $id for bulk export", e)
@@ -459,8 +460,7 @@ class RallyExporter(private val client: RallyApiClient) {
     }
 
     private fun sanitizeFileName(name: String): String {
-        // Strip path separators and parent-directory references to prevent traversal
-        val sanitized = name.replace(Regex("[/\\\\]"), "_").replace("..", "_")
+        val sanitized = name.replace(RE_UNSAFE_FILENAME, "_").trimStart('.')
         return sanitized.ifBlank { "unnamed" }
     }
 
@@ -496,7 +496,7 @@ class RallyExporter(private val client: RallyApiClient) {
             }
 
             // Final safety check: ensure resolved path is inside attachDir
-            if (!outputFile.canonicalPath.startsWith(attachDirPath.toFile().canonicalPath)) {
+            if (!outputFile.canonicalPath.startsWith(attachDirPath.toFile().canonicalPath + File.separator)) {
                 LOG.warn("Attachment filename resolved outside target directory: $fileName")
                 return null
             }
@@ -508,7 +508,7 @@ class RallyExporter(private val client: RallyApiClient) {
             path
         } catch (e: Exception) {
             LOG.warn("Failed to download attachment '$fileName'", e)
-            downloadedPaths[cacheKey] = null
+            // Don't cache failures — allow retry on transient errors
             null
         }
     }
@@ -556,6 +556,11 @@ class RallyExporter(private val client: RallyApiClient) {
             val fileBytes = client.downloadAttachment(imageUrl)
 
             val outputFile = File(imgDir, localFileName)
+            val canonicalImgDir = File(imgDir).canonicalPath
+            if (!outputFile.canonicalPath.startsWith(canonicalImgDir + File.separator)) {
+                LOG.warn("Image filename resolved outside target directory: $localFileName")
+                return null
+            }
             Files.write(outputFile.toPath(), fileBytes)
             LOG.info("Downloaded inline image: ${outputFile.absolutePath} (${fileBytes.size} bytes)")
             return outputFile.absolutePath

@@ -51,3 +51,8 @@ class RallyAuthenticationException(message: String, statusCode: Int = 401, respo
  */
 class RallyConnectionException(message: String, cause: Throwable? = null)
     : RallyApiException(message, cause ?: Exception(message))
+
+/**
+ * Exception for security violations (e.g., request to unexpected host)
+ */
+class RallySecurityException(message: String) : RallyApiException(message)

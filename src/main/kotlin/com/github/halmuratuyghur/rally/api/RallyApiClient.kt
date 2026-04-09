@@ -17,6 +17,7 @@ import java.time.Duration
 import java.util.Base64
 import java.util.Collections
 import java.util.LinkedHashMap
+import java.util.concurrent.CompletableFuture
 import java.util.concurrent.ConcurrentHashMap
 import java.util.concurrent.ExecutorService
 import java.util.concurrent.Executors
@@ -61,6 +62,29 @@ class RallyApiClient(
         url
     }
 
+    /** Pre-computed allowed host for security validation. */
+    private val allowedHost: String = run {
+        val host = try { URI(normalizedServerUrl).host } catch (_: Exception) { null }
+        host?.lowercase() ?: throw RallySecurityException("Cannot determine host from server URL: $normalizedServerUrl")
+    }
+
+    /**
+     * Validate that a URL targets the configured Rally server.
+     * Relative URLs (null host) pass through safely — they resolve against normalizedServerUrl.
+     */
+    private fun requireSameHost(url: String) {
+        val targetHost = try {
+            URI(url).host
+        } catch (_: Exception) {
+            throw RallySecurityException("Malformed URL rejected: $url")
+        }
+        if (targetHost != null && targetHost.lowercase() != allowedHost) {
+            throw RallySecurityException(
+                "Security: refusing request to external host '$targetHost' (expected '$allowedHost')"
+            )
+        }
+    }
+
     // ── Cache ────────────────────────────────────────────────────
 
     private data class CacheEntry<T>(val data: T, val timestamp: Long)
@@ -101,17 +125,52 @@ class RallyApiClient(
 
     @Suppress("UNCHECKED_CAST")
     private fun <T> getCached(key: String): T? {
-        val entry = queryCache[key] ?: return null
-        val ttl = bulkModeTtlMs ?: queryTtlMs
-        if (System.currentTimeMillis() - entry.timestamp > ttl) {
-            queryCache.remove(key)
-            return null
+        synchronized(queryCache) {
+            val entry = queryCache[key] ?: return null
+            val ttl = bulkModeTtlMs ?: queryTtlMs
+            if (System.currentTimeMillis() - entry.timestamp > ttl) {
+                queryCache.remove(key)
+                return null
+            }
+            return entry.data as? T
         }
-        return entry.data as? T
     }
 
     private fun <T : Any> putCache(key: String, data: T) {
-        queryCache[key] = CacheEntry(data, System.currentTimeMillis())
+        synchronized(queryCache) {
+            queryCache[key] = CacheEntry(data, System.currentTimeMillis())
+        }
+    }
+
+    /** Tracks in-flight fetches to deduplicate concurrent cache misses for the same key. */
+    private val inFlight = ConcurrentHashMap<String, CompletableFuture<Any?>>()
+
+    @Suppress("UNCHECKED_CAST")
+    private fun <T : Any> getOrCompute(key: String, fetch: () -> T?): T? {
+        getCached<T>(key)?.let { return it }
+
+        var isOwner = false
+        val future = inFlight.computeIfAbsent(key) {
+            isOwner = true
+            CompletableFuture()
+        }
+
+        if (isOwner) {
+            return try {
+                val result = fetch()
+                if (result != null) putCache(key, result)
+                future.complete(result)
+                result
+            } catch (e: Throwable) {
+                future.completeExceptionally(e)
+                throw e
+            } finally {
+                inFlight.remove(key)
+            }
+        } else {
+            try { future.join() } catch (_: Exception) {}
+            return getCached(key)
+        }
     }
 
     /**
@@ -678,7 +737,11 @@ class RallyApiClient(
             } catch (e: Exception) {
                 lastException = e
                 if (attempt < MAX_RETRIES) {
-                    Thread.sleep(backoffMs(attempt))
+                    try { Thread.sleep(backoffMs(attempt)) }
+                    catch (ie: InterruptedException) {
+                        Thread.currentThread().interrupt()
+                        throw RallyConnectionException("Interrupted during retry backoff", ie)
+                    }
                     continue
                 }
                 throw RallyConnectionException("Failed to connect to Rally server: ${e.message}", e)
@@ -691,7 +754,11 @@ class RallyApiClient(
             // Respect Retry-After header if present, otherwise use exponential backoff
             val retryAfter = response.headers().firstValueAsLong("Retry-After").orElse(-1)
             val delayMs = if (retryAfter > 0) (retryAfter * 1000).coerceAtMost(30_000) else backoffMs(attempt)
-            Thread.sleep(delayMs)
+            try { Thread.sleep(delayMs) }
+            catch (ie: InterruptedException) {
+                Thread.currentThread().interrupt()
+                throw RallyConnectionException("Interrupted during retry backoff", ie)
+            }
         }
         // Should not reach here, but satisfy the compiler
         throw RallyConnectionException("Failed after $MAX_RETRIES retries", lastException ?: Exception("Unknown error"))
@@ -705,7 +772,7 @@ class RallyApiClient(
      */
     fun updateArtifactState(artifactRef: String, artifactType: String, newState: String) {
         val stateField = if (artifactType == "Task") "State" else "ScheduleState"
-        val body = """{"$artifactType":{"$stateField":"$newState"}}"""
+        val body = """{"$artifactType":${gson.toJson(mapOf(stateField to newState))}}"""
         val response = executePost(artifactRef, body)
         handleResponse(response)
 
@@ -726,7 +793,7 @@ class RallyApiClient(
      * @param ownerRef Full API URL ref of the user
      */
     fun updateArtifactOwner(artifactRef: String, artifactType: String, ownerRef: String) {
-        val body = """{"$artifactType":{"Owner":"$ownerRef"}}"""
+        val body = """{"$artifactType":${gson.toJson(mapOf("Owner" to ownerRef))}}"""
         val response = executePost(artifactRef, body)
         handleResponse(response)
 
@@ -1011,9 +1078,9 @@ class RallyApiClient(
      * Returns raw bytes.
      */
     fun downloadAttachment(url: String): ByteArray {
+        requireSameHost(url)
         // Small images rarely change, so keep a bounded in-memory cache for repeat views
         imageCache[url]?.let { return it }
-
         val request = HttpRequest.newBuilder()
             .uri(URI.create(url))
             .header(ZSESSION_HEADER, apiKey)
@@ -1035,15 +1102,17 @@ class RallyApiClient(
         if (bytes.size.toLong() > maxCacheableImageBytes) {
             return bytes
         }
-        // Evict 25% of image cache if over memory limit
-        if (imageCacheBytes.get() + bytes.size > maxImageCacheBytes) {
-            val toRemove = imageCache.keys.take(imageCache.size / 4)
-            toRemove.forEach { key ->
-                imageCache.remove(key)?.let { imageCacheBytes.addAndGet(-it.size.toLong()) }
+        synchronized(imageCache) {
+            imageCache[url]?.let { return bytes }
+            if (imageCacheBytes.get() + bytes.size > maxImageCacheBytes) {
+                val toRemove = imageCache.keys.take(imageCache.size / 4)
+                toRemove.forEach { key ->
+                    imageCache.remove(key)?.let { imageCacheBytes.addAndGet(-it.size.toLong()) }
+                }
             }
+            imageCache[url] = bytes
+            imageCacheBytes.addAndGet(bytes.size.toLong())
         }
-        imageCache[url] = bytes
-        imageCacheBytes.addAndGet(bytes.size.toLong())
         return bytes
     }
 

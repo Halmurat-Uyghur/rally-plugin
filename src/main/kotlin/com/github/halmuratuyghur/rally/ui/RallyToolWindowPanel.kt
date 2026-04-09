@@ -40,6 +40,8 @@ import java.awt.event.MouseAdapter
 import java.awt.event.MouseEvent
 import javax.swing.*
 
+private val COLOR_DIVIDER = JBColor(Color(80, 80, 80), Color(70, 70, 70))
+
 class RallyToolWindowPanel(private val project: Project) : Disposable {
 
     companion object {
@@ -734,6 +736,7 @@ class RallyToolWindowPanel(private val project: Project) : Disposable {
     // ── Search Filter ────────────────────────────────────────────
 
     private fun applySearchFilter() {
+        if (disposed) return
         val query = searchField.text.trim()
 
         if (query.isBlank()) {
@@ -1430,7 +1433,7 @@ class RallyToolWindowPanel(private val project: Project) : Disposable {
         }
         searchDebounceTimer.stop()
         activeServerSearch = null
-        detailPanel.clear()
+        detailPanel.dispose()
     }
 
     // ── Client ───────────────────────────────────────────────────
@@ -1533,7 +1536,7 @@ private class ThinDividerSplitPaneUI : javax.swing.plaf.basic.BasicSplitPaneUI()
     override fun createDefaultDivider(): javax.swing.plaf.basic.BasicSplitPaneDivider {
         return object : javax.swing.plaf.basic.BasicSplitPaneDivider(this) {
             override fun paint(g: java.awt.Graphics) {
-                g.color = JBColor(Color(80, 80, 80), Color(70, 70, 70))
+                g.color = COLOR_DIVIDER
                 g.fillRect(0, 0, width, height)
             }
         }
