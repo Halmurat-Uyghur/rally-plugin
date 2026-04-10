@@ -61,7 +61,6 @@ class RallyToolWindowPanel(private val project: Project) : Disposable {
             "In-Progress",
             "Completed",
             "Accepted",
-            "Deployed",
             "Active"
         )
     }
@@ -641,7 +640,7 @@ class RallyToolWindowPanel(private val project: Project) : Disposable {
         return when (stateFilter) {
             "Active" -> scopeFiltered.filter {
                 val state = it.scheduleState ?: it.state ?: ""
-                state !in setOf("Accepted", "Completed", "Deployed", "Idea")
+                state !in setOf("Accepted", "Completed", "Idea")
             }
             "Any State" -> scopeFiltered
             else -> scopeFiltered.filter {
@@ -1473,7 +1472,7 @@ class RallyToolWindowPanel(private val project: Project) : Disposable {
             private val COLOR_IN_PROGRESS = JBColor(Color(0, 128, 0), Color(100, 200, 100))
             private val COLOR_COMPLETED = JBColor(Color(0, 0, 180), Color(100, 150, 255))
             private val COLOR_DEFINED = JBColor(Color(200, 120, 0), Color(255, 180, 80))
-            private val COLOR_PASS = JBColor(Color(0, 128, 0), Color(100, 200, 100))
+            private val COLOR_PASS = JBColor(Color(0, 100, 180), Color(80, 180, 255))
             private val COLOR_FAIL = JBColor(Color(180, 0, 0), Color(255, 100, 100))
         }
 

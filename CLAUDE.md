@@ -8,9 +8,9 @@ IntelliJ IDEA plugin that provides a **Tool Window** for browsing and managing R
 
 - **Language**: Kotlin 1.9.25 (JVM 17)
 - **Build**: Gradle with Kotlin DSL, `org.jetbrains.intellij` plugin 1.17.4
-- **Target IDE**: IntelliJ IDEA Community 2024.1 (builds 241–243.*)
+- **Target IDE**: IntelliJ IDEA Community 2024.1 (builds 241–253.*)
 - **Dependencies**: Gson 2.10.1 (JSON), JUnit 4.13.2 (tests)
-- **Plugin ID**: `com.github.rally` (NOT `com.intellij.*` — that prefix is reserved by JetBrains)
+- **Plugin ID**: `com.github.halmuratuyghur.rally` (NOT `com.intellij.*` — that prefix is reserved by JetBrains)
 
 ## Architecture
 
@@ -49,7 +49,7 @@ src/main/kotlin/com/github/halmuratuyghur/rally/
 - **Client-side state filtering** — because ScheduleState vs State differs by artifact type, filter queries for state are applied client-side after fetching
 - **Server-side owner filtering** — `(Owner.UserName = "...")` is applied as a Rally query
 - **Workspace/Project refs** — Rally WSAPI requires full API URLs for workspace/project params. The `normalizeRef()` method in RallyApiClient handles conversion from bare IDs, ref paths, or full URLs
-- **Iteration deduplication** — Rally returns the same iteration per project; deduplicated with `distinctBy { it.name }`
+- **Iteration filtering** — Iterations are scoped to the selected project via server-side project filtering in `queryIterations()`
 - **Sandbox persistence** — Gradle sandbox moved to `.sandbox/` (outside `build/`) so settings survive `./gradlew clean`
 - **Generic plugin design** — No workflow-specific or company-specific custom fields hardcoded. Only standard Rally fields (Method, ScheduleState, etc.) are used
 
@@ -60,7 +60,7 @@ src/main/kotlin/com/github/halmuratuyghur/rally/
 | **Caching** | LRU query cache (500 entries, 2-min TTL), bounded image cache (10 MB cap) | Eliminates redundant API calls without unbounded heap growth |
 | **List queries** | `LIST_FIELDS` excludes Description field | Smaller payloads for 200+ items |
 | **Lazy description** | `fetchDescription()` on demand when detail panel opens | Faster initial list load |
-| **Parallel list** | User stories + defects fetched concurrently in `queryAllArtifacts` | ~2x faster list load |
+| **Parallel list** | User stories + defects fetched sequentially in `queryAllArtifacts` (changed from parallel to prevent thread-pool deadlock) | Deadlock-safe list load |
 | **Parallel detail** | Description + test cases + tasks + attachments via CompletableFuture | ~3-4x faster detail load |
 | **Parallel sprint** | Sprint summary loads alongside artifact list | Removes serial bottleneck |
 | **HTTP/2** | `HttpClient.Version.HTTP_2` for connection multiplexing | Better throughput for parallel requests |
@@ -80,7 +80,7 @@ src/main/kotlin/com/github/halmuratuyghur/rally/
 - Test cases use `WorkProduct` ref to link to parent user stories/defects
 - Attachment content is fetched via a Content ref that returns base64-encoded data
 - Inline images in descriptions use `/slm/attachment/<OID>/<filename>` URLs, downloaded via zsessionid auth
-- Iterations are returned per-project, causing duplicates when querying at workspace level — must deduplicate by name
+- Iterations are scoped per-project; the plugin uses server-side project filtering to avoid duplicates
 
 ## Build & Run
 
@@ -98,7 +98,7 @@ All Tickets, My Tickets, User Stories, Defects, Test Cases, Recent Activity
 
 ## State Filter Options
 
-Any State, Idea, Defined, In-Progress, Completed, Accepted, Deployed, Active (excludes Accepted/Completed/Deployed/Idea)
+Any State, Idea, Defined, In-Progress, Completed, Accepted, Active (excludes Accepted/Completed/Idea)
 
 ## What's Implemented
 
@@ -130,7 +130,7 @@ Any State, Idea, Defined, In-Progress, Completed, Accepted, Deployed, Active (ex
 | `queryUserStories()` | Query user stories with filters |
 | `queryDefects()` | Query defects with filters |
 | `queryTasks()` | Query tasks with filters |
-| `queryAllArtifacts()` | Combined user stories + defects (parallel, cached) |
+| `queryAllArtifacts()` | Combined user stories + defects (sequential, cached) |
 | `queryAllTestCases()` | Query all test cases in workspace/project |
 | `queryTestCases(workProductRef)` | Test cases linked to a user story/defect (cached) |
 | `queryTasksForWorkProduct(ref)` | Tasks linked to a user story/defect (cached) |
@@ -152,6 +152,9 @@ Any State, Idea, Defined, In-Progress, Completed, Accepted, Deployed, Active (ex
 | `getUserByUsername(username)` | Lookup user by email |
 | `clearCache()` / `clearArtifactCache()` | Cache invalidation |
 | `enterBulkMode()` / `exitBulkMode()` | Extended cache TTL for exports |
+| `getCurrentUser()` | Get authenticated user info |
+| `buildWebUrl(artifact)` | Construct Rally web UI URL |
+| `queryIterationArtifacts(name)` | Artifacts in a named iteration |
 
 ## Git Commit Rules
 
@@ -161,4 +164,4 @@ Any State, Idea, Defined, In-Progress, Completed, Accepted, Deployed, Active (ex
 ## Not Yet Implemented
 
 - Create Test Case dialog
-- Bulk Export (consolidated JSON/Markdown for all loaded artifacts)
+- Bulk Export UI (backend implemented in RallyExporter but no UI entry point)

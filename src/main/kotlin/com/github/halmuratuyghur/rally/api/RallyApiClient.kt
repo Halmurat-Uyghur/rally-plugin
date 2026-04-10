@@ -205,7 +205,10 @@ class RallyApiClient(
             "State",
             "Project",
             "Iteration",
-            "PlanEstimate"
+            "PlanEstimate",
+            "Severity",
+            "Priority",
+            "Environment"
         )
 
         // Fields for detail queries (includes Description)
@@ -508,10 +511,14 @@ class RallyApiClient(
             formattedId.startsWith("TA", ignoreCase = true) ->
                 "task" to object : TypeToken<RallyQueryResult<RallyTaskItem>>() {}.type
 
+            formattedId.startsWith("TC", ignoreCase = true) ->
+                "testcase" to object : TypeToken<RallyQueryResult<RallyTestCase>>() {}.type
+
             else -> return null
         }
 
-        val query = "(FormattedID = \"$formattedId\")"
+        val safeId = escapeQueryValue(formattedId)
+        val query = "(FormattedID = \"$safeId\")"
         val url = buildApiUrl(endpoint) + "?" + buildQuery(query, 1, fields = DETAIL_FIELDS)
 
         return try {
@@ -597,7 +604,7 @@ class RallyApiClient(
         getCached<List<RallyArtifact>>(cacheKey)?.let { return it }
 
         val safeText = escapeQueryValue(searchText)
-        val query = "((Name contains \"$safeText\") OR (FormattedID contains \"$safeText\"))"
+        val query = "((Name contains \"$safeText\") OR (FormattedID = \"$safeText\"))"
 
         if (scope == "Test Cases") {
             val tcResults: List<RallyArtifact> = queryAllTestCases(query, pageSize, maxResults)
@@ -931,7 +938,8 @@ class RallyApiClient(
         val cacheKey = "teststeps:$testCaseFormattedId"
         getCached<List<RallyTestCaseStep>>(cacheKey)?.let { return it }
 
-        val query = "(TestCase.FormattedID = \"$testCaseFormattedId\")"
+        val safeId = escapeQueryValue(testCaseFormattedId)
+        val query = "(TestCase.FormattedID = \"$safeId\")"
         val encodedQuery = URLEncoder.encode(query, StandardCharsets.UTF_8)
 
         var url = buildApiUrl("testcasestep") +
@@ -958,7 +966,8 @@ class RallyApiClient(
         val cacheKey = "attachments:$artifactFormattedId"
         getCached<List<RallyAttachment>>(cacheKey)?.let { return it }
 
-        val query = "(Artifact.FormattedID = \"$artifactFormattedId\")"
+        val safeId = escapeQueryValue(artifactFormattedId)
+        val query = "(Artifact.FormattedID = \"$safeId\")"
         val encodedQuery = URLEncoder.encode(query, StandardCharsets.UTF_8)
 
         var url = buildApiUrl("attachment") +
@@ -985,7 +994,8 @@ class RallyApiClient(
         val cacheKey = "testcase:id:$formattedId"
         getCached<RallyTestCase>(cacheKey)?.let { return it }
 
-        val query = "(FormattedID = \"$formattedId\")"
+        val safeId = escapeQueryValue(formattedId)
+        val query = "(FormattedID = \"$safeId\")"
         val encodedQuery = URLEncoder.encode(query, StandardCharsets.UTF_8)
 
         var url = buildApiUrl("testcase") +

@@ -45,7 +45,7 @@ class RallyDetailPanel(private val project: Project) : com.intellij.openapi.Disp
         private val COLOR_IN_PROGRESS = JBColor(Color(0, 128, 0), Color(100, 200, 100))
         private val COLOR_COMPLETED = JBColor(Color(0, 0, 180), Color(100, 150, 255))
         private val COLOR_DEFINED = JBColor(Color(200, 120, 0), Color(255, 180, 80))
-        private val COLOR_PASS = JBColor(Color(0, 128, 0), Color(100, 200, 100))
+        private val COLOR_PASS = JBColor(Color(0, 100, 180), Color(80, 180, 255))
         private val COLOR_FAIL = JBColor(Color(180, 0, 0), Color(255, 100, 100))
         private val COLOR_DIVIDER = JBColor(Color(80, 80, 80), Color(70, 70, 70))
         private val EXTERNAL_SRC_PATTERN = Pattern.compile("""src="https?://[^"]*"""", Pattern.CASE_INSENSITIVE)
@@ -978,7 +978,7 @@ class RallyDetailPanel(private val project: Project) : com.intellij.openapi.Disp
         ): Component {
             panel.background = if (isSelected) list.selectionBackground else list.background
 
-            badgeLabel.text = "#${index + 1}"
+            badgeLabel.text = "#${value.stepIndex ?: (index + 1)}"
             badgeLabel.foreground = if (isSelected) list.selectionForeground else list.foreground
 
             val inputText = stripHtml(value.input ?: "")
