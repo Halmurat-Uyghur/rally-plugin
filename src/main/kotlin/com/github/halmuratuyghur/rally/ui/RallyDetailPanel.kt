@@ -11,6 +11,7 @@ import com.intellij.openapi.ui.Messages
 import com.github.halmuratuyghur.rally.api.*
 import com.github.halmuratuyghur.rally.export.RallyExporter
 import com.github.halmuratuyghur.rally.settings.RallySettings
+import com.github.halmuratuyghur.rally.util.RallyHtmlUtils
 import com.intellij.ui.JBColor
 import com.intellij.ui.components.JBLabel
 import com.intellij.ui.components.JBList
@@ -41,18 +42,8 @@ class RallyDetailPanel(private val project: Project) : com.intellij.openapi.Disp
         private const val TAB_TASKS = 1
         private const val TAB_ATTACHMENTS = 2
 
-        // Pre-allocated colors to avoid creating JBColor instances on every cell render
-        private val COLOR_IN_PROGRESS = JBColor(Color(0, 128, 0), Color(100, 200, 100))
-        private val COLOR_COMPLETED = JBColor(Color(0, 0, 180), Color(100, 150, 255))
-        private val COLOR_DEFINED = JBColor(Color(200, 120, 0), Color(255, 180, 80))
-        private val COLOR_PASS = JBColor(Color(0, 100, 180), Color(80, 180, 255))
-        private val COLOR_FAIL = JBColor(Color(180, 0, 0), Color(255, 100, 100))
-        private val COLOR_DIVIDER = JBColor(Color(80, 80, 80), Color(70, 70, 70))
+        // Colors are defined in RallyColors object
         private val EXTERNAL_SRC_PATTERN = Pattern.compile("""src="https?://[^"]*"""", Pattern.CASE_INSENSITIVE)
-        private val INLINE_IMG_PATTERN = Pattern.compile(
-            """src="((?:https?://[^/]+)?/slm/attachment/(\d+)/([^"]+))"""",
-            Pattern.CASE_INSENSITIVE
-        )
 
         fun formatFileSize(bytes: Long?): String {
             if (bytes == null || bytes <= 0) return ""
@@ -207,7 +198,7 @@ class RallyDetailPanel(private val project: Project) : com.intellij.openapi.Disp
             override fun createDefaultDivider(): javax.swing.plaf.basic.BasicSplitPaneDivider {
                 return object : javax.swing.plaf.basic.BasicSplitPaneDivider(this) {
                     override fun paint(g: Graphics) {
-                        g.color = COLOR_DIVIDER
+                        g.color = RallyColors.DIVIDER
                         g.fillRect(0, 0, width, height)
                     }
                 }
@@ -801,10 +792,10 @@ class RallyDetailPanel(private val project: Project) : com.intellij.openapi.Disp
     }
 
     private fun stateColor(state: String): Color = when (state) {
-        "In-Progress" -> COLOR_IN_PROGRESS
-        "Completed" -> COLOR_COMPLETED
+        "In-Progress" -> RallyColors.IN_PROGRESS
+        "Completed" -> RallyColors.COMPLETED
         "Accepted" -> JBColor.GRAY
-        "Defined" -> COLOR_DEFINED
+        "Defined" -> RallyColors.DEFINED
         else -> JBColor.DARK_GRAY
     }
 
@@ -820,7 +811,7 @@ class RallyDetailPanel(private val project: Project) : com.intellij.openapi.Disp
     private val maxInlineImages = 10
 
     private fun resolveInlineImages(html: String, client: RallyApiClient, gen: Long): String {
-        val matcher = INLINE_IMG_PATTERN.matcher(html)
+        val matcher = RallyHtmlUtils.INLINE_IMG_PATTERN.matcher(html)
         if (!matcher.find()) return html
 
         matcher.reset()
@@ -920,17 +911,17 @@ class RallyDetailPanel(private val project: Project) : com.intellij.openapi.Disp
             val method = value.method ?: "Manual"
             methodLabel.text = method
             methodLabel.foreground = if (isSelected) list.selectionForeground else if (method == "Automated") {
-                COLOR_IN_PROGRESS
+                RallyColors.IN_PROGRESS
             } else {
-                COLOR_DEFINED
+                RallyColors.DEFINED
             }
 
             val verdict = value.lastVerdict ?: ""
             verdictLabel.isVisible = verdict.isNotBlank()
             verdictLabel.text = verdict
             verdictLabel.foreground = if (isSelected) list.selectionForeground else when (verdict) {
-                "Pass" -> COLOR_PASS
-                "Fail" -> COLOR_FAIL
+                "Pass" -> RallyColors.PASS
+                "Fail" -> RallyColors.FAIL
                 else -> JBColor.GRAY
             }
 
@@ -974,9 +965,9 @@ class RallyDetailPanel(private val project: Project) : com.intellij.openapi.Disp
             stateLabel.isVisible = state.isNotBlank()
             stateLabel.text = state
             stateLabel.foreground = if (isSelected) list.selectionForeground else when (state) {
-                "In-Progress" -> COLOR_IN_PROGRESS
-                "Completed" -> COLOR_COMPLETED
-                "Defined" -> COLOR_DEFINED
+                "In-Progress" -> RallyColors.IN_PROGRESS
+                "Completed" -> RallyColors.COMPLETED
+                "Defined" -> RallyColors.DEFINED
                 else -> JBColor.DARK_GRAY
             }
 

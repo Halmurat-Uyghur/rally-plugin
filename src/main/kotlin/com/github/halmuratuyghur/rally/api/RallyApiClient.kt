@@ -450,19 +450,6 @@ class RallyApiClient(
     }
 
     /**
-     * Query Tasks
-     */
-    fun queryTasks(query: String? = null, pageSize: Int = DEFAULT_PAGE_SIZE, maxResults: Int = MAX_PAGE_SIZE): List<RallyTaskItem> {
-        val cacheKey = "tasks:${query}|${pageSize}|${maxResults}|${workspaceRef}|${projectRef}"
-        getCached<List<RallyTaskItem>>(cacheKey)?.let { return it }
-
-        val type = object : TypeToken<RallyQueryResult<RallyTaskItem>>() {}.type
-        val results: List<RallyTaskItem> = queryAllPages("task", type, query, pageSize, maxResults)
-        putCache(cacheKey, results)
-        return results
-    }
-
-    /**
      * Fetch the Description field for a single artifact by ref URL.
      * Returns the HTML description or null.
      */
@@ -1014,32 +1001,6 @@ class RallyApiClient(
         val tc = result.queryResult.safeResults.firstOrNull()
         if (tc != null) putCache(cacheKey, tc)
         return tc
-    }
-
-    /**
-     * Query all non-automated test cases.
-     */
-    fun queryUnautomatedTestCases(pageSize: Int = DEFAULT_PAGE_SIZE): List<RallyTestCase> {
-        val query = "(Method != \"Automated\")"
-        val encodedQuery = URLEncoder.encode(query, StandardCharsets.UTF_8)
-
-        var url = buildApiUrl("testcase") +
-                "?query=$encodedQuery&fetch=FormattedID,Name,Method,Type,LastVerdict,Owner,WorkProduct,ObjectID,_ref" +
-                "&pagesize=$pageSize&order=${URLEncoder.encode("FormattedID ASC", StandardCharsets.UTF_8)}"
-
-        if (!workspaceRef.isNullOrBlank()) {
-            url += "&workspace=${URLEncoder.encode(normalizeRef("workspace", workspaceRef!!), StandardCharsets.UTF_8)}"
-        }
-        if (!projectRef.isNullOrBlank()) {
-            url += "&project=${URLEncoder.encode(normalizeRef("project", projectRef!!), StandardCharsets.UTF_8)}"
-        }
-
-        val response = executeGet(url)
-        handleResponse(response)
-
-        val type = object : TypeToken<RallyQueryResult<RallyTestCase>>() {}.type
-        val result: RallyQueryResult<RallyTestCase> = gson.fromJson(response.body(), type)
-        return result.queryResult.safeResults
     }
 
     /**

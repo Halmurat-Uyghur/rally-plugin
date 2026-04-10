@@ -4,6 +4,7 @@ import com.intellij.openapi.diagnostic.Logger
 import com.github.halmuratuyghur.rally.api.RallyApiClient
 import com.github.halmuratuyghur.rally.api.RallyAttachment
 import com.github.halmuratuyghur.rally.api.RallyTestCaseStep
+import com.github.halmuratuyghur.rally.util.RallyHtmlUtils
 import com.google.gson.GsonBuilder
 import com.google.gson.JsonArray
 import com.google.gson.JsonObject
@@ -17,17 +18,11 @@ import java.util.concurrent.CompletableFuture
 import java.util.concurrent.ConcurrentHashMap
 import java.util.concurrent.Semaphore
 import java.util.concurrent.atomic.AtomicInteger
-import java.util.regex.Pattern
 
 class RallyExporter(private val client: RallyApiClient) {
 
     companion object {
         private val LOG = Logger.getInstance(RallyExporter::class.java)
-
-        private val INLINE_IMG_PATTERN = Pattern.compile(
-            """src="((?:https?://[^/]+)?/slm/attachment/(\d+)/([^"]+))"""",
-            Pattern.CASE_INSENSITIVE
-        )
 
         private val gson = GsonBuilder()
             .setPrettyPrinting()
@@ -510,7 +505,7 @@ class RallyExporter(private val client: RallyApiClient) {
     fun downloadInlineImages(html: String, artifactId: String, outputDir: String): String {
         if (html.isBlank()) return html
 
-        val matcher = INLINE_IMG_PATTERN.matcher(html)
+        val matcher = RallyHtmlUtils.INLINE_IMG_PATTERN.matcher(html)
         if (!matcher.find()) return html
 
         matcher.reset()
