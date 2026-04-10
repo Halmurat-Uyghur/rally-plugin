@@ -9,8 +9,11 @@ import com.intellij.openapi.diagnostic.Logger
 import com.intellij.openapi.project.Project
 import com.intellij.openapi.ui.ComboBox
 import com.intellij.openapi.ui.DialogWrapper
+import com.intellij.openapi.ui.MessageType
 import com.intellij.openapi.ui.Messages
 import com.intellij.openapi.ui.ValidationInfo
+import com.intellij.openapi.ui.popup.Balloon
+import com.intellij.openapi.ui.popup.JBPopupFactory
 import com.github.halmuratuyghur.rally.api.RallyApiClient
 import com.github.halmuratuyghur.rally.api.RallyArtifact
 import com.github.halmuratuyghur.rally.api.RallyDefect
@@ -23,6 +26,7 @@ import com.github.halmuratuyghur.rally.settings.RallySettings
 
 import git4idea.branch.GitBrancher
 import git4idea.repo.GitRepositoryManager
+import com.intellij.ui.awt.RelativePoint
 import com.intellij.ui.JBColor
 import com.intellij.ui.SearchTextField
 import com.intellij.ui.components.JBLabel
@@ -35,6 +39,8 @@ import java.awt.BorderLayout
 import java.awt.Color
 import java.awt.Component
 import java.awt.FlowLayout
+import java.awt.event.KeyAdapter
+import java.awt.event.KeyEvent
 import java.awt.event.MouseAdapter
 import java.awt.event.MouseEvent
 import javax.swing.*
@@ -77,7 +83,7 @@ class RallyToolWindowPanel(private val project: Project) : Disposable {
     private val statsLabel = JBLabel("0 items")
     private val sprintLabel = JBLabel("")
     private val statusLabel = JBLabel("Ready")
-    private val startWorkingButton = JButton("Start Working", AllIcons.Actions.Execute).apply { isFocusable = false }
+    private val startWorkingButton = JButton("Start Working", AllIcons.Actions.Execute).apply { isFocusable = true }
 
 
     private val detailPanel = RallyDetailPanel(project)
@@ -208,6 +214,7 @@ class RallyToolWindowPanel(private val project: Project) : Disposable {
         filterPanel.add(iterationCombo)
         filterPanel.add(JBLabel("Search:"))
         searchField.preferredSize = java.awt.Dimension(200, searchField.preferredSize.height)
+        searchField.textEditor.emptyText.text = "Search by name or ID..."
         filterPanel.add(searchField)
 
         // Top section
@@ -247,7 +254,7 @@ class RallyToolWindowPanel(private val project: Project) : Disposable {
 
     private fun createButton(text: String, icon: Icon, action: () -> Unit): JButton {
         return JButton(text, icon).apply {
-            isFocusable = false
+            isFocusable = true
             addActionListener { action() }
         }
     }
@@ -336,6 +343,15 @@ class RallyToolWindowPanel(private val project: Project) : Disposable {
 
             override fun mouseReleased(e: MouseEvent) {
                 if (e.isPopupTrigger) showContextMenu(e)
+            }
+        })
+
+        // Enter key to open in browser (same as double-click)
+        artifactList.addKeyListener(object : KeyAdapter() {
+            override fun keyPressed(e: KeyEvent) {
+                if (e.keyCode == KeyEvent.VK_ENTER) {
+                    openInBrowser()
+                }
             }
         })
     }
@@ -489,8 +505,15 @@ class RallyToolWindowPanel(private val project: Project) : Disposable {
                         loadTickets()
                     } else {
                         statusLabel.icon = AllIcons.General.Error
-                        statusLabel.text = "Error"
-                        artifactList.emptyText.text = "Error: ${e.message}"
+                        val errorMsg = when {
+                            e.message?.contains("401") == true || e.message?.contains("403") == true -> "Auth error"
+                            e.message?.contains("429") == true -> "Rate limited"
+                            e is java.net.ConnectException || e is java.net.UnknownHostException -> "Network error"
+                            e.message?.contains("timeout", ignoreCase = true) == true -> "Timeout"
+                            else -> "Error"
+                        }
+                        statusLabel.text = errorMsg
+                        artifactList.emptyText.text = "$errorMsg: ${e.message}"
                     }
                 }
             }
@@ -721,13 +744,37 @@ class RallyToolWindowPanel(private val project: Project) : Disposable {
             if (points != null) totalPoints += points
         }
 
-        val countsText = stateCounts.entries.joinToString(" | ") { "${it.key}: ${it.value}" }
+        var completedPoints = 0.0
+        for (artifact in artifacts) {
+            val state = artifact.scheduleState ?: artifact.state ?: ""
+            if (state in setOf("Completed", "Accepted")) {
+                val points = when (artifact) {
+                    is RallyUserStory -> artifact.planEstimate
+                    is RallyDefect -> artifact.planEstimate
+                    else -> null
+                }
+                if (points != null) completedPoints += points
+            }
+        }
+
+        val stateOrder = listOf("Idea", "Defined", "In-Progress", "Completed", "Accepted")
+        val countsText = stateOrder
+            .filter { stateCounts.containsKey(it) }
+            .joinToString(" | ") { "${it}: ${stateCounts[it]}" }
+            .let { ordered ->
+                // Append any states not in the standard list
+                val extra = stateCounts.filter { it.key !in stateOrder }
+                if (extra.isNotEmpty()) {
+                    val extraText = extra.entries.joinToString(" | ") { "${it.key}: ${it.value}" }
+                    if (ordered.isNotEmpty()) "$ordered | $extraText" else extraText
+                } else ordered
+            }
         val startDate = iteration.startDate?.take(10) ?: ""
         val endDate = iteration.endDate?.take(10) ?: ""
 
         ApplicationManager.getApplication().invokeLater {
             if (project.isDisposed || disposed) return@invokeLater
-            sprintLabel.text = "Sprint: ${iteration.name} ($startDate to $endDate) | $countsText | ${totalPoints.toInt()} pts"
+            sprintLabel.text = "Sprint: ${iteration.name} ($startDate to $endDate) | $countsText | ${Math.round(completedPoints)}/${Math.round(totalPoints)} pts"
         }
     }
 
@@ -831,7 +878,7 @@ class RallyToolWindowPanel(private val project: Project) : Disposable {
             }
             if (points != null) totalPoints += points
         }
-        statsLabel.text = "${artifacts.size} items, ${totalPoints.toInt()} pts"
+        statsLabel.text = "${artifacts.size} items, ${Math.round(totalPoints)} pts"
     }
 
     // ── Actions ──────────────────────────────────────────────────
@@ -890,7 +937,11 @@ class RallyToolWindowPanel(private val project: Project) : Disposable {
                     if (project.isDisposed || disposed) return@invokeLater
                     val attachMsg = if (attachment != null) " with attachment" else ""
                     statusLabel.text = "Created $createdId$attachMsg"
-                    Messages.showInfoMessage(project, "Created user story: $createdId$attachMsg", "Rally")
+                    val balloon = JBPopupFactory.getInstance()
+                        .createHtmlTextBalloonBuilder("Created $createdId$attachMsg", MessageType.INFO, null)
+                        .setFadeoutTime(3000)
+                        .createBalloon()
+                    balloon.show(RelativePoint.getSouthWestOf(statusLabel), Balloon.Position.above)
                     // Optimistic update: prepend new item instead of full reload
                     allArtifacts = listOf(created as RallyArtifact) + allArtifacts
                     client.clearArtifactCache()
@@ -1046,6 +1097,7 @@ class RallyToolWindowPanel(private val project: Project) : Disposable {
         val id = selected.formattedID ?: return
         val clipboard = java.awt.Toolkit.getDefaultToolkit().systemClipboard
         clipboard.setContents(java.awt.datatransfer.StringSelection(id), null)
+        statusLabel.text = "Copied $id"
     }
 
     private fun exportSelectedArtifact() {
@@ -1120,12 +1172,11 @@ class RallyToolWindowPanel(private val project: Project) : Disposable {
                     append("\nTest Cases: ${tcExported.get()} exported")
                     if (tcFailed.get() > 0) append(", ${tcFailed.get()} failed")
                 }
-                Messages.showMessageDialog(
-                    project,
-                    summary,
-                    "Rally - Export",
-                    AllIcons.General.InspectionsOK
-                )
+                val balloon = JBPopupFactory.getInstance()
+                    .createHtmlTextBalloonBuilder(summary.replace("\n", "<br>"), MessageType.INFO, null)
+                    .setFadeoutTime(5000)
+                    .createBalloon()
+                balloon.show(RelativePoint.getSouthWestOf(statusLabel), Balloon.Position.above)
             }
             } catch (e: Exception) {
                 LOG.warn("Export aborted", e)
@@ -1528,6 +1579,8 @@ class RallyToolWindowPanel(private val project: Project) : Disposable {
 
             ownerLabel.text = value.owner?.displayName ?: value.owner?.refObjectName ?: ""
             ownerLabel.foreground = if (isSelected) list.selectionForeground else JBColor.GRAY
+
+            panel.toolTipText = "${value.formattedID}: ${value.name}"
 
             return panel
         }

@@ -21,6 +21,7 @@ class RallySettingsConfigurable : Configurable {
     private var workspaceRefField: JBTextField? = null
     private var usernameField: JBTextField? = null
     private var exportDirField: TextFieldWithBrowseButton? = null
+    private var pageSizeField: JBTextField? = null
     @Volatile private var loadedApiKey: String = ""
     @Volatile private var apiKeyLoaded = false
 
@@ -34,7 +35,7 @@ class RallySettingsConfigurable : Configurable {
             toolTipText = "Rally API Key (get it from Rally Profile → API Keys)"
         }
         workspaceRefField = JBTextField().apply {
-            toolTipText = "Workspace reference (e.g., /workspace/12345)"
+            toolTipText = "Workspace reference (optional — e.g., /workspace/12345). Leave blank to use your default workspace."
         }
         usernameField = JBTextField().apply {
             toolTipText = "Your Rally UserName (email address, e.g. john.doe@company.com). Used for 'My Tickets' filter and 'Assign to me'. Use Test Connection to validate."
@@ -49,6 +50,10 @@ class RallySettingsConfigurable : Configurable {
             textField.toolTipText = "Export directory (leave empty for project_root/rally_testcases)"
         }
 
+        pageSizeField = JBTextField().apply {
+            toolTipText = "Number of items to fetch per API request (25-200, default: 200)"
+        }
+
         val testButton = JButton("Test Connection").apply {
             addActionListener { testConnection() }
         }
@@ -58,6 +63,7 @@ class RallySettingsConfigurable : Configurable {
         workspaceRefField!!.text = settings.workspaceRef
         usernameField!!.text = settings.username
         exportDirField!!.text = settings.exportDirectory
+        pageSizeField!!.text = settings.pageSize.toString()
 
         // Load API key off-EDT to avoid blocking and to prevent writing blank on early apply
         apiKeyLoaded = false
@@ -77,9 +83,10 @@ class RallySettingsConfigurable : Configurable {
         return FormBuilder.createFormBuilder()
             .addLabeledComponent(JBLabel("Server URL:"), serverUrlField!!)
             .addLabeledComponent(JBLabel("API Key:"), apiKeyField!!)
-            .addLabeledComponent(JBLabel("Workspace Ref:"), workspaceRefField!!)
+            .addLabeledComponent(JBLabel("Workspace Ref (optional):"), workspaceRefField!!)
             .addLabeledComponent(JBLabel("Username:"), usernameField!!)
             .addLabeledComponent(JBLabel("Export Directory:"), exportDirField!!)
+            .addLabeledComponent(JBLabel("Page Size:"), pageSizeField!!)
             .addComponent(testButton)
             .addComponentFillVertically(JPanel(), 0)
             .panel
@@ -91,7 +98,8 @@ class RallySettingsConfigurable : Configurable {
                 String(apiKeyField?.password ?: charArrayOf()) != loadedApiKey ||
                 workspaceRefField?.text != settings.workspaceRef ||
                 usernameField?.text != settings.username ||
-                exportDirField?.text != settings.exportDirectory
+                exportDirField?.text != settings.exportDirectory ||
+                pageSizeField?.text != settings.pageSize.toString()
     }
 
     override fun apply() {
@@ -101,6 +109,7 @@ class RallySettingsConfigurable : Configurable {
         state.workspaceRef = workspaceRefField?.text?.trim() ?: ""
         state.username = usernameField?.text?.trim() ?: ""
         state.exportDirectory = exportDirField?.text?.trim() ?: ""
+        state.pageSize = pageSizeField?.text?.trim()?.toIntOrNull()?.coerceIn(25, 200) ?: 200
         // Only save API key if the async load completed (so we know the field has real data)
         // or if the user explicitly typed a new key
         val fieldKey = String(apiKeyField?.password ?: charArrayOf()).trim()
@@ -116,6 +125,7 @@ class RallySettingsConfigurable : Configurable {
         workspaceRefField?.text = settings.workspaceRef
         usernameField?.text = settings.username
         exportDirField?.text = settings.exportDirectory
+        pageSizeField?.text = settings.pageSize.toString()
         // Load API key off-EDT
         apiKeyLoaded = false
         ApplicationManager.getApplication().executeOnPooledThread {
@@ -134,6 +144,7 @@ class RallySettingsConfigurable : Configurable {
         workspaceRefField = null
         usernameField = null
         exportDirField = null
+        pageSizeField = null
     }
 
     private fun testConnection() {
@@ -152,6 +163,13 @@ class RallySettingsConfigurable : Configurable {
                 val apiKeyOwner = client.getCurrentUser()
                 val apiKeyName = apiKeyOwner.displayName ?: "Unknown"
                 val apiKeyUserName = apiKeyOwner.userName ?: "Unknown"
+
+                // Auto-fill username if empty
+                ApplicationManager.getApplication().invokeLater {
+                    if (usernameField?.text.isNullOrBlank()) {
+                        usernameField?.text = apiKeyUserName
+                    }
+                }
 
                 // Check if a username is configured and validate it
                 val configuredUsername = usernameField?.text?.trim() ?: ""

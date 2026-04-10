@@ -69,6 +69,11 @@ class RallyDetailPanel(private val project: Project) : com.intellij.openapi.Disp
 
     private val headerLabel = JBLabel("Select a ticket to view details")
     private val stateBadge = JBLabel()
+    private val metadataLabel = JBLabel("").apply {
+        font = font.deriveFont(Font.PLAIN, 11f)
+        foreground = JBColor.GRAY
+        border = JBUI.Borders.empty(0, 8, 4, 8)
+    }
     private val descriptionPane = JTextPane().apply {
         contentType = "text/html"
         isEditable = false
@@ -110,32 +115,32 @@ class RallyDetailPanel(private val project: Project) : com.intellij.openapi.Disp
     }
 
     // Header action buttons
-    private val copyButton = JLabel(AllIcons.Actions.Copy).apply {
+    private val copyButton = JButton(AllIcons.Actions.Copy).apply {
         toolTipText = "Copy FormattedID"
-        cursor = Cursor.getPredefinedCursor(Cursor.HAND_CURSOR)
         isVisible = false
+        isBorderPainted = false
+        isContentAreaFilled = false
         border = JBUI.Borders.empty(0, 4)
-        addMouseListener(object : MouseAdapter() {
-            override fun mouseClicked(e: MouseEvent) {
-                val id = currentArtifact?.formattedID ?: return
-                val clipboard = java.awt.Toolkit.getDefaultToolkit().systemClipboard
-                clipboard.setContents(java.awt.datatransfer.StringSelection(id), null)
-            }
-        })
+        addActionListener {
+            val id = currentArtifact?.formattedID ?: return@addActionListener
+            val clipboard = java.awt.Toolkit.getDefaultToolkit().systemClipboard
+            clipboard.setContents(java.awt.datatransfer.StringSelection(id), null)
+            toolTipText = "Copied $id!"
+            javax.swing.Timer(2000) { toolTipText = "Copy FormattedID" }.apply { isRepeats = false; start() }
+        }
     }
 
-    private val browserButton = JLabel(AllIcons.General.Web).apply {
+    private val browserButton = JButton(AllIcons.General.Web).apply {
         toolTipText = "Open in Browser"
-        cursor = Cursor.getPredefinedCursor(Cursor.HAND_CURSOR)
         isVisible = false
+        isBorderPainted = false
+        isContentAreaFilled = false
         border = JBUI.Borders.empty(0, 4)
-        addMouseListener(object : MouseAdapter() {
-            override fun mouseClicked(e: MouseEvent) {
-                val artifact = currentArtifact ?: return
-                val client = currentClient ?: return
-                BrowserUtil.browse(client.buildWebUrl(artifact))
-            }
-        })
+        addActionListener {
+            val artifact = currentArtifact ?: return@addActionListener
+            val client = currentClient ?: return@addActionListener
+            BrowserUtil.browse(client.buildWebUrl(artifact))
+        }
     }
 
     init {
@@ -209,7 +214,11 @@ class RallyDetailPanel(private val project: Project) : com.intellij.openapi.Disp
             }
         })
 
-        component.add(headerPanel, BorderLayout.NORTH)
+        val headerWrapper = JPanel(BorderLayout())
+        headerWrapper.add(headerPanel, BorderLayout.NORTH)
+        headerWrapper.add(metadataLabel, BorderLayout.SOUTH)
+
+        component.add(headerWrapper, BorderLayout.NORTH)
         component.add(splitPane, BorderLayout.CENTER)
     }
 
@@ -290,6 +299,10 @@ class RallyDetailPanel(private val project: Project) : com.intellij.openapi.Disp
         stateBadge.text = state
         stateBadge.foreground = stateColor(state)
 
+        // Metadata strip
+        metadataLabel.text = buildMetadataText(artifact)
+        metadataLabel.isVisible = true
+
         // Show description if already available, otherwise show loading state
         val desc = artifact.description
         if (!desc.isNullOrBlank()) {
@@ -358,7 +371,9 @@ class RallyDetailPanel(private val project: Project) : com.intellij.openapi.Disp
         taskListModel.clear()
         attachmentListModel.clear()
         stepListModel.clear()
-        updateTabTitles(0, 0, 0)
+        tabbedPane.setTitleAt(TAB_TEST_CASES, "Test Cases (...)")
+        tabbedPane.setTitleAt(TAB_TASKS, "Tasks (...)")
+        tabbedPane.setTitleAt(TAB_ATTACHMENTS, "Attachments (...)")
 
         // Load description, test cases, tasks, and attachments in parallel
         ApplicationManager.getApplication().executeOnPooledThread {
@@ -472,6 +487,8 @@ class RallyDetailPanel(private val project: Project) : com.intellij.openapi.Disp
         currentClient = null
         headerLabel.text = "Select a ticket to view details"
         stateBadge.text = ""
+        metadataLabel.text = ""
+        metadataLabel.isVisible = false
         copyButton.isVisible = false
         browserButton.isVisible = false
         descriptionPane.text = ""
@@ -488,6 +505,41 @@ class RallyDetailPanel(private val project: Project) : com.intellij.openapi.Disp
             tabbedPane.addTab("Attachments", JBScrollPane(attachmentList))
         }
         updateTabTitles(0, 0, 0)
+    }
+
+    private fun buildMetadataText(artifact: RallyArtifact): String {
+        val parts = mutableListOf<String>()
+
+        // Owner
+        val ownerName = artifact.owner?.displayName ?: artifact.owner?.refObjectName
+        if (ownerName != null) parts.add("Owner: $ownerName")
+
+        // Type-specific fields
+        when (artifact) {
+            is RallyUserStory -> {
+                artifact.planEstimate?.let { parts.add("Points: ${it.toInt()}") }
+                artifact.iteration?.let { iter ->
+                    val name = iter.name ?: iter.refObjectName
+                    if (name != null) parts.add("Sprint: $name")
+                }
+            }
+            is RallyDefect -> {
+                artifact.severity?.let { parts.add("Severity: $it") }
+                artifact.priority?.let { parts.add("Priority: $it") }
+                artifact.environment?.let { if (it.isNotBlank()) parts.add("Env: $it") }
+                artifact.planEstimate?.let { parts.add("Points: ${it.toInt()}") }
+                artifact.iteration?.let { iter ->
+                    val name = iter.name ?: iter.refObjectName
+                    if (name != null) parts.add("Sprint: $name")
+                }
+            }
+            is RallyTestCase -> {
+                artifact.method?.let { parts.add("Method: $it") }
+                artifact.lastVerdict?.let { parts.add("Last Verdict: $it") }
+            }
+        }
+
+        return parts.joinToString("  |  ")
     }
 
     private fun updateTabTitles(testCases: Int, tasks: Int, attachments: Int) {
