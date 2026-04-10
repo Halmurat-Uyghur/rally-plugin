@@ -71,7 +71,7 @@ src/main/kotlin/com/github/halmuratuyghur/rally/
 | **HTTP/2** | `HttpClient.Version.HTTP_2` for connection multiplexing | Better throughput for parallel requests |
 | **Generation counter** | AtomicLong in RallyDetailPanel cancels stale async work on selection change | Prevents wasted work and UI flicker |
 | **Inline image cap** | Max 10 inline images per description in detail panel | Prevents thread pool saturation |
-| **JBColor pre-allocation** | Static color constants in companion objects for cell renderers | Avoids GC pressure from repeated allocations |
+| **JBColor pre-allocation** | Static color constants in `RallyColors` object shared across renderers | Avoids GC pressure from repeated allocations |
 | **Precompiled regex** | Static Regex patterns in RallyExporter for HTML stripping | Avoids re-creation per call during bulk export |
 | **Retry with backoff** | Exponential backoff + Retry-After for 429/502/503/504 | Resilient to transient Rally API errors |
 | **Pre-allocated TypeToken** | Static TypeToken fields in companion object | Avoids repeated reflection per API call |

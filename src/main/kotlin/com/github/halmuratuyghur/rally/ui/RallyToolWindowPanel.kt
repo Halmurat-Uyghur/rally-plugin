@@ -531,7 +531,7 @@ class RallyToolWindowPanel(private val project: Project) : Disposable {
                             else -> "Error"
                         }
                         statusLabel.text = errorMsg
-                        artifactList.emptyText.text = "$errorMsg: ${e.message}"
+                        artifactList.emptyText.text = "$errorMsg: ${cause.message}"
                     }
                 }
             }

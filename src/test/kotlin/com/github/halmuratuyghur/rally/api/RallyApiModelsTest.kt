@@ -136,6 +136,7 @@ class RallyApiModelsTest {
                 "TotalResultCount": 0,
                 "PageSize": 200,
                 "StartIndex": 1,
+                "Results": null,
                 "Errors": ["Not authorized"]
             }
         }

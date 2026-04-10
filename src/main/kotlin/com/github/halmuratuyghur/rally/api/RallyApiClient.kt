@@ -1211,7 +1211,7 @@ class RallyApiClient(
 
         // Step 1: Create AttachmentContent
         val contentUrl = buildApiUrl("attachmentcontent/create")
-        val contentBody = """{"AttachmentContent":{"Content":"$base64Content"}}"""
+        val contentBody = """{"AttachmentContent":${gson.toJson(mapOf("Content" to base64Content))}}"""
         val contentResponse = executePost(contentUrl, contentBody)
         handleResponse(contentResponse)
 
