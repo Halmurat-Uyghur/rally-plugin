@@ -677,16 +677,22 @@ class RallyDetailPanel(private val project: Project) : com.intellij.openapi.Disp
 
     private fun showTaskContextMenu(e: MouseEvent) {
         val index = taskList.locationToIndex(e.point)
-        if (index < 0) return
-        if (!taskList.isSelectedIndex(index)) {
+        if (index >= 0 && !taskList.isSelectedIndex(index)) {
             taskList.selectedIndex = index
         }
 
         val menu = JPopupMenu()
-        menu.add(JMenuItem("Open in Browser").apply {
-            icon = AllIcons.General.Web
-            addActionListener { openTaskInBrowser() }
+        menu.add(JMenuItem("Create Task").apply {
+            icon = AllIcons.General.Add
+            addActionListener { showCreateTaskDialog() }
         })
+        if (index >= 0) {
+            menu.addSeparator()
+            menu.add(JMenuItem("Open in Browser").apply {
+                icon = AllIcons.General.Web
+                addActionListener { openTaskInBrowser() }
+            })
+        }
         menu.show(taskList, e.x, e.y)
     }
 
@@ -699,6 +705,65 @@ class RallyDetailPanel(private val project: Project) : com.intellij.openapi.Disp
         val projectOid = getParentProjectOid()
         val projectSegment = if (projectOid != null) "${projectOid}d/" else ""
         BrowserUtil.browse("$url/#/${projectSegment}detail/task/$objectId")
+    }
+
+    private fun showCreateTaskDialog() {
+        val artifact = currentArtifact ?: return
+        val artifactRef = artifact.ref ?: return
+        val client = currentClient ?: return
+        val artifactId = artifact.formattedID ?: "?"
+
+        val nameField = com.intellij.ui.components.JBTextField()
+        val estimateField = com.intellij.ui.components.JBTextField().apply {
+            toolTipText = "Estimate in hours (optional)"
+        }
+
+        val panel = JPanel(GridBagLayout())
+        val gbc = GridBagConstraints().apply {
+            fill = GridBagConstraints.HORIZONTAL
+            insets = Insets(4, 4, 4, 4)
+        }
+        gbc.gridx = 0; gbc.gridy = 0; gbc.weightx = 0.0
+        panel.add(JLabel("Task Name:"), gbc)
+        gbc.gridx = 1; gbc.weightx = 1.0
+        panel.add(nameField, gbc)
+        gbc.gridx = 0; gbc.gridy = 1; gbc.weightx = 0.0
+        panel.add(JLabel("Estimate (hrs):"), gbc)
+        gbc.gridx = 1; gbc.weightx = 1.0
+        panel.add(estimateField, gbc)
+
+        val dialogResult = JOptionPane.showConfirmDialog(
+            component, panel, "Create Task for $artifactId",
+            JOptionPane.OK_CANCEL_OPTION, JOptionPane.PLAIN_MESSAGE
+        )
+        if (dialogResult != JOptionPane.OK_OPTION) return
+
+        val taskName = nameField.text.trim()
+        if (taskName.isBlank()) return
+        val estimate = estimateField.text.trim().toDoubleOrNull()
+
+        ApplicationManager.getApplication().executeOnPooledThread {
+            try {
+                val task = client.createTask(taskName, artifactRef, estimate = estimate)
+                ApplicationManager.getApplication().invokeLater {
+                    if (disposed) return@invokeLater
+                    taskListModel.addElement(task)
+                    val count = taskListModel.size()
+                    for (i in 0 until tabbedPane.tabCount) {
+                        if (tabbedPane.getTitleAt(i).startsWith("Tasks")) {
+                            tabbedPane.setTitleAt(i, "Tasks ($count)")
+                            break
+                        }
+                    }
+                }
+            } catch (e: Exception) {
+                LOG.warn("Failed to create task", e)
+                ApplicationManager.getApplication().invokeLater {
+                    if (disposed) return@invokeLater
+                    Messages.showErrorDialog(project, "Failed to create task: ${e.message}", "Rally")
+                }
+            }
+        }
     }
 
     // ── Attachment Context Menu & Actions ────────────────────────

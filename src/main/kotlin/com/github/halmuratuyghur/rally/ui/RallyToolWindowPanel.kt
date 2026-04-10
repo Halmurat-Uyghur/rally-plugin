@@ -81,6 +81,7 @@ class RallyToolWindowPanel(private val project: Project) : Disposable {
     private val sprintLabel = JBLabel("")
     private val statusLabel = JBLabel("Ready")
     private val startWorkingButton = JButton("Start Working", AllIcons.Actions.Execute).apply { isFocusable = true }
+    private val finishWorkingButton = JButton("Finish Working", AllIcons.Actions.Checked).apply { isFocusable = true }
 
 
     private val detailPanel = RallyDetailPanel(project)
@@ -153,7 +154,14 @@ class RallyToolWindowPanel(private val project: Project) : Disposable {
         // Toolbar
         val toolbar = JPanel(FlowLayout(FlowLayout.LEFT, 4, 2))
         toolbar.add(createButton("Refresh", AllIcons.Actions.Refresh) { currentClient?.clearCache(); loadTickets() })
-        toolbar.add(createButton("Create", AllIcons.General.Add) { showCreateUserStoryDialog() })
+        val createButton = createButton("Create", AllIcons.General.Add) {}
+        createButton.addActionListener {
+            val menu = JPopupMenu()
+            menu.add(JMenuItem("User Story").apply { addActionListener { showCreateUserStoryDialog() } })
+            menu.add(JMenuItem("Defect").apply { addActionListener { showCreateDefectDialog() } })
+            menu.show(createButton, 0, createButton.height)
+        }
+        toolbar.add(createButton)
         toolbar.add(JSeparator(SwingConstants.VERTICAL).apply { preferredSize = java.awt.Dimension(2, 24) })
         toolbar.add(createButton("Defined", AllIcons.Actions.MoveToButton) { changeState("Defined") })
         toolbar.add(createButton("In-Progress", AllIcons.Actions.Execute) { changeState("In-Progress") })
@@ -162,8 +170,10 @@ class RallyToolWindowPanel(private val project: Project) : Disposable {
         toolbar.add(createButton("Export", AllIcons.ToolbarDecorator.Export) { exportSelectedArtifact() })
         toolbar.add(JSeparator(SwingConstants.VERTICAL).apply { preferredSize = java.awt.Dimension(2, 24) })
         toolbar.add(startWorkingButton)
+        toolbar.add(finishWorkingButton)
 
         startWorkingButton.addActionListener { startWorking() }
+        finishWorkingButton.addActionListener { finishWorking() }
 
         toolbar.add(Box.createHorizontalGlue())
         toolbar.add(statsLabel)
@@ -329,6 +339,7 @@ class RallyToolWindowPanel(private val project: Project) : Disposable {
                     }
                     val isTc = selected is RallyTestCase
                     startWorkingButton.isEnabled = !isTc
+                    finishWorkingButton.isEnabled = !isTc
                 } else {
                     // Auto-collapse detail panel when nothing is selected
                     sp.dividerSize = 0
@@ -382,6 +393,7 @@ class RallyToolWindowPanel(private val project: Project) : Disposable {
             menu.add(JMenuItem("Set In-Progress").apply { addActionListener { changeState("In-Progress") } })
             menu.add(JMenuItem("Set Completed").apply { addActionListener { changeState("Completed") } })
             menu.add(JMenuItem("Set Defined").apply { addActionListener { changeState("Defined") } })
+            menu.add(JMenuItem("Edit Points").apply { addActionListener { editPoints() } })
             menu.addSeparator()
             menu.add(JMenuItem("Export to JSON/Markdown").apply { addActionListener { exportSelectedArtifact() } })
         }
@@ -766,11 +778,24 @@ class RallyToolWindowPanel(private val project: Project) : Disposable {
                     if (ordered.isNotEmpty()) "$ordered | $extraText" else extraText
                 } else ordered
             }
+        val velocityText = iteration.plannedVelocity?.let { " / ${Math.round(it)} planned" } ?: ""
+
         val startDate = iteration.startDate?.take(10) ?: ""
         val endDate = iteration.endDate?.take(10) ?: ""
 
+        val daysRemaining = try {
+            if (endDate.length >= 10) {
+                val end = java.time.LocalDate.parse(endDate.take(10))
+                val today = java.time.LocalDate.now()
+                val days = java.time.temporal.ChronoUnit.DAYS.between(today, end)
+                if (days >= 0) "${days}d left" else "${-days}d ago"
+            } else null
+        } catch (_: Exception) { null }
+
+        val daysText = daysRemaining?.let { " | $it" } ?: ""
+
         invokeLaterIfAlive {
-            sprintLabel.text = "Sprint: ${iteration.name} ($startDate to $endDate) | $countsText | ${Math.round(completedPoints)}/${Math.round(totalPoints)} pts"
+            sprintLabel.text = "Sprint: ${iteration.name} ($startDate to $endDate)$daysText | $countsText | ${Math.round(completedPoints)}/${Math.round(totalPoints)} pts$velocityText"
         }
     }
 
@@ -876,6 +901,216 @@ class RallyToolWindowPanel(private val project: Project) : Disposable {
     }
 
     // ── Actions ──────────────────────────────────────────────────
+
+    private fun showCreateDefectDialog() {
+        val settings = RallySettings.getInstance()
+        if (!settings.isConfigured()) {
+            Messages.showErrorDialog(project, "Configure Rally in Settings \u2192 Tools \u2192 Rally first.", "Rally")
+            return
+        }
+
+        val dialog = CreateDefectDialog()
+        if (!dialog.showAndGet()) return
+
+        val name = dialog.nameField.text.trim()
+        val description = dialog.descriptionArea.text.trim().ifBlank { null }
+        val selectedProjectIndex = dialog.projectCombo.selectedIndex
+        val selectedIterationIndex = dialog.iterationCombo.selectedIndex
+        val assignToMe = dialog.assignToMeCheckbox.isSelected
+        val attachment = dialog.attachmentFile
+        val severity = (dialog.severityCombo.selectedItem as? String)?.ifBlank { null }
+        val priority = (dialog.priorityCombo.selectedItem as? String)?.ifBlank { null }
+
+        statusLabel.text = "Creating..."
+
+        ApplicationManager.getApplication().executeOnPooledThread {
+            try {
+                val client = getClient()
+                val projectRefForCreate = if (selectedProjectIndex > 0 && selectedProjectIndex - 1 < cachedProjects.size) {
+                    cachedProjects[selectedProjectIndex - 1].ref
+                } else {
+                    getSelectedProjectRef()
+                }
+                val iterationRefForCreate = if (selectedIterationIndex > 0 && selectedIterationIndex - 1 < cachedIterations.size) {
+                    cachedIterations[selectedIterationIndex - 1].ref
+                } else {
+                    null
+                }
+                val ownerRef = if (assignToMe && settings.username.isNotBlank()) {
+                    try { client.getUserByUsername(settings.username).ref } catch (_: Exception) { null }
+                } else {
+                    null
+                }
+
+                val created = client.createDefect(name, projectRefForCreate, ownerRef = ownerRef, description = description, iterationRef = iterationRefForCreate, severity = severity, priority = priority)
+                val createdId = created.formattedID ?: "?"
+
+                // Upload attachment if a file was selected
+                if (attachment != null && created.ref != null) {
+                    invokeLaterIfAlive {
+                        statusLabel.text = "Uploading attachment..."
+                    }
+                    client.uploadAttachment(created.ref, attachment.toPath())
+                }
+
+                invokeLaterIfAlive {
+                    val attachMsg = if (attachment != null) " with attachment" else ""
+                    statusLabel.text = "Created $createdId$attachMsg"
+                    val balloon = JBPopupFactory.getInstance()
+                        .createHtmlTextBalloonBuilder("Created $createdId$attachMsg", MessageType.INFO, null)
+                        .setFadeoutTime(3000)
+                        .createBalloon()
+                    balloon.show(RelativePoint.getSouthWestOf(statusLabel), Balloon.Position.above)
+                    // Optimistic update: prepend new item instead of full reload
+                    allArtifacts = listOf(created as RallyArtifact) + allArtifacts
+                    client.clearArtifactCache()
+                    applySearchFilter()
+                    // Select the newly created item
+                    val index = listModel.indexOf(created)
+                    if (index >= 0) artifactList.selectedIndex = index
+                }
+            } catch (e: Exception) {
+                LOG.error("Failed to create defect", e)
+                invokeLaterIfAlive {
+                    statusLabel.text = "Create failed"
+                    Messages.showErrorDialog(project, "Failed to create defect: ${e.message}", "Rally - Error")
+                }
+            }
+        }
+    }
+
+    private inner class CreateDefectDialog : DialogWrapper(project) {
+        val nameField = JBTextField()
+        val projectCombo = ComboBox<String>()
+        val iterationCombo = ComboBox<String>()
+        val severityCombo = ComboBox(arrayOf("", "Crash/Data Loss", "Major Problem", "Minor Problem", "Cosmetic"))
+        val priorityCombo = ComboBox(arrayOf("", "Resolve Immediately", "High Attention", "Normal", "Low"))
+        val assignToMeCheckbox = javax.swing.JCheckBox("Assign to me")
+        val descriptionArea = JBTextArea(5, 40)
+        val attachmentPathField = JBTextField()
+        var attachmentFile: java.io.File? = null
+
+        init {
+            title = "Create Defect"
+            // Populate project combo from cached projects
+            projectCombo.addItem("All Projects")
+            cachedProjects.forEach { projectCombo.addItem(it.name ?: "Unnamed") }
+
+            // Pre-select current project from toolbar
+            val currentProjectIndex = this@RallyToolWindowPanel.projectCombo.selectedIndex
+            if (currentProjectIndex >= 0 && currentProjectIndex < projectCombo.itemCount) {
+                projectCombo.selectedIndex = currentProjectIndex
+            }
+
+            // Populate iteration combo from cached iterations
+            iterationCombo.addItem("Unscheduled")
+            cachedIterations.forEach { iter ->
+                val name = iter.name ?: "Unnamed"
+                val start = iter.startDate?.take(10) ?: ""
+                val end = iter.endDate?.take(10) ?: ""
+                val label = if (start.isNotBlank() && end.isNotBlank()) "$name ($start \u2192 $end)" else name
+                iterationCombo.addItem(label)
+            }
+
+            // Pre-select current iteration from toolbar
+            val currentIterIndex = this@RallyToolWindowPanel.iterationCombo.selectedIndex
+            if (currentIterIndex > 0 && currentIterIndex < iterationCombo.itemCount) {
+                iterationCombo.selectedIndex = currentIterIndex
+            }
+
+            assignToMeCheckbox.isSelected = true
+
+            init()
+        }
+
+        override fun createCenterPanel(): JComponent {
+            val panel = JPanel(BorderLayout(0, 8))
+            panel.border = JBUI.Borders.empty(8)
+
+            // Form fields at top using GridBagLayout for aligned labels
+            val formPanel = JPanel(java.awt.GridBagLayout())
+            val gbc = java.awt.GridBagConstraints()
+            gbc.insets = java.awt.Insets(0, 0, 6, 8)
+            gbc.anchor = java.awt.GridBagConstraints.WEST
+
+            // Row 0: Name
+            gbc.gridx = 0; gbc.gridy = 0; gbc.fill = java.awt.GridBagConstraints.NONE; gbc.weightx = 0.0
+            formPanel.add(JBLabel("Name:"), gbc)
+            gbc.gridx = 1; gbc.fill = java.awt.GridBagConstraints.HORIZONTAL; gbc.weightx = 1.0
+            formPanel.add(nameField, gbc)
+
+            // Row 1: Project
+            gbc.gridx = 0; gbc.gridy = 1; gbc.fill = java.awt.GridBagConstraints.NONE; gbc.weightx = 0.0
+            formPanel.add(JBLabel("Project:"), gbc)
+            gbc.gridx = 1; gbc.fill = java.awt.GridBagConstraints.HORIZONTAL; gbc.weightx = 1.0
+            formPanel.add(projectCombo, gbc)
+
+            // Row 2: Sprint
+            gbc.gridx = 0; gbc.gridy = 2; gbc.fill = java.awt.GridBagConstraints.NONE; gbc.weightx = 0.0
+            formPanel.add(JBLabel("Sprint:"), gbc)
+            gbc.gridx = 1; gbc.fill = java.awt.GridBagConstraints.HORIZONTAL; gbc.weightx = 1.0
+            formPanel.add(iterationCombo, gbc)
+
+            // Row 3: Severity
+            gbc.gridx = 0; gbc.gridy = 3; gbc.fill = java.awt.GridBagConstraints.NONE; gbc.weightx = 0.0
+            formPanel.add(JBLabel("Severity:"), gbc)
+            gbc.gridx = 1; gbc.fill = java.awt.GridBagConstraints.HORIZONTAL; gbc.weightx = 1.0
+            formPanel.add(severityCombo, gbc)
+
+            // Row 4: Priority
+            gbc.gridx = 0; gbc.gridy = 4; gbc.fill = java.awt.GridBagConstraints.NONE; gbc.weightx = 0.0
+            formPanel.add(JBLabel("Priority:"), gbc)
+            gbc.gridx = 1; gbc.fill = java.awt.GridBagConstraints.HORIZONTAL; gbc.weightx = 1.0
+            formPanel.add(priorityCombo, gbc)
+
+            // Row 5: Assign to me
+            gbc.gridx = 1; gbc.gridy = 5; gbc.fill = java.awt.GridBagConstraints.NONE; gbc.weightx = 0.0
+            formPanel.add(assignToMeCheckbox, gbc)
+
+            // Row 6: Attachment
+            gbc.gridx = 0; gbc.gridy = 6; gbc.fill = java.awt.GridBagConstraints.NONE; gbc.weightx = 0.0
+            formPanel.add(JBLabel("Attachment:"), gbc)
+            gbc.gridx = 1; gbc.fill = java.awt.GridBagConstraints.HORIZONTAL; gbc.weightx = 1.0
+            attachmentPathField.isEditable = false
+            val attachPanel = JPanel(BorderLayout(4, 0))
+            attachPanel.add(attachmentPathField, BorderLayout.CENTER)
+            val browseButton = JButton("Browse...")
+            browseButton.addActionListener {
+                val descriptor = com.intellij.openapi.fileChooser.FileChooserDescriptorFactory.createSingleFileDescriptor()
+                    .withTitle("Select ZIP file to attach")
+                    .withFileFilter { it.extension.equals("zip", ignoreCase = true) }
+                val chosen = com.intellij.openapi.fileChooser.FileChooser.chooseFile(descriptor, project, null)
+                if (chosen != null) {
+                    attachmentFile = java.io.File(chosen.path)
+                    attachmentPathField.text = chosen.name
+                }
+            }
+            attachPanel.add(browseButton, BorderLayout.EAST)
+            formPanel.add(attachPanel, gbc)
+
+            panel.add(formPanel, BorderLayout.NORTH)
+
+            // Description fills remaining space
+            descriptionArea.lineWrap = true
+            descriptionArea.wrapStyleWord = true
+            val descPanel = JPanel(BorderLayout(0, 4))
+            descPanel.add(JBLabel("Description:"), BorderLayout.NORTH)
+            descPanel.add(JBScrollPane(descriptionArea), BorderLayout.CENTER)
+            panel.add(descPanel, BorderLayout.CENTER)
+
+            panel.preferredSize = java.awt.Dimension(500, 440)
+            return panel
+        }
+
+        override fun doValidate(): ValidationInfo? {
+            if (nameField.text.isNullOrBlank()) {
+                return ValidationInfo("Name is required", nameField)
+            }
+            return null
+        }
+
+        override fun getPreferredFocusedComponent(): JComponent = nameField
+    }
 
     private fun showCreateUserStoryDialog() {
         val settings = RallySettings.getInstance()
@@ -1179,6 +1414,66 @@ class RallyToolWindowPanel(private val project: Project) : Disposable {
 
 
 
+
+    private fun editPoints() {
+        val selected = artifactList.selectedValue ?: return
+        if (selected is RallyTestCase) return
+        val ref = selected.ref ?: return
+        val type = selected.type ?: return
+
+        val currentPoints = when (selected) {
+            is RallyUserStory -> selected.planEstimate
+            is RallyDefect -> selected.planEstimate
+            else -> null
+        }
+
+        val input = Messages.showInputDialog(
+            project,
+            "Enter story points for ${selected.formattedID}:",
+            "Rally - Edit Points",
+            null,
+            currentPoints?.let { if (it == it.toLong().toDouble()) it.toLong().toString() else it.toString() } ?: "",
+            null
+        ) ?: return
+
+        val points = input.trim().toDoubleOrNull()
+        if (points == null && input.trim().isNotEmpty()) {
+            Messages.showErrorDialog(project, "Invalid number: $input", "Rally")
+            return
+        }
+
+        statusLabel.text = "Updating points..."
+        ApplicationManager.getApplication().executeOnPooledThread {
+            try {
+                val client = getClient()
+                client.updateArtifactField(ref, type, "PlanEstimate", points)
+                // Optimistic UI update
+                invokeLaterIfAlive {
+                    allArtifacts = allArtifacts.map { artifact ->
+                        if (artifact.ref == ref) {
+                            when (artifact) {
+                                is RallyUserStory -> artifact.copy(planEstimate = points)
+                                is RallyDefect -> artifact.copy(planEstimate = points)
+                                else -> artifact
+                            }
+                        } else artifact
+                    }
+                    client.clearArtifactCache()
+                    applySearchFilter()
+                    statusLabel.text = "Updated ${selected.formattedID} points"
+                    // Refresh detail panel metadata
+                    detailPanel.showArtifact(artifactList.selectedValue, client)
+                }
+            } catch (e: Exception) {
+                LOG.error("Failed to update points", e)
+                invokeLaterIfAlive {
+                    statusLabel.text = "Update failed"
+                    Messages.showErrorDialog(project, "Failed to update points: ${e.message}", "Rally")
+                }
+            }
+        }
+    }
+
     private fun changeState(newState: String) {
         val selected = artifactList.selectedValuesList
         if (selected.isEmpty()) {
@@ -1454,6 +1749,57 @@ class RallyToolWindowPanel(private val project: Project) : Disposable {
                 LOG.warn("Start working aborted", e)
                 ApplicationManager.getApplication().invokeLater {
                     if (!disposed) statusLabel.text = "Start working failed"
+                }
+            }
+        }
+    }
+
+    private fun finishWorking() {
+        val selected = artifactList.selectedValue
+        if (selected == null) {
+            Messages.showInfoMessage(project, "Select a ticket first.", "Rally")
+            return
+        }
+        if (selected is RallyTestCase) return
+
+        val ticketId = selected.formattedID ?: return
+        val ticketRef = selected.ref ?: return
+        val ticketType = selected.type ?: return
+
+        val confirm = Messages.showYesNoDialog(
+            project,
+            "Finish working on $ticketId?\n\nThis will move the ticket to Completed.",
+            "Rally - Finish Working",
+            Messages.getQuestionIcon()
+        )
+        if (confirm != Messages.YES) return
+
+        statusLabel.text = "Finishing $ticketId..."
+
+        ApplicationManager.getApplication().executeOnPooledThread {
+            try {
+                val client = getClient()
+                client.updateArtifactState(ticketRef, ticketType, "Completed")
+
+                invokeLaterIfAlive {
+                    allArtifacts = allArtifacts.map { artifact ->
+                        if (artifact.ref == ticketRef) {
+                            when (artifact) {
+                                is RallyUserStory -> artifact.copy(scheduleState = "Completed")
+                                is RallyDefect -> artifact.copy(scheduleState = "Completed")
+                                else -> artifact
+                            }
+                        } else artifact
+                    }
+                    client.clearArtifactCache()
+                    applySearchFilter()
+                    statusLabel.text = "Finished $ticketId"
+                }
+            } catch (e: Exception) {
+                LOG.error("Failed to finish working on $ticketId", e)
+                invokeLaterIfAlive {
+                    statusLabel.text = "Finish failed"
+                    Messages.showErrorDialog(project, "Failed to finish working: ${e.message}", "Rally")
                 }
             }
         }

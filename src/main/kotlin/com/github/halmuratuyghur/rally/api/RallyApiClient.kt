@@ -770,6 +770,28 @@ class RallyApiClient(
     }
 
     /**
+     * Update a single field on a Rally artifact.
+     * @param artifactRef Full API URL ref of the artifact
+     * @param artifactType Rally type name (e.g., "HierarchicalRequirement", "Defect", "Task")
+     * @param field The field name to update (e.g., "PlanEstimate", "Name", "Description")
+     * @param value The new value (String, Number, or null to clear)
+     */
+    fun updateArtifactField(artifactRef: String, artifactType: String, field: String, value: Any?) {
+        val fieldMap = if (value != null) mapOf(field to value) else mapOf(field to com.google.gson.JsonNull.INSTANCE)
+        val body = """{"$artifactType":${gson.toJson(fieldMap)}}"""
+        val response = executePost(artifactRef, body)
+        handleResponse(response)
+
+        val json = JsonParser.parseString(response.body()).asJsonObject
+        val result = json.getAsJsonObject("OperationResult")
+            ?: throw RallyApiException("Unexpected response: missing OperationResult")
+        val errors = result.getAsJsonArray("Errors")
+        if (errors != null && errors.size() > 0) {
+            throw RallyApiException("Failed to update $field: ${errors.joinToString()}")
+        }
+    }
+
+    /**
      * Get the current iteration (sprint) by today's date.
      */
     fun queryCurrentIteration(workspaceRef: String? = null, projectRef: String? = null): RallyIteration? {
@@ -1091,6 +1113,79 @@ class RallyApiClient(
         val obj = createResult.getAsJsonObject("Object")
             ?: throw RallyApiException("Unexpected response: missing Object in CreateResult")
         return gson.fromJson(obj, RallyUserStory::class.java)
+    }
+
+    /**
+     * Create a new Defect.
+     */
+    fun createDefect(
+        name: String,
+        projectRef: String?,
+        ownerRef: String? = null,
+        description: String? = null,
+        iterationRef: String? = null,
+        severity: String? = null,
+        priority: String? = null
+    ): RallyDefect {
+        val url = buildApiUrl("defect/create")
+        val fields = mutableMapOf<String, Any>("Name" to name)
+        if (!projectRef.isNullOrBlank()) fields["Project"] = projectRef
+        if (!ownerRef.isNullOrBlank()) fields["Owner"] = ownerRef
+        if (!description.isNullOrBlank()) fields["Description"] = description
+        if (!iterationRef.isNullOrBlank()) fields["Iteration"] = iterationRef
+        if (!severity.isNullOrBlank()) fields["Severity"] = severity
+        if (!priority.isNullOrBlank()) fields["Priority"] = priority
+
+        val body = """{"Defect":${gson.toJson(fields)}}"""
+        val response = executePost(url, body)
+        handleResponse(response)
+
+        val json = JsonParser.parseString(response.body()).asJsonObject
+        val createResult = json.getAsJsonObject("CreateResult")
+            ?: throw RallyApiException("Unexpected response: missing CreateResult")
+        val errors = createResult.getAsJsonArray("Errors")
+        if (errors != null && errors.size() > 0) {
+            throw RallyApiException("Failed to create defect: ${errors.joinToString()}")
+        }
+        val obj = createResult.getAsJsonObject("Object")
+            ?: throw RallyApiException("Unexpected response: missing Object in CreateResult")
+        return gson.fromJson(obj, RallyDefect::class.java)
+    }
+
+    /**
+     * Create a new Task linked to a work product.
+     */
+    fun createTask(
+        name: String,
+        workProductRef: String,
+        ownerRef: String? = null,
+        description: String? = null,
+        estimate: Double? = null
+    ): RallyTaskItem {
+        val url = buildApiUrl("task/create")
+        val fields = mutableMapOf<String, Any>(
+            "Name" to name,
+            "WorkProduct" to workProductRef,
+            "State" to "Defined"
+        )
+        if (!ownerRef.isNullOrBlank()) fields["Owner"] = ownerRef
+        if (!description.isNullOrBlank()) fields["Description"] = description
+        if (estimate != null) fields["Estimate"] = estimate
+
+        val body = """{"Task":${gson.toJson(fields)}}"""
+        val response = executePost(url, body)
+        handleResponse(response)
+
+        val json = JsonParser.parseString(response.body()).asJsonObject
+        val createResult = json.getAsJsonObject("CreateResult")
+            ?: throw RallyApiException("Unexpected response: missing CreateResult")
+        val errors = createResult.getAsJsonArray("Errors")
+        if (errors != null && errors.size() > 0) {
+            throw RallyApiException("Failed to create task: ${errors.joinToString()}")
+        }
+        val obj = createResult.getAsJsonObject("Object")
+            ?: throw RallyApiException("Unexpected response: missing Object in CreateResult")
+        return gson.fromJson(obj, RallyTaskItem::class.java)
     }
 
     /**
