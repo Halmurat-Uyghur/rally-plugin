@@ -164,6 +164,10 @@ class RallySettingsConfigurable : Configurable {
                 val apiKeyName = apiKeyOwner.displayName ?: "Unknown"
                 val apiKeyUserName = apiKeyOwner.userName ?: "Unknown"
 
+                // Capture username before auto-fill (safe — still on pooled thread, but reads value before EDT dispatch)
+                val fieldUsername = usernameField?.text?.trim() ?: ""
+                val configuredUsername = fieldUsername.ifBlank { apiKeyUserName }
+
                 // Auto-fill username if empty
                 ApplicationManager.getApplication().invokeLater {
                     if (usernameField?.text.isNullOrBlank()) {
@@ -172,7 +176,6 @@ class RallySettingsConfigurable : Configurable {
                 }
 
                 // Check if a username is configured and validate it
-                val configuredUsername = usernameField?.text?.trim() ?: ""
                 val usernameInfo = if (configuredUsername.isNotBlank()) {
                     try {
                         val configuredUser = client.getUserByUsername(configuredUsername)

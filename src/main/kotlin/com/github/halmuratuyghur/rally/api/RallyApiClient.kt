@@ -559,7 +559,7 @@ class RallyApiClient(
 
         // Query user stories and defects sequentially to avoid apiExecutor self-deadlock
         // (this method is often called from an apiExecutor thread; submitting inner tasks
-        // to the same pool and blocking on .get() can exhaust the fixed 8-thread pool)
+        // to the same pool and blocking on .get() can exhaust the fixed 4-thread pool)
         if (fetchStories) {
             try {
                 results.addAll(queryUserStories(query, pageSize, maxResults))
@@ -1136,6 +1136,7 @@ class RallyApiClient(
     ): RallyDefect {
         val url = buildApiUrl("defect/create")
         val fields = mutableMapOf<String, Any>("Name" to name)
+        fields["State"] = "Submitted"
         if (!projectRef.isNullOrBlank()) fields["Project"] = projectRef
         if (!ownerRef.isNullOrBlank()) fields["Owner"] = ownerRef
         if (!description.isNullOrBlank()) fields["Description"] = description

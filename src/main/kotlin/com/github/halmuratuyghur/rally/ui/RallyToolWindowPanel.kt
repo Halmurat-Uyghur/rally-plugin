@@ -125,8 +125,7 @@ class RallyToolWindowPanel(private val project: Project) : Disposable {
         // Check configuration off-EDT so the PasswordSafe preload can complete
         ApplicationManager.getApplication().executeOnPooledThread {
             val configured = RallySettings.getInstance().isConfigured()
-            ApplicationManager.getApplication().invokeLater {
-                if (disposed) return@invokeLater
+            invokeLaterIfAlive {
                 if (configured) {
                     loadTickets()
                 } else {
@@ -523,11 +522,12 @@ class RallyToolWindowPanel(private val project: Project) : Disposable {
                         loadTickets()
                     } else {
                         statusLabel.icon = AllIcons.General.Error
+                        val cause = if (e is java.util.concurrent.ExecutionException) e.cause ?: e else e
                         val errorMsg = when {
-                            e.message?.contains("401") == true || e.message?.contains("403") == true -> "Auth error"
-                            e.message?.contains("429") == true -> "Rate limited"
-                            e is java.net.ConnectException || e is java.net.UnknownHostException -> "Network error"
-                            e.message?.contains("timeout", ignoreCase = true) == true -> "Timeout"
+                            cause.message?.contains("401") == true || cause.message?.contains("403") == true -> "Auth error"
+                            cause.message?.contains("429") == true -> "Rate limited"
+                            cause is java.net.ConnectException || cause is java.net.UnknownHostException -> "Network error"
+                            cause.message?.contains("timeout", ignoreCase = true) == true -> "Timeout"
                             else -> "Error"
                         }
                         statusLabel.text = errorMsg
@@ -1410,8 +1410,8 @@ class RallyToolWindowPanel(private val project: Project) : Disposable {
             }
             } catch (e: Exception) {
                 LOG.warn("Export aborted", e)
-                ApplicationManager.getApplication().invokeLater {
-                    if (!disposed) statusLabel.text = "Export failed"
+                invokeLaterIfAlive {
+                    statusLabel.text = "Export failed"
                 }
             }
         }
@@ -1547,8 +1547,8 @@ class RallyToolWindowPanel(private val project: Project) : Disposable {
             }
             } catch (e: Exception) {
                 LOG.warn("State change aborted", e)
-                ApplicationManager.getApplication().invokeLater {
-                    if (!disposed) statusLabel.text = "State change failed"
+                invokeLaterIfAlive {
+                    statusLabel.text = "State change failed"
                 }
             }
         }
@@ -1752,8 +1752,8 @@ class RallyToolWindowPanel(private val project: Project) : Disposable {
             }
             } catch (e: Exception) {
                 LOG.warn("Start working aborted", e)
-                ApplicationManager.getApplication().invokeLater {
-                    if (!disposed) statusLabel.text = "Start working failed"
+                invokeLaterIfAlive {
+                    statusLabel.text = "Start working failed"
                 }
             }
         }

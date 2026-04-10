@@ -29,8 +29,7 @@ src/main/kotlin/com/github/halmuratuyghur/rally/
 │   ├── RallyToolWindowFactory.kt  # ToolWindowFactory + DumbAware
 │   ├── RallyToolWindowPanel.kt    # Main UI: toolbar, filters, project switcher, ticket list, detail panel, sprint summary
 │   ├── RallyDetailPanel.kt        # Detail panel: description (HTML) + tabbed pane (Test Cases/Steps, Tasks, Attachments)
-│   ├── RallyColors.kt             # Shared color constants for UI components
-│   └── RallyIcons.kt             # Icon loader for /icons/rally.svg
+│   └── RallyColors.kt             # Shared color constants for UI components
 ├── util/
 │   └── RallyHtmlUtils.kt          # Shared HTML/image utilities
 ```
@@ -48,7 +47,7 @@ src/main/kotlin/com/github/halmuratuyghur/rally/
 - **Disposal safety** — `RallyToolWindowPanel` implements `Disposable` with a `disposed` flag. `dispose()` and `getClient()` are synchronized on `clientLock` so no client can be created after disposal begins. All `getClient()` call sites are guarded with try/catch to prevent late background tasks from crashing
 - **HTTP/2** — Enabled for connection multiplexing on parallel requests. Respects IDE proxy settings
 - **No external Rally SDK** — uses Java's built-in `HttpClient` with `zsessionid` header for API key auth
-- **State field logic**: User Stories and Defects use `ScheduleState`, Tasks use `State`
+- **State field logic**: User Stories use `ScheduleState`; Defects carry both `ScheduleState` and `State`; Tasks use `State`
 - **Client-side state filtering** — because ScheduleState vs State differs by artifact type, filter queries for state are applied client-side after fetching
 - **Server-side owner filtering** — `(Owner.UserName = "...")` is applied as a Rally query
 - **Workspace/Project refs** — Rally WSAPI requires full API URLs for workspace/project params. The `normalizeRef()` method in RallyApiClient handles conversion from bare IDs, ref paths, or full URLs
@@ -159,7 +158,6 @@ Any State, Idea, Defined, In-Progress, Completed, Accepted, Active (excludes Acc
 |--------|---------|
 | `queryUserStories()` | Query user stories with filters |
 | `queryDefects()` | Query defects with filters |
-| `queryTasks()` | Query tasks with filters |
 | `queryAllArtifacts()` | Combined user stories + defects (sequential, cached) |
 | `queryAllTestCases()` | Query all test cases in workspace/project |
 | `queryTestCases(workProductRef)` | Test cases linked to a user story/defect (cached) |
@@ -167,7 +165,6 @@ Any State, Idea, Defined, In-Progress, Completed, Accepted, Active (excludes Acc
 | `queryTestCaseByFormattedId(id)` | Single test case lookup |
 | `queryTestSteps(formattedId)` | Test steps for a test case |
 | `queryAttachments(formattedId)` | Attachments for any artifact (cached) |
-| `queryUnautomatedTestCases()` | All TCs where Method != Automated |
 | `searchArtifacts(text, scope)` | Server-side search by Name/FormattedID |
 | `fetchDescription(artifactRef)` | On-demand description fetch (cached) |
 | `getArtifactByFormattedId(id)` | Lookup by FormattedID (US/DE/TA) |

@@ -7,7 +7,9 @@ import com.intellij.openapi.diagnostic.Logger
 import com.intellij.openapi.fileChooser.FileChooserFactory
 import com.intellij.openapi.fileChooser.FileSaverDescriptor
 import com.intellij.openapi.project.Project
+import com.intellij.openapi.ui.DialogWrapper
 import com.intellij.openapi.ui.Messages
+import com.intellij.openapi.ui.ValidationInfo
 import com.github.halmuratuyghur.rally.api.*
 import com.github.halmuratuyghur.rally.export.RallyExporter
 import com.github.halmuratuyghur.rally.settings.RallySettings
@@ -727,34 +729,11 @@ class RallyDetailPanel(private val project: Project) : com.intellij.openapi.Disp
         val client = currentClient ?: return
         val artifactId = artifact.formattedID ?: "?"
 
-        val nameField = com.intellij.ui.components.JBTextField()
-        val estimateField = com.intellij.ui.components.JBTextField().apply {
-            toolTipText = "Estimate in hours (optional)"
-        }
+        val dialog = CreateTaskDialog(artifactId)
+        if (!dialog.showAndGet()) return
 
-        val panel = JPanel(GridBagLayout())
-        val gbc = GridBagConstraints().apply {
-            fill = GridBagConstraints.HORIZONTAL
-            insets = Insets(4, 4, 4, 4)
-        }
-        gbc.gridx = 0; gbc.gridy = 0; gbc.weightx = 0.0
-        panel.add(JLabel("Task Name:"), gbc)
-        gbc.gridx = 1; gbc.weightx = 1.0
-        panel.add(nameField, gbc)
-        gbc.gridx = 0; gbc.gridy = 1; gbc.weightx = 0.0
-        panel.add(JLabel("Estimate (hrs):"), gbc)
-        gbc.gridx = 1; gbc.weightx = 1.0
-        panel.add(estimateField, gbc)
-
-        val dialogResult = JOptionPane.showConfirmDialog(
-            component, panel, "Create Task for $artifactId",
-            JOptionPane.OK_CANCEL_OPTION, JOptionPane.PLAIN_MESSAGE
-        )
-        if (dialogResult != JOptionPane.OK_OPTION) return
-
-        val taskName = nameField.text.trim()
-        if (taskName.isBlank()) return
-        val estimate = estimateField.text.trim().toDoubleOrNull()
+        val taskName = dialog.nameField.text.trim()
+        val estimate = dialog.estimateField.text.trim().toDoubleOrNull()
 
         ApplicationManager.getApplication().executeOnPooledThread {
             try {
@@ -778,6 +757,47 @@ class RallyDetailPanel(private val project: Project) : com.intellij.openapi.Disp
                 }
             }
         }
+    }
+
+    private inner class CreateTaskDialog(artifactId: String) : DialogWrapper(project) {
+        val nameField = com.intellij.ui.components.JBTextField()
+        val estimateField = com.intellij.ui.components.JBTextField().apply {
+            toolTipText = "Estimate in hours (optional)"
+        }
+
+        init {
+            title = "Create Task for $artifactId"
+            init()
+        }
+
+        override fun createCenterPanel(): JComponent {
+            val panel = JPanel(GridBagLayout())
+            panel.border = JBUI.Borders.empty(8)
+            val gbc = GridBagConstraints().apply {
+                fill = GridBagConstraints.HORIZONTAL
+                insets = Insets(4, 4, 4, 4)
+            }
+            gbc.gridx = 0; gbc.gridy = 0; gbc.weightx = 0.0
+            panel.add(JBLabel("Task Name:"), gbc)
+            gbc.gridx = 1; gbc.weightx = 1.0
+            panel.add(nameField, gbc)
+            gbc.gridx = 0; gbc.gridy = 1; gbc.weightx = 0.0
+            panel.add(JBLabel("Estimate (hrs):"), gbc)
+            gbc.gridx = 1; gbc.weightx = 1.0
+            panel.add(estimateField, gbc)
+
+            panel.preferredSize = Dimension(400, 100)
+            return panel
+        }
+
+        override fun doValidate(): ValidationInfo? {
+            if (nameField.text.isNullOrBlank()) {
+                return ValidationInfo("Task name is required", nameField)
+            }
+            return null
+        }
+
+        override fun getPreferredFocusedComponent(): JComponent = nameField
     }
 
     // ── Attachment Context Menu & Actions ────────────────────────

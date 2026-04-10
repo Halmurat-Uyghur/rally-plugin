@@ -48,7 +48,7 @@ class RallyApiModelsTest {
         {
             "FormattedID": "DE5678",
             "Name": "Login Bug",
-            "ScheduleState": "Open",
+            "ScheduleState": "Defined",
             "State": "Submitted",
             "_type": "Defect",
             "Severity": "Major Problem",
@@ -59,9 +59,32 @@ class RallyApiModelsTest {
 
         val defect = gson.fromJson(json, RallyDefect::class.java)
         assertEquals("DE5678", defect.formattedID)
+        assertEquals("Submitted", defect.state)
+        assertEquals("Defined", defect.scheduleState)
         assertEquals("Major Problem", defect.severity)
         assertEquals("High Attention", defect.priority)
         assertEquals("Production", defect.environment)
+    }
+
+    @Test
+    fun `parse defect with blocked and release fields`() {
+        val json = """
+        {
+            "FormattedID": "DE200",
+            "Name": "Blocked Defect",
+            "_type": "Defect",
+            "Blocked": true,
+            "BlockedReason": "Waiting on infra",
+            "Ready": false,
+            "Release": {"_ref": "https://rally1.rallydev.com/slm/webservice/v2.0/release/888", "Name": "Q2 2026"}
+        }
+        """.trimIndent()
+
+        val defect = gson.fromJson(json, RallyDefect::class.java)
+        assertEquals(true, defect.blocked)
+        assertEquals("Waiting on infra", defect.blockedReason)
+        assertEquals(false, defect.ready)
+        assertEquals("Q2 2026", defect.release?.name)
     }
 
     @Test
