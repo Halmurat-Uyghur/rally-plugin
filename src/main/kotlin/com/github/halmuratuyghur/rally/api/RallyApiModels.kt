@@ -100,7 +100,19 @@ data class RallyUserStory(
     val taskActualTotal: Double? = null,
 
     @SerializedName("TaskEstimateTotal")
-    val taskEstimateTotal: Double? = null
+    val taskEstimateTotal: Double? = null,
+
+    @SerializedName("Blocked")
+    val blocked: Boolean? = null,
+
+    @SerializedName("BlockedReason")
+    val blockedReason: String? = null,
+
+    @SerializedName("Release")
+    val release: RallyRef? = null,
+
+    @SerializedName("Ready")
+    val ready: Boolean? = null
 ) : RallyArtifact
 
 /**
@@ -156,7 +168,19 @@ data class RallyDefect(
     val environment: String? = null,
 
     @SerializedName("PlanEstimate")
-    val planEstimate: Double? = null
+    val planEstimate: Double? = null,
+
+    @SerializedName("Blocked")
+    val blocked: Boolean? = null,
+
+    @SerializedName("BlockedReason")
+    val blockedReason: String? = null,
+
+    @SerializedName("Release")
+    val release: RallyRef? = null,
+
+    @SerializedName("Ready")
+    val ready: Boolean? = null
 ) : RallyArtifact
 
 /**

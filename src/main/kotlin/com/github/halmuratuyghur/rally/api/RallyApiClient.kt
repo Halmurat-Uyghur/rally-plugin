@@ -29,12 +29,12 @@ class RallyApiClient(
     val apiKey: String
 ) {
     /** Bounded thread pool for API operations (daemon threads so IDE shutdown isn't blocked). */
-    val apiExecutor: ExecutorService = Executors.newFixedThreadPool(8) { r ->
+    val apiExecutor: ExecutorService = Executors.newFixedThreadPool(4) { r ->
         Thread(r, "rally-api-worker").apply { isDaemon = true }
     }
 
     private val httpClient: HttpClient = HttpClient.newBuilder()
-        .connectTimeout(Duration.ofSeconds(30))
+        .connectTimeout(Duration.ofSeconds(15))
         .version(HttpClient.Version.HTTP_2)
         .apply {
             // Respect IDE proxy settings (Settings → Appearance & Behavior → System Settings → HTTP Proxy)
@@ -88,7 +88,7 @@ class RallyApiClient(
     private data class CacheEntry<T>(val data: T, val timestamp: Long)
 
     /** LRU query cache: access-ordered LinkedHashMap with automatic eldest-entry eviction. */
-    private val maxQueryCacheSize = 500
+    private val maxQueryCacheSize = 200
     private val queryCache: MutableMap<String, CacheEntry<Any>> = Collections.synchronizedMap(
         object : LinkedHashMap<String, CacheEntry<Any>>(maxQueryCacheSize * 4 / 3 + 1, 0.75f, true) {
             override fun removeEldestEntry(eldest: MutableMap.MutableEntry<String, CacheEntry<Any>>?): Boolean {
@@ -179,6 +179,16 @@ class RallyApiClient(
     companion object {
         private val LOG = com.intellij.openapi.diagnostic.Logger.getInstance(RallyApiClient::class.java)
 
+        // Pre-allocated TypeToken objects to avoid repeated anonymous class creation
+        private val TYPE_USER_STORIES = object : TypeToken<RallyQueryResult<RallyUserStory>>() {}.type
+        private val TYPE_DEFECTS = object : TypeToken<RallyQueryResult<RallyDefect>>() {}.type
+        private val TYPE_TEST_CASES = object : TypeToken<RallyQueryResult<RallyTestCase>>() {}.type
+        private val TYPE_TASKS = object : TypeToken<RallyQueryResult<RallyTaskItem>>() {}.type
+        private val TYPE_ITERATIONS = object : TypeToken<RallyQueryResult<RallyIteration>>() {}.type
+        private val TYPE_PROJECTS = object : TypeToken<RallyQueryResult<RallyProject>>() {}.type
+        private val TYPE_ATTACHMENTS = object : TypeToken<RallyQueryResult<RallyAttachment>>() {}.type
+        private val TYPE_TEST_STEPS = object : TypeToken<RallyQueryResult<RallyTestCaseStep>>() {}.type
+
         /**
          * Escape a value for use inside Rally WSAPI query strings.
          * Strips quotes and backslashes that could break query syntax.
@@ -208,7 +218,11 @@ class RallyApiClient(
             "PlanEstimate",
             "Severity",
             "Priority",
-            "Environment"
+            "Environment",
+            "Blocked",
+            "BlockedReason",
+            "Release",
+            "Ready"
         )
 
         // Fields for detail queries (includes Description)
@@ -430,8 +444,7 @@ class RallyApiClient(
         val cacheKey = "stories:${query}|${pageSize}|${maxResults}|${workspaceRef}|${projectRef}"
         getCached<List<RallyUserStory>>(cacheKey)?.let { return it }
 
-        val type = object : TypeToken<RallyQueryResult<RallyUserStory>>() {}.type
-        val results: List<RallyUserStory> = queryAllPages("hierarchicalrequirement", type, query, pageSize, maxResults)
+        val results: List<RallyUserStory> = queryAllPages("hierarchicalrequirement", TYPE_USER_STORIES, query, pageSize, maxResults)
         putCache(cacheKey, results)
         return results
     }
@@ -443,8 +456,7 @@ class RallyApiClient(
         val cacheKey = "defects:${query}|${pageSize}|${maxResults}|${workspaceRef}|${projectRef}"
         getCached<List<RallyDefect>>(cacheKey)?.let { return it }
 
-        val type = object : TypeToken<RallyQueryResult<RallyDefect>>() {}.type
-        val results: List<RallyDefect> = queryAllPages("defect", type, query, pageSize, maxResults)
+        val results: List<RallyDefect> = queryAllPages("defect", TYPE_DEFECTS, query, pageSize, maxResults)
         putCache(cacheKey, results)
         return results
     }
@@ -490,16 +502,16 @@ class RallyApiClient(
         val (endpoint, type) = when {
             formattedId.startsWith("S-", ignoreCase = true) ||
             formattedId.startsWith("US", ignoreCase = true) ->
-                "hierarchicalrequirement" to object : TypeToken<RallyQueryResult<RallyUserStory>>() {}.type
+                "hierarchicalrequirement" to TYPE_USER_STORIES
 
             formattedId.startsWith("DE", ignoreCase = true) ->
-                "defect" to object : TypeToken<RallyQueryResult<RallyDefect>>() {}.type
+                "defect" to TYPE_DEFECTS
 
             formattedId.startsWith("TA", ignoreCase = true) ->
-                "task" to object : TypeToken<RallyQueryResult<RallyTaskItem>>() {}.type
+                "task" to TYPE_TASKS
 
             formattedId.startsWith("TC", ignoreCase = true) ->
-                "testcase" to object : TypeToken<RallyQueryResult<RallyTestCase>>() {}.type
+                "testcase" to TYPE_TEST_CASES
 
             else -> return null
         }
@@ -631,9 +643,8 @@ class RallyApiClient(
         val cacheKey = "alltestcases:${query}|${pageSize}|${maxResults}|${workspaceRef}|${projectRef}"
         getCached<List<RallyTestCase>>(cacheKey)?.let { return it }
 
-        val type = object : TypeToken<RallyQueryResult<RallyTestCase>>() {}.type
         val results: List<RallyTestCase> = queryAllPages(
-            "testcase", type, query, pageSize, maxResults,
+            "testcase", TYPE_TEST_CASES, query, pageSize, maxResults,
             order = "LastUpdateDate DESC",
             fields = TC_LIST_FIELDS
         )
@@ -728,7 +739,11 @@ class RallyApiClient(
         throw RallyConnectionException("Failed after $MAX_RETRIES retries", lastException ?: Exception("Unknown error"))
     }
 
-    private fun backoffMs(attempt: Int): Long = (1000L shl attempt).coerceAtMost(8000)
+    private fun backoffMs(attempt: Int): Long {
+        val base = (1000L shl attempt).coerceAtMost(8000)
+        val jitter = (Math.random() * base * 0.3).toLong()  // ±30% jitter
+        return base + jitter
+    }
 
     /**
      * Update the state of an artifact.
@@ -815,8 +830,7 @@ class RallyApiClient(
         val response = executeGet(url)
         handleResponse(response)
 
-        val type = object : TypeToken<RallyQueryResult<RallyIteration>>() {}.type
-        val result: RallyQueryResult<RallyIteration> = gson.fromJson(response.body(), type)
+        val result: RallyQueryResult<RallyIteration> = gson.fromJson(response.body(), TYPE_ITERATIONS)
         val iteration = result.queryResult.safeResults.firstOrNull()
         if (iteration != null) putCache(cacheKey, iteration)
         return iteration
@@ -848,8 +862,7 @@ class RallyApiClient(
         val response = executeGet(url)
         handleResponse(response)
 
-        val type = object : TypeToken<RallyQueryResult<RallyProject>>() {}.type
-        val result: RallyQueryResult<RallyProject> = gson.fromJson(response.body(), type)
+        val result: RallyQueryResult<RallyProject> = gson.fromJson(response.body(), TYPE_PROJECTS)
         return result.queryResult.safeResults.sortedBy { it.name?.lowercase() }
     }
 
@@ -881,8 +894,7 @@ class RallyApiClient(
         val response = executeGet(url)
         handleResponse(response)
 
-        val type = object : TypeToken<RallyQueryResult<RallyIteration>>() {}.type
-        val result: RallyQueryResult<RallyIteration> = gson.fromJson(response.body(), type)
+        val result: RallyQueryResult<RallyIteration> = gson.fromJson(response.body(), TYPE_ITERATIONS)
         return result.queryResult.safeResults
     }
 
@@ -907,8 +919,7 @@ class RallyApiClient(
         val response = executeGet(url)
         handleResponse(response)
 
-        val type = object : TypeToken<RallyQueryResult<RallyTaskItem>>() {}.type
-        val result: RallyQueryResult<RallyTaskItem> = gson.fromJson(response.body(), type)
+        val result: RallyQueryResult<RallyTaskItem> = gson.fromJson(response.body(), TYPE_TASKS)
         putCache(cacheKey, result.queryResult.safeResults)
         return result.queryResult.safeResults
     }
@@ -934,8 +945,7 @@ class RallyApiClient(
         val response = executeGet(url)
         handleResponse(response)
 
-        val type = object : TypeToken<RallyQueryResult<RallyTestCase>>() {}.type
-        val result: RallyQueryResult<RallyTestCase> = gson.fromJson(response.body(), type)
+        val result: RallyQueryResult<RallyTestCase> = gson.fromJson(response.body(), TYPE_TEST_CASES)
         putCache(cacheKey, result.queryResult.safeResults)
         return result.queryResult.safeResults
     }
@@ -962,8 +972,7 @@ class RallyApiClient(
         val response = executeGet(url)
         handleResponse(response)
 
-        val type = object : TypeToken<RallyQueryResult<RallyTestCaseStep>>() {}.type
-        val result: RallyQueryResult<RallyTestCaseStep> = gson.fromJson(response.body(), type)
+        val result: RallyQueryResult<RallyTestCaseStep> = gson.fromJson(response.body(), TYPE_TEST_STEPS)
         putCache(cacheKey, result.queryResult.safeResults)
         return result.queryResult.safeResults
     }
@@ -990,8 +999,7 @@ class RallyApiClient(
         val response = executeGet(url)
         handleResponse(response)
 
-        val type = object : TypeToken<RallyQueryResult<RallyAttachment>>() {}.type
-        val result: RallyQueryResult<RallyAttachment> = gson.fromJson(response.body(), type)
+        val result: RallyQueryResult<RallyAttachment> = gson.fromJson(response.body(), TYPE_ATTACHMENTS)
         putCache(cacheKey, result.queryResult.safeResults)
         return result.queryResult.safeResults
     }
@@ -1018,8 +1026,7 @@ class RallyApiClient(
         val response = executeGet(url)
         handleResponse(response)
 
-        val type = object : TypeToken<RallyQueryResult<RallyTestCase>>() {}.type
-        val result: RallyQueryResult<RallyTestCase> = gson.fromJson(response.body(), type)
+        val result: RallyQueryResult<RallyTestCase> = gson.fromJson(response.body(), TYPE_TEST_CASES)
         val tc = result.queryResult.safeResults.firstOrNull()
         if (tc != null) putCache(cacheKey, tc)
         return tc

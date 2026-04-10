@@ -513,6 +513,13 @@ class RallyDetailPanel(private val project: Project) : com.intellij.openapi.Disp
                     val name = iter.name ?: iter.refObjectName
                     if (name != null) parts.add("Sprint: $name")
                 }
+                if (artifact.blocked == true) {
+                    parts.add("BLOCKED" + (artifact.blockedReason?.let { ": $it" } ?: ""))
+                }
+                artifact.release?.let { rel ->
+                    val name = rel.name ?: rel.refObjectName
+                    if (name != null) parts.add("Release: $name")
+                }
             }
             is RallyDefect -> {
                 artifact.severity?.let { parts.add("Severity: $it") }
@@ -522,6 +529,13 @@ class RallyDetailPanel(private val project: Project) : com.intellij.openapi.Disp
                 artifact.iteration?.let { iter ->
                     val name = iter.name ?: iter.refObjectName
                     if (name != null) parts.add("Sprint: $name")
+                }
+                if (artifact.blocked == true) {
+                    parts.add("BLOCKED" + (artifact.blockedReason?.let { ": $it" } ?: ""))
+                }
+                artifact.release?.let { rel ->
+                    val name = rel.name ?: rel.refObjectName
+                    if (name != null) parts.add("Release: $name")
                 }
             }
             is RallyTestCase -> {

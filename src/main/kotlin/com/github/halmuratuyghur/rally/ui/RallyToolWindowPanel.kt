@@ -1343,6 +1343,8 @@ class RallyToolWindowPanel(private val project: Project) : Disposable {
         ApplicationManager.getApplication().executeOnPooledThread {
             try {
             val client = getClient()
+            client.enterBulkMode()
+            try {
             val exporter = RallyExporter(client)
             val artifactSuccess = java.util.concurrent.atomic.AtomicInteger(0)
             val artifactFailed = java.util.concurrent.atomic.AtomicInteger(0)
@@ -1402,6 +1404,9 @@ class RallyToolWindowPanel(private val project: Project) : Disposable {
                     .setFadeoutTime(5000)
                     .createBalloon()
                 balloon.show(RelativePoint.getSouthWestOf(statusLabel), Balloon.Position.above)
+            }
+            } finally {
+                client.exitBulkMode()
             }
             } catch (e: Exception) {
                 LOG.warn("Export aborted", e)
@@ -1884,6 +1889,17 @@ class RallyToolWindowPanel(private val project: Project) : Disposable {
             }
 
             textLabel.text = "${value.formattedID ?: "?"}: ${value.name ?: "Untitled"}"
+
+            // Show blocked indicator
+            val isBlocked = when (value) {
+                is RallyUserStory -> value.blocked == true
+                is RallyDefect -> value.blocked == true
+                else -> false
+            }
+            if (isBlocked) {
+                textLabel.text = "\u26D4 ${textLabel.text}"
+            }
+
             textLabel.foreground = if (isSelected) list.selectionForeground else list.foreground
 
             val state = if (value is RallyTestCase) {

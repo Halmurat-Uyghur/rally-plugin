@@ -187,6 +187,27 @@ class RallyApiModelsTest {
     }
 
     @Test
+    fun `parse user story with blocked and release fields`() {
+        val json = """
+        {
+            "FormattedID": "US100",
+            "Name": "Blocked Story",
+            "_type": "HierarchicalRequirement",
+            "Blocked": true,
+            "BlockedReason": "Waiting on API",
+            "Ready": false,
+            "Release": {"_ref": "https://rally1.rallydev.com/slm/webservice/v2.0/release/999", "Name": "Q1 2026"}
+        }
+        """.trimIndent()
+
+        val story = gson.fromJson(json, RallyUserStory::class.java)
+        assertEquals(true, story.blocked)
+        assertEquals("Waiting on API", story.blockedReason)
+        assertEquals(false, story.ready)
+        assertEquals("Q1 2026", story.release?.name)
+    }
+
+    @Test
     fun `missing fields default to null`() {
         val json = """{"FormattedID": "US1", "_type": "HierarchicalRequirement"}"""
         val story = gson.fromJson(json, RallyUserStory::class.java)

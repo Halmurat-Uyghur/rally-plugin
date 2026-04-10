@@ -29,7 +29,10 @@ src/main/kotlin/com/github/halmuratuyghur/rally/
 │   ├── RallyToolWindowFactory.kt  # ToolWindowFactory + DumbAware
 │   ├── RallyToolWindowPanel.kt    # Main UI: toolbar, filters, project switcher, ticket list, detail panel, sprint summary
 │   ├── RallyDetailPanel.kt        # Detail panel: description (HTML) + tabbed pane (Test Cases/Steps, Tasks, Attachments)
+│   ├── RallyColors.kt             # Shared color constants for UI components
 │   └── RallyIcons.kt             # Icon loader for /icons/rally.svg
+├── util/
+│   └── RallyHtmlUtils.kt          # Shared HTML/image utilities
 ```
 
 ## Key Design Decisions
@@ -40,8 +43,8 @@ src/main/kotlin/com/github/halmuratuyghur/rally/
 - **Detail panel layout** — Vertical split: description (top, 40%) + JBTabbedPane (bottom, 60%) with three tabs: Test Cases, Tasks, Attachments. When a Test Case is selected, tabs switch to show Test Steps instead. Tab titles show counts (e.g., "Test Cases (5)")
 - **Lazy description loading** — List queries use `LIST_FIELDS` (no Description) for smaller payloads. Description is fetched on demand via `fetchDescription()` when the detail panel opens
 - **Parallel detail loading** — Description, test cases, tasks, and attachments all load concurrently via `CompletableFuture`. Generation-based cancellation (AtomicLong) prevents stale selections from continuing to update the UI
-- **Caching** — LRU query cache (access-ordered `LinkedHashMap`, max 500 entries) with 2-minute TTL. Downloaded images use a bounded in-memory cache (10 MB cap, 1 MB per-image cap). Bulk export mode extends TTL to 15 minutes
-- **Threading**: `executeOnPooledThread` for API calls, `invokeLater` for UI updates, `CompletableFuture.supplyAsync` for parallel operations. Dedicated `apiExecutor` thread pool in RallyApiClient (8 daemon threads)
+- **Caching** — LRU query cache (access-ordered `LinkedHashMap`, max 200 entries) with 2-minute TTL. Downloaded images use a bounded in-memory cache (10 MB cap, 1 MB per-image cap). Bulk export mode extends TTL to 15 minutes
+- **Threading**: `executeOnPooledThread` for API calls, `invokeLater` for UI updates, `CompletableFuture.supplyAsync` for parallel operations. Dedicated `apiExecutor` thread pool in RallyApiClient (4 daemon threads)
 - **Disposal safety** — `RallyToolWindowPanel` implements `Disposable` with a `disposed` flag. `dispose()` and `getClient()` are synchronized on `clientLock` so no client can be created after disposal begins. All `getClient()` call sites are guarded with try/catch to prevent late background tasks from crashing
 - **HTTP/2** — Enabled for connection multiplexing on parallel requests. Respects IDE proxy settings
 - **No external Rally SDK** — uses Java's built-in `HttpClient` with `zsessionid` header for API key auth
@@ -51,13 +54,16 @@ src/main/kotlin/com/github/halmuratuyghur/rally/
 - **Workspace/Project refs** — Rally WSAPI requires full API URLs for workspace/project params. The `normalizeRef()` method in RallyApiClient handles conversion from bare IDs, ref paths, or full URLs
 - **Iteration filtering** — Iterations are scoped to the selected project via server-side project filtering in `queryIterations()`
 - **Sandbox persistence** — Gradle sandbox moved to `.sandbox/` (outside `build/`) so settings survive `./gradlew clean`
+- **Shared color constants** — `RallyColors` object eliminates color duplication across renderers
+- **invokeLaterIfAlive helper** — private inline function replaces 19 disposed-guard boilerplate instances
+- **Balloon notifications** — non-modal success feedback via JBPopupFactory
 - **Generic plugin design** — No workflow-specific or company-specific custom fields hardcoded. Only standard Rally fields (Method, ScheduleState, etc.) are used
 
 ## Performance Optimizations
 
 | Layer | Technique | Impact |
 |-------|-----------|--------|
-| **Caching** | LRU query cache (500 entries, 2-min TTL), bounded image cache (10 MB cap) | Eliminates redundant API calls without unbounded heap growth |
+| **Caching** | LRU query cache (200 entries, 2-min TTL), bounded image cache (10 MB cap) | Eliminates redundant API calls without unbounded heap growth |
 | **List queries** | `LIST_FIELDS` excludes Description field | Smaller payloads for 200+ items |
 | **Lazy description** | `fetchDescription()` on demand when detail panel opens | Faster initial list load |
 | **Parallel list** | User stories + defects fetched sequentially in `queryAllArtifacts` (changed from parallel to prevent thread-pool deadlock) | Deadlock-safe list load |
@@ -69,6 +75,11 @@ src/main/kotlin/com/github/halmuratuyghur/rally/
 | **JBColor pre-allocation** | Static color constants in companion objects for cell renderers | Avoids GC pressure from repeated allocations |
 | **Precompiled regex** | Static Regex patterns in RallyExporter for HTML stripping | Avoids re-creation per call during bulk export |
 | **Retry with backoff** | Exponential backoff + Retry-After for 429/502/503/504 | Resilient to transient Rally API errors |
+| **Pre-allocated TypeToken** | Static TypeToken fields in companion object | Avoids repeated reflection per API call |
+| **Bulk mode in export** | `enterBulkMode()`/`exitBulkMode()` wraps export operations | 15-min cache TTL prevents re-fetching during long exports |
+| **Reduced thread pool** | API executor reduced from 8 to 4 threads | Prevents thread saturation while maintaining parallelism |
+| **Reduced cache size** | LRU cache reduced from 500 to 200 entries | Lower memory footprint with same hit rate |
+| **Jittered backoff** | ±30% jitter on retry delays | Prevents thundering herd on transient failures |
 
 ## Rally WSAPI Gotchas
 
@@ -81,6 +92,14 @@ src/main/kotlin/com/github/halmuratuyghur/rally/
 - Attachment content is fetched via a Content ref that returns base64-encoded data
 - Inline images in descriptions use `/slm/attachment/<OID>/<filename>` URLs, downloaded via zsessionid auth
 - Iterations are scoped per-project; the plugin uses server-side project filtering to avoid duplicates
+
+## Data Model (Tier 1 Fields)
+
+Core artifact models (`RallyUserStory`, `RallyDefect`, `RallyTaskItem`) include: FormattedID, Name, ScheduleState/State, Owner, Project, Iteration, PlanEstimate, Description, CreationDate, LastUpdateDate, plus extended fields: Blocked, BlockedReason, Release, Ready.
+
+## Testing
+
+10 unit tests for JSON parsing of Rally API responses (user stories, defects, tasks, test cases, test steps, attachments, iterations, projects). Run via `./gradlew test`.
 
 ## Build & Run
 
@@ -122,6 +141,17 @@ Any State, Idea, Defined, In-Progress, Completed, Accepted, Active (excludes Acc
 - **Security** — Rally query value escaping, attachment filename sanitization with path traversal prevention, canonical path verification
 - **Threading safety** — PasswordSafe access cached off-EDT, project/iteration selection read from cached data instead of Swing state, generation-based stale result prevention
 - **Performance** — caching, parallel queries, lazy description loading, HTTP/2, generation-based cancellation, disposed-client guards (see Performance Optimizations table)
+- **Create Defect dialog** — full dialog with Name, Project, Sprint, Severity, Priority, Assign to me, Description, and ZIP attachment upload
+- **Create Task** — create task from detail panel Tasks tab, linked to the selected work product
+- **Edit Points** — edit PlanEstimate via context menu on user stories/defects
+- **Finish Working** — toolbar button moves ticket to Completed state
+- **Metadata strip** — detail panel header shows Owner, Points, Sprint, Severity, Priority
+- **Balloon notifications** — non-modal success feedback via JBPopupFactory for create, export, and other actions
+- **Keyboard accessibility** — focusable buttons, Enter key support on ticket list
+- **Search placeholder text** — search field shows hint text when empty
+- **Page Size configurable** — settings UI allows configuring query page size
+- **Blocked/BlockedReason indicator** — visual indicator for blocked artifacts in detail panel
+- **PlannedVelocity and days remaining** — sprint summary shows planned velocity and days remaining in current sprint
 
 ## API Methods (RallyApiClient)
 
@@ -148,6 +178,9 @@ Any State, Idea, Defined, In-Progress, Completed, Accepted, Active (excludes Acc
 | `queryProjects()` / `queryIterations()` | Project and sprint lists |
 | `queryCurrentIteration()` | Find active sprint by today's date |
 | `createUserStory()` | Create a new user story |
+| `createDefect()` | Create a new defect |
+| `createTask()` | Create a new task linked to a work product |
+| `updateArtifactField(ref, type, field, value)` | Update any field on an artifact |
 | `uploadAttachment(ref, path)` | Two-step attachment upload (content + link) |
 | `getUserByUsername(username)` | Lookup user by email |
 | `clearCache()` / `clearArtifactCache()` | Cache invalidation |
@@ -164,4 +197,4 @@ Any State, Idea, Defined, In-Progress, Completed, Accepted, Active (excludes Acc
 ## Not Yet Implemented
 
 - Create Test Case dialog
-- Bulk Export UI (backend implemented in RallyExporter but no UI entry point)
+- Bulk Export UI (backend implemented in RallyExporter but no dedicated bulk-select UI)
