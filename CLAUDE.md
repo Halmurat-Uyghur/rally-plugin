@@ -8,7 +8,7 @@ IntelliJ IDEA plugin that provides a **Tool Window** for browsing and managing R
 
 - **Language**: Kotlin 1.9.25 (JVM 17)
 - **Build**: Gradle with Kotlin DSL, `org.jetbrains.intellij` plugin 1.17.4
-- **Target IDE**: IntelliJ IDEA Community 2024.1 (builds 241–253.*)
+- **Target IDE**: IntelliJ IDEA Community 2024.1 (builds 241–261.*)
 - **Dependencies**: Gson 2.10.1 (JSON), JUnit 4.13.2 (tests)
 - **Plugin ID**: `com.github.halmuratuyghur.rally` (NOT `com.intellij.*` — that prefix is reserved by JetBrains)
 
