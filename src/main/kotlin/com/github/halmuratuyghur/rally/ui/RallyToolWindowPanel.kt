@@ -426,8 +426,10 @@ class RallyToolWindowPanel(private val project: Project) : Disposable {
             try {
                 val client = getClient()
 
-                // Load projects if not yet loaded or settings changed
-                val snapshot = "${settings.serverUrl}|${settings.apiKey.hashCode()}|${settings.workspaceRef}"
+                // Load projects if not yet loaded or settings changed.
+                // Use a non-sensitive SHA-256 fingerprint of the API key instead of String.hashCode()
+                // so two distinct keys can't collide and mask a credential change.
+                val snapshot = "${settings.serverUrl}|${apiKeyFingerprint(settings.apiKey)}|${settings.workspaceRef}"
                 if (!projectsLoaded || snapshot != lastSettingsSnapshot) {
                     lastSettingsSnapshot = snapshot
                     loadProjects(client)
@@ -535,6 +537,23 @@ class RallyToolWindowPanel(private val project: Project) : Disposable {
                     }
                 }
             }
+        }
+    }
+
+    /**
+     * Non-sensitive fingerprint of the API key: first 16 hex chars of SHA-256.
+     * Used only to detect credential changes — never logged or persisted.
+     */
+    private fun apiKeyFingerprint(key: String): String {
+        if (key.isEmpty()) return ""
+        return try {
+            val digest = java.security.MessageDigest.getInstance("SHA-256")
+            val hash = digest.digest(key.toByteArray(Charsets.UTF_8))
+            val sb = StringBuilder(16)
+            for (i in 0 until 8) sb.append("%02x".format(hash[i]))
+            sb.toString()
+        } catch (_: Exception) {
+            key.length.toString()
         }
     }
 

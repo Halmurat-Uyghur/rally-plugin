@@ -514,9 +514,9 @@ class RallyExporter(private val client: RallyApiClient) {
         var imgCounter = 0
 
         while (matcher.find()) {
-            val originalSrc = matcher.group(1)
-            val objectId = matcher.group(2)
-            val fileName = matcher.group(3)
+            val originalSrc = matcher.group(2)
+            val objectId = matcher.group(3)
+            val fileName = matcher.group(4)
             imgCounter++
             val ext = fileName.substringAfterLast('.', "png").lowercase()
             val uniqueFileName = if (imgCounter == 1) "$artifactId.$ext" else "${artifactId}_$imgCounter.$ext"

@@ -60,25 +60,39 @@ class RallyApiClient(
         url
     }
 
-    /** Pre-computed allowed host for security validation. */
-    private val allowedHost: String = run {
-        val host = try { URI(normalizedServerUrl).host } catch (_: Exception) { null }
-        host?.lowercase() ?: throw RallySecurityException("Cannot determine host from server URL: $normalizedServerUrl")
+    /** Pre-computed allowed host and scheme for security validation. */
+    private val allowedHost: String
+    private val allowedScheme: String
+    init {
+        val uri = try { URI(normalizedServerUrl) } catch (_: Exception) { null }
+        allowedHost = uri?.host?.lowercase()
+            ?: throw RallySecurityException("Cannot determine host from server URL: $normalizedServerUrl")
+        allowedScheme = uri.scheme?.lowercase()
+            ?: throw RallySecurityException("Cannot determine scheme from server URL: $normalizedServerUrl")
     }
 
     /**
-     * Validate that a URL targets the configured Rally server.
+     * Validate that a URL targets the configured Rally server on the configured scheme.
      * Relative URLs (null host) pass through safely — they resolve against normalizedServerUrl.
+     * Absolute URLs must match both host and scheme so a poisoned `_ref` can't leak the
+     * API key to another host or downgrade https → http.
      */
     private fun requireSameHost(url: String) {
-        val targetHost = try {
-            URI(url).host
+        val uri = try {
+            URI(url)
         } catch (_: Exception) {
             throw RallySecurityException("Malformed URL rejected: $url")
         }
-        if (targetHost != null && targetHost.lowercase() != allowedHost) {
+        val targetHost = uri.host?.lowercase() ?: return  // relative — safe
+        if (targetHost != allowedHost) {
             throw RallySecurityException(
                 "Security: refusing request to external host '$targetHost' (expected '$allowedHost')"
+            )
+        }
+        val targetScheme = uri.scheme?.lowercase()
+        if (targetScheme != null && targetScheme != allowedScheme) {
+            throw RallySecurityException(
+                "Security: refusing request with scheme '$targetScheme' (expected '$allowedScheme')"
             )
         }
     }
@@ -257,6 +271,7 @@ class RallyApiClient(
      * Execute HTTP GET request with retry for transient errors (429, 502, 503, 504).
      */
     private fun executeGet(url: String): HttpResponse<String> {
+        requireSameHost(url)
         val request = HttpRequest.newBuilder()
             .uri(URI.create(url))
             .header(ZSESSION_HEADER, apiKey)
@@ -687,6 +702,7 @@ class RallyApiClient(
      * Execute HTTP POST request with retry for transient errors.
      */
     private fun executePost(url: String, jsonBody: String): HttpResponse<String> {
+        requireSameHost(url)
         val request = HttpRequest.newBuilder()
             .uri(URI.create(url))
             .header(ZSESSION_HEADER, apiKey)
@@ -1076,7 +1092,7 @@ class RallyApiClient(
             return bytes
         }
         synchronized(imageCache) {
-            imageCache[url]?.let { return bytes }
+            imageCache[url]?.let { return it }
             if (imageCacheBytes.get() + bytes.size > maxImageCacheBytes) {
                 val toRemove = imageCache.keys.take(imageCache.size / 4)
                 toRemove.forEach { key ->

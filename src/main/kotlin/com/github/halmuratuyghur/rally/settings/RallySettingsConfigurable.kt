@@ -148,8 +148,10 @@ class RallySettingsConfigurable : Configurable {
     }
 
     private fun testConnection() {
+        // Capture all Swing field state on the EDT before dispatching to a background thread.
         val url = serverUrlField?.text?.trim() ?: ""
         val key = String(apiKeyField?.password ?: charArrayOf()).trim()
+        val fieldUsername = usernameField?.text?.trim() ?: ""
 
         if (url.isBlank() || key.isBlank()) {
             Messages.showErrorDialog("Please provide server URL and API key.", "Rally Connection")
@@ -164,8 +166,6 @@ class RallySettingsConfigurable : Configurable {
                 val apiKeyName = apiKeyOwner.displayName ?: "Unknown"
                 val apiKeyUserName = apiKeyOwner.userName ?: "Unknown"
 
-                // Capture username before auto-fill (safe — still on pooled thread, but reads value before EDT dispatch)
-                val fieldUsername = usernameField?.text?.trim() ?: ""
                 val configuredUsername = fieldUsername.ifBlank { apiKeyUserName }
 
                 // Auto-fill username if empty

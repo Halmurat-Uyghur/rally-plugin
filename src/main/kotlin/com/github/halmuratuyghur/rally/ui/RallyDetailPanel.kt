@@ -45,7 +45,12 @@ class RallyDetailPanel(private val project: Project) : com.intellij.openapi.Disp
         private const val TAB_ATTACHMENTS = 2
 
         // Colors are defined in RallyColors object
-        private val EXTERNAL_SRC_PATTERN = Pattern.compile("""src="https?://[^"]*"""", Pattern.CASE_INSENSITIVE)
+        // Matches external src attributes (double- or single-quoted, protocol-relative included)
+        // so JTextPane doesn't fetch them over the network before we neutralize the description.
+        private val EXTERNAL_SRC_PATTERN = Pattern.compile(
+            """src\s*=\s*(["'])(?:https?:)?//[^"']*\1""",
+            Pattern.CASE_INSENSITIVE
+        )
 
         fun formatFileSize(bytes: Long?): String {
             if (bytes == null || bytes <= 0) return ""
@@ -920,7 +925,7 @@ class RallyDetailPanel(private val project: Project) : com.intellij.openapi.Disp
         while (matcher.find() && matches.size < maxInlineImages) {
             matches.add(ImageMatch(
                 matcher.start(), matcher.end(), matcher.group(),
-                matcher.group(1), matcher.group(2), matcher.group(3)
+                matcher.group(2), matcher.group(3), matcher.group(4)
             ))
         }
         if (matches.isEmpty()) return html
