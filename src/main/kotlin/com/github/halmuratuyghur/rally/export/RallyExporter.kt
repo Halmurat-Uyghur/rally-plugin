@@ -37,6 +37,18 @@ class RallyExporter(private val client: RallyApiClient) {
         private val RE_LI = Regex("<li[^>]*>", RegexOption.IGNORE_CASE)
         private val RE_TAG = Regex("<[^>]+>")
         private val RE_MULTI_NEWLINE = Regex("\n{3,}")
+
+        /**
+         * Hard cap on inline images downloaded per description. Protects against
+         * runaway descriptions with 100+ embedded images that previously triggered
+         * multi-minute serial download hangs. Beyond the cap, the original Rally
+         * URLs are left in place — broken offline but no worse than failing the
+         * whole export.
+         */
+        private const val MAX_INLINE_IMAGES_PER_DESCRIPTION = 50
+
+        /** Bounded concurrency for the inline image downloader. Matches the API pool. */
+        private const val INLINE_IMAGE_CONCURRENCY = 4
     }
 
     /** Per-session cache for downloaded attachment paths (deduplicates across JSON+Markdown export). */
@@ -508,28 +520,60 @@ class RallyExporter(private val client: RallyApiClient) {
         val matcher = RallyHtmlUtils.INLINE_IMG_PATTERN.matcher(html)
         if (!matcher.find()) return html
 
+        // Pass 1: walk the matcher once and collect at most MAX_INLINE_IMAGES_PER_DESCRIPTION
+        // unique download jobs. Done first so Pass 2 can run in parallel.
+        data class ImageJob(val originalSrc: String, val objectId: String, val originalFileName: String, val uniqueFileName: String)
+        val jobs = mutableListOf<ImageJob>()
         matcher.reset()
-        val result = StringBuilder()
-        val imgDir = RallyFileUtils.safeResolve(Paths.get(outputDir), "${artifactId}_images").toString()
         var imgCounter = 0
-
-        while (matcher.find()) {
+        while (matcher.find() && jobs.size < MAX_INLINE_IMAGES_PER_DESCRIPTION) {
+            imgCounter++
             val originalSrc = matcher.group(2)
             val objectId = matcher.group(3)
             val fileName = matcher.group(4)
-            imgCounter++
             val ext = fileName.substringAfterLast('.', "png").lowercase()
             val rawUnique = if (imgCounter == 1) "$artifactId.$ext" else "${artifactId}_$imgCounter.$ext"
             val uniqueFileName = RallyFileUtils.sanitizeFileName(rawUnique)
+            jobs.add(ImageJob(originalSrc, objectId, fileName, uniqueFileName))
+        }
 
-            val localPath = downloadRallyImage(objectId, fileName, uniqueFileName, imgDir)
-            if (localPath != null) {
-                val relativePath = "${artifactId}_images/$uniqueFileName"
-                val replacement = matcher.group().replace(originalSrc, relativePath)
-                matcher.appendReplacement(result, java.util.regex.Matcher.quoteReplacement(replacement))
+        if (jobs.isEmpty()) return html
+
+        // Pass 2: download in parallel with bounded concurrency, against the same
+        // apiExecutor the rest of the client uses, so retries/HTTP/2 multiplexing
+        // are shared.
+        val imgDir = RallyFileUtils.safeResolve(Paths.get(outputDir), "${artifactId}_images").toString()
+        val downloads = ConcurrentHashMap<String, String>()  // originalSrc -> relative local path
+        val semaphore = Semaphore(INLINE_IMAGE_CONCURRENCY)
+        val futures = jobs.map { job ->
+            CompletableFuture.runAsync({
+                semaphore.acquire()
+                try {
+                    val localPath = downloadRallyImage(job.objectId, job.originalFileName, job.uniqueFileName, imgDir)
+                    if (localPath != null) {
+                        downloads[job.originalSrc] = "${artifactId}_images/${job.uniqueFileName}"
+                    }
+                } finally {
+                    semaphore.release()
+                }
+            }, client.apiExecutor)
+        }
+        CompletableFuture.allOf(*futures.toTypedArray()).join()
+
+        // Pass 3: rewrite the HTML using the downloaded paths. Matches beyond the
+        // per-call cap pass through unchanged so the rendered output still has
+        // every image reference (even if some won't load offline).
+        matcher.reset()
+        val result = StringBuilder()
+        while (matcher.find()) {
+            val originalSrc = matcher.group(2)
+            val localRelative = downloads[originalSrc]
+            val replacement = if (localRelative != null) {
+                matcher.group().replace(originalSrc, localRelative)
             } else {
-                matcher.appendReplacement(result, java.util.regex.Matcher.quoteReplacement(matcher.group()))
+                matcher.group()
             }
+            matcher.appendReplacement(result, java.util.regex.Matcher.quoteReplacement(replacement))
         }
         matcher.appendTail(result)
         return result.toString()
