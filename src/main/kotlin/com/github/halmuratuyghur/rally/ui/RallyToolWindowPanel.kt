@@ -611,6 +611,7 @@ class RallyToolWindowPanel(private val project: Project) : Disposable {
                 projectCombo.addItem("All Projects")
                 projectCombo.isEnabled = false
                 // Leave projectsLoaded = false so next loadTickets() retries
+                notifyLoadFailure("projects", e)
             }
         }
     }
@@ -654,8 +655,26 @@ class RallyToolWindowPanel(private val project: Project) : Disposable {
                 iterationCombo.addItem("All Sprints")
                 iterationCombo.isEnabled = false
                 // Leave iterationsLoaded = false so next loadTickets() retries
+                notifyLoadFailure("iterations", e)
             }
         }
+    }
+
+    /**
+     * Show a non-modal balloon when a metadata load (projects or iterations) fails,
+     * so the user knows the dropdown is empty because of an error rather than because
+     * Rally legitimately returned no items.
+     */
+    private fun notifyLoadFailure(what: String, e: Exception) {
+        val balloon = JBPopupFactory.getInstance()
+            .createHtmlTextBalloonBuilder(
+                "Failed to load $what: ${e.message ?: e.javaClass.simpleName}",
+                MessageType.WARNING,
+                null
+            )
+            .setFadeoutTime(5000)
+            .createBalloon()
+        balloon.show(RelativePoint.getSouthWestOf(statusLabel), Balloon.Position.above)
     }
 
     private fun updateClientProjectRef(selectedIndex: Int) {
