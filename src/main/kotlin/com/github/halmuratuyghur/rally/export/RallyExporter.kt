@@ -218,25 +218,27 @@ class RallyExporter(private val client: RallyApiClient) {
             for (artifact in artifacts) {
                 val id = artifact.formattedID ?: continue
                 try {
-                    writer.write("## $id — ${artifact.name ?: "Untitled"}\n\n")
-                    writer.write("- **Type:** ${artifact.type ?: ""}\n")
-                    writer.write("- **State:** ${artifact.scheduleState ?: artifact.state ?: ""}\n")
-                    writer.write("- **Owner:** ${artifact.owner?.displayName ?: artifact.owner?.refObjectName ?: ""}\n")
+                    val safeName = escapeMarkdown(artifact.name ?: "Untitled")
+                    val safeOwner = escapeMarkdown(artifact.owner?.displayName ?: artifact.owner?.refObjectName ?: "")
+                    writer.write("## $id — $safeName\n\n")
+                    writer.write("- **Type:** ${escapeMarkdown(artifact.type ?: "")}\n")
+                    writer.write("- **State:** ${escapeMarkdown(artifact.scheduleState ?: artifact.state ?: "")}\n")
+                    writer.write("- **Owner:** $safeOwner\n")
                     writer.write("- **Created:** ${artifact.creationDate?.take(10) ?: ""}\n")
                     writer.write("- **Updated:** ${artifact.lastUpdateDate?.take(10) ?: ""}\n")
 
                     if (artifact is com.github.halmuratuyghur.rally.api.RallyDefect) {
-                        writer.write("- **Severity:** ${artifact.severity ?: ""}\n")
-                        writer.write("- **Priority:** ${artifact.priority ?: ""}\n")
-                        writer.write("- **Environment:** ${artifact.environment ?: ""}\n")
-                        writer.write("- **Project:** ${artifact.project?.refObjectName ?: artifact.project?.name ?: ""}\n")
-                        writer.write("- **Iteration:** ${artifact.iteration?.refObjectName ?: artifact.iteration?.name ?: ""}\n")
+                        writer.write("- **Severity:** ${escapeMarkdown(artifact.severity ?: "")}\n")
+                        writer.write("- **Priority:** ${escapeMarkdown(artifact.priority ?: "")}\n")
+                        writer.write("- **Environment:** ${escapeMarkdown(artifact.environment ?: "")}\n")
+                        writer.write("- **Project:** ${escapeMarkdown(artifact.project?.refObjectName ?: artifact.project?.name ?: "")}\n")
+                        writer.write("- **Iteration:** ${escapeMarkdown(artifact.iteration?.refObjectName ?: artifact.iteration?.name ?: "")}\n")
                     }
 
                     if (artifact is com.github.halmuratuyghur.rally.api.RallyUserStory) {
                         writer.write("- **Plan Estimate:** ${artifact.planEstimate ?: ""}\n")
-                        writer.write("- **Project:** ${artifact.project?.refObjectName ?: artifact.project?.name ?: ""}\n")
-                        writer.write("- **Iteration:** ${artifact.iteration?.refObjectName ?: artifact.iteration?.name ?: ""}\n")
+                        writer.write("- **Project:** ${escapeMarkdown(artifact.project?.refObjectName ?: artifact.project?.name ?: "")}\n")
+                        writer.write("- **Iteration:** ${escapeMarkdown(artifact.iteration?.refObjectName ?: artifact.iteration?.name ?: "")}\n")
                     }
 
                     val desc = stripHtml(descriptionMap[id] ?: "")
@@ -295,6 +297,25 @@ class RallyExporter(private val client: RallyApiClient) {
 
         CompletableFuture.allOf(*futures.toTypedArray()).join()
         return result
+    }
+
+    /**
+     * Escape Markdown special characters that would otherwise corrupt structure
+     * when artifact names/owners/values are inlined into headings, list items,
+     * or table cells. Backslash-escapes the GFM metacharacters; leaves angle
+     * brackets alone (HTML passthrough is fine in our exports).
+     */
+    private fun escapeMarkdown(text: String): String {
+        if (text.isEmpty()) return text
+        return text
+            .replace("\\", "\\\\")
+            .replace("`", "\\`")
+            .replace("*", "\\*")
+            .replace("_", "\\_")
+            .replace("[", "\\[")
+            .replace("]", "\\]")
+            .replace("|", "\\|")
+            .replace("#", "\\#")
     }
 
     /**
