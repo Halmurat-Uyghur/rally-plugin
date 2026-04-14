@@ -1485,8 +1485,12 @@ class RallyToolWindowPanel(private val project: Project) : Disposable {
 
             invokeLaterIfAlive {
                 statusLabel.text = "Exported ${artifactSuccess.get()} artifact(s), ${tcExported.get()} test case(s)"
+                // createHtmlTextBalloonBuilder treats its argument as HTML, so an export
+                // directory containing '<' or '&' would break rendering or inject markup.
+                // Escape every interpolated value before substituting <br> for newlines.
+                val safeOutputDir = com.intellij.openapi.util.text.StringUtil.escapeXmlEntities(outputDir)
                 val summary = buildString {
-                    append("Exported to:\n$outputDir\n\n")
+                    append("Exported to:\n$safeOutputDir\n\n")
                     append("Artifacts: ${artifactSuccess.get()} exported")
                     if (artifactFailed.get() > 0) append(", ${artifactFailed.get()} failed")
                     append("\nTest Cases: ${tcExported.get()} exported")
