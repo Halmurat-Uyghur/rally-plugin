@@ -933,7 +933,15 @@ class RallyDetailPanel(private val project: Project) : com.intellij.openapi.Disp
         // description at 11 device pixels (effectively a 5-6pt font on Retina).
         // JBUI.scale converts logical pixels to scaled physical pixels.
         val fontSize = com.intellij.util.ui.JBUI.scaleFontSize(11f)
-        return "<html><body style='font-family:sans-serif;font-size:${fontSize}px;margin:4px;'>$html</body></html>"
+        // Neutralize any literal </body> or </html> in the Rally description so
+        // HTMLEditorKit doesn't truncate the render at the embedded closing tag.
+        // We can't fully sanitize the HTML here (Rally lets users author rich
+        // descriptions), but escaping these two structural tags is enough to
+        // keep our outer wrapper intact.
+        val safe = html
+            .replace("</body>", "&lt;/body&gt;", ignoreCase = true)
+            .replace("</html>", "&lt;/html&gt;", ignoreCase = true)
+        return "<html><body style='font-family:sans-serif;font-size:${fontSize}px;margin:4px;'>$safe</body></html>"
     }
 
     /**
