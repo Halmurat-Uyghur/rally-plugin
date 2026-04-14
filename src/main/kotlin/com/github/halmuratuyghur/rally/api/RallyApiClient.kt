@@ -663,10 +663,35 @@ class RallyApiClient(
             throw RallyApiException("Query failed - ${errors.joinToString("; ")}")
         }
 
+        // Partial failure: at least one type returned but at least one failed.
+        // Surface via IDE notification so the user knows the list is incomplete
+        // — previously we silently returned a partial result that looked like a
+        // full success.
+        if (errors.isNotEmpty()) {
+            LOG.warn("queryAllArtifacts partial failure: ${errors.joinToString("; ")}")
+            notifyPartialFailure(errors)
+        }
+
         // Sort by last update date (most recent first)
         val sorted = results.sortedByDescending { it.lastUpdateDate }
         putCache(cacheKey, sorted)
         return sorted
+    }
+
+    private fun notifyPartialFailure(errors: List<String>) {
+        try {
+            val group = com.intellij.notification.NotificationGroupManager.getInstance()
+                .getNotificationGroup("Rally")
+            group.createNotification(
+                "Rally — partial query failure",
+                "Some results couldn't be loaded:\n${errors.joinToString("\n")}",
+                com.intellij.notification.NotificationType.WARNING
+            ).notify(null)
+        } catch (e: Exception) {
+            // Notification group not registered or notification API unavailable —
+            // the WARN log above is the fallback.
+            LOG.warn("Failed to dispatch partial-failure notification", e)
+        }
     }
 
     /**
