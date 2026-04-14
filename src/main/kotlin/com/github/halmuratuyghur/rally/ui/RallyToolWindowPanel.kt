@@ -670,9 +670,16 @@ class RallyToolWindowPanel(private val project: Project) : Disposable {
      * Rally legitimately returned no items.
      */
     private fun notifyLoadFailure(what: String, e: Exception) {
+        // createHtmlTextBalloonBuilder treats its argument as HTML, so any '<' or '&'
+        // in the exception message would either break the balloon or, for server-
+        // provided strings, inject unintended markup. Escape both the label and the
+        // message body before interpolation.
+        val safeWhat = com.intellij.openapi.util.text.StringUtil.escapeXmlEntities(what)
+        val rawMessage = e.message ?: e.javaClass.simpleName
+        val safeMessage = com.intellij.openapi.util.text.StringUtil.escapeXmlEntities(rawMessage)
         val balloon = JBPopupFactory.getInstance()
             .createHtmlTextBalloonBuilder(
-                "Failed to load $what: ${e.message ?: e.javaClass.simpleName}",
+                "Failed to load $safeWhat: $safeMessage",
                 MessageType.WARNING,
                 null
             )
