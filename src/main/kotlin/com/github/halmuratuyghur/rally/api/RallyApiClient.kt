@@ -299,7 +299,7 @@ class RallyApiClient(
             .GET()
             .build()
 
-        return executeWithRetry(request)
+        return executeWithRetry(request, HttpResponse.BodyHandlers.ofString())
     }
 
     /**
@@ -767,7 +767,7 @@ class RallyApiClient(
             .POST(HttpRequest.BodyPublishers.ofString(jsonBody))
             .build()
 
-        return executeWithRetry(request)
+        return executeWithRetry(request, HttpResponse.BodyHandlers.ofString())
     }
 
     /**
@@ -775,11 +775,14 @@ class RallyApiClient(
      * Retries up to MAX_RETRIES times for status codes 429, 502, 503, 504.
      * Honors the Retry-After header when present (capped at 30s).
      */
-    private fun executeWithRetry(request: HttpRequest): HttpResponse<String> {
+    private fun <T> executeWithRetry(
+        request: HttpRequest,
+        bodyHandler: HttpResponse.BodyHandler<T>
+    ): HttpResponse<T> {
         var lastException: Exception? = null
         for (attempt in 0..MAX_RETRIES) {
             val response = try {
-                httpClient.send(request, HttpResponse.BodyHandlers.ofString())
+                httpClient.send(request, bodyHandler)
             } catch (e: Exception) {
                 lastException = e
                 if (attempt < MAX_RETRIES) {
@@ -1146,11 +1149,10 @@ class RallyApiClient(
             .GET()
             .build()
 
-        val response = try {
-            httpClient.send(request, HttpResponse.BodyHandlers.ofByteArray())
-        } catch (e: Exception) {
-            throw RallyConnectionException("Failed to download attachment: ${e.message}", e)
-        }
+        // Go through executeWithRetry so transient 502/503/504 + network faults use
+        // the same capped exponential backoff as the JSON paths. Without this,
+        // flaky Rally downloads broke exports on the first blip.
+        val response = executeWithRetry(request, HttpResponse.BodyHandlers.ofByteArray())
 
         if (response.statusCode() != 200) {
             throw RallyApiException("Download failed with status ${response.statusCode()}", response.statusCode(), null)
