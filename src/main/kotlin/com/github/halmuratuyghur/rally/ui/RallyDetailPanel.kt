@@ -1024,8 +1024,12 @@ class RallyDetailPanel(private val project: Project) : com.intellij.openapi.Disp
             sb.replace(match.start, match.end, replacement)
         }
         val resolved = sb.toString()
-        // Neutralize any remaining external http(s) src attributes to prevent JTextPane network fetches
-        return EXTERNAL_SRC_PATTERN.matcher(resolved).replaceAll("""src="" """)
+        // Neutralize any remaining external http(s) src attributes to prevent JTextPane
+        // network fetches. The previous replacement string `src="" """` left a stray
+        // closing quote inside the tag, which produced malformed HTML in the rendered
+        // output; the pattern already consumes the entire src="..." run via the
+        // backreference, so we just emit a single empty src attribute.
+        return EXTERNAL_SRC_PATTERN.matcher(resolved).replaceAll("""src=""""")
     }
 
 
