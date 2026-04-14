@@ -248,6 +248,15 @@ class RallyApiClient(
          * across retries but in smaller chunks, so other work can interleave.
          */
         private const val MAX_RETRY_SLEEP_MS = 2_000L
+
+        /**
+         * Hard cap on attachment upload size. Each upload base64-encodes the file
+         * (~4N/3 bytes) and then wraps it in a JSON body, so peak heap is roughly
+         * 2-3x the file size. 25 MB caps the worst case at ~75 MB, well within a
+         * typical IDE heap, and still covers anything users would reasonably
+         * attach to a Rally artifact.
+         */
+        private const val MAX_UPLOAD_BYTES = 25L * 1024 * 1024
         private val RETRYABLE_STATUS_CODES = setOf(429, 502, 503, 504)
 
         // Fields for list queries (lightweight — no Description)
@@ -1354,10 +1363,17 @@ class RallyApiClient(
      */
     fun uploadAttachment(artifactRef: String, filePath: Path): RallyAttachment {
         val fileName = filePath.fileName.toString()
+        val fileSize = Files.size(filePath)
+        require(fileSize <= MAX_UPLOAD_BYTES) {
+            "Attachment too large: ${fileSize / 1024} KB exceeds the ${MAX_UPLOAD_BYTES / 1024 / 1024} MB upload limit"
+        }
         val fileBytes = Files.readAllBytes(filePath)
-        val fileSize = fileBytes.size.toLong()
         val contentType = Files.probeContentType(filePath) ?: "application/octet-stream"
-        val base64Content = Base64.getEncoder().encodeToString(fileBytes)
+        // Stream base64 directly into a buffer to skip the intermediate String
+        // allocation that Base64.getEncoder().encodeToString() produces.
+        val base64Buffer = java.io.ByteArrayOutputStream(((fileBytes.size * 4 + 2) / 3) + 16)
+        Base64.getEncoder().wrap(base64Buffer).use { it.write(fileBytes) }
+        val base64Content = base64Buffer.toString(StandardCharsets.US_ASCII)
 
         // Step 1: Create AttachmentContent
         val contentUrl = buildApiUrl("attachmentcontent/create")
