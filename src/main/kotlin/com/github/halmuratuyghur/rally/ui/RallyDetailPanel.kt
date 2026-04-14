@@ -907,7 +907,11 @@ class RallyDetailPanel(private val project: Project) : com.intellij.openapi.Disp
     }
 
     private fun wrapHtml(html: String): String {
-        return "<html><body style='font-family:sans-serif;font-size:11px;margin:4px;'>$html</body></html>"
+        // Use the IDE's label font size so HiDPI displays don't render the
+        // description at 11 device pixels (effectively a 5-6pt font on Retina).
+        // JBUI.scale converts logical pixels to scaled physical pixels.
+        val fontSize = com.intellij.util.ui.JBUI.scaleFontSize(11f)
+        return "<html><body style='font-family:sans-serif;font-size:${fontSize}px;margin:4px;'>$html</body></html>"
     }
 
     /**
