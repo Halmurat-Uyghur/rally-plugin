@@ -4,6 +4,7 @@ import com.intellij.openapi.diagnostic.Logger
 import com.github.halmuratuyghur.rally.api.RallyApiClient
 import com.github.halmuratuyghur.rally.api.RallyAttachment
 import com.github.halmuratuyghur.rally.api.RallyTestCaseStep
+import com.github.halmuratuyghur.rally.util.RallyFileUtils
 import com.github.halmuratuyghur.rally.util.RallyHtmlUtils
 import com.google.gson.GsonBuilder
 import com.google.gson.JsonArray
@@ -29,8 +30,6 @@ class RallyExporter(private val client: RallyApiClient) {
             .serializeNulls()
             .create()
 
-        private val RE_UNSAFE_FILENAME = Regex("[^a-zA-Z0-9._\\-()\\[\\] ]")
-
         // Pre-compiled regex patterns for stripHtml (avoid re-creating per call during bulk export)
         private val RE_BR = Regex("<br\\s*/?>", RegexOption.IGNORE_CASE)
         private val RE_P_OPEN = Regex("<p[^>]*>", RegexOption.IGNORE_CASE)
@@ -52,7 +51,10 @@ class RallyExporter(private val client: RallyApiClient) {
             ?: throw RuntimeException("Test case $testCaseId not found")
 
         val steps = client.queryTestSteps(testCaseId)
-        val attachments = try { client.queryAttachments(testCaseId) } catch (e: Exception) { emptyList() }
+        val attachments = try { client.queryAttachments(testCaseId) } catch (e: Exception) {
+            LOG.warn("Failed to fetch attachments for test case $testCaseId", e)
+            emptyList()
+        }
 
         val output = JsonObject().apply {
             addProperty("id", testCaseId)
@@ -68,9 +70,9 @@ class RallyExporter(private val client: RallyApiClient) {
             addProperty("totalAttachments", attachments.size)
         }
 
-        val dir = File(outputDir)
-        dir.mkdirs()
-        val file = File(dir, "$testCaseId.json")
+        val outRoot = Paths.get(outputDir)
+        Files.createDirectories(outRoot)
+        val file = RallyFileUtils.safeResolve(outRoot, "$testCaseId.json").toFile()
         file.writeText(gson.toJson(output), StandardCharsets.UTF_8)
 
         LOG.info("Generated JSON: ${file.absolutePath}")
@@ -83,7 +85,10 @@ class RallyExporter(private val client: RallyApiClient) {
             ?: throw RuntimeException("Test case $testCaseId not found")
 
         val steps = client.queryTestSteps(testCaseId)
-        val attachments = try { client.queryAttachments(testCaseId) } catch (e: Exception) { emptyList() }
+        val attachments = try { client.queryAttachments(testCaseId) } catch (e: Exception) {
+            LOG.warn("Failed to fetch attachments for test case $testCaseId", e)
+            emptyList()
+        }
 
         val md = StringBuilder()
         md.appendLine("# $testCaseId - ${tc.name ?: ""}")
@@ -101,12 +106,11 @@ class RallyExporter(private val client: RallyApiClient) {
             appendAttachmentLinks(md, attachments, testCaseId, outputDir)
         }
 
-        Files.createDirectories(Paths.get(outputDir))
-        Files.write(
-            Paths.get(outputDir, "$testCaseId.md"),
-            md.toString().toByteArray(StandardCharsets.UTF_8)
-        )
-        LOG.info("Generated Markdown: $outputDir/$testCaseId.md")
+        val outRoot = Paths.get(outputDir)
+        Files.createDirectories(outRoot)
+        val mdPath = RallyFileUtils.safeResolve(outRoot, "$testCaseId.md")
+        Files.write(mdPath, md.toString().toByteArray(StandardCharsets.UTF_8))
+        LOG.info("Generated Markdown: $mdPath")
     }
 
     // ── Bulk Export (for AI analysis) ──────────────────────────
@@ -167,9 +171,9 @@ class RallyExporter(private val client: RallyApiClient) {
             add("artifacts", array)
         }
 
-        val dir = File(outputDir)
-        dir.mkdirs()
-        val file = File(dir, "$fileName.json")
+        val outRoot = Paths.get(outputDir)
+        Files.createDirectories(outRoot)
+        val file = RallyFileUtils.safeResolve(outRoot, "$fileName.json").toFile()
         file.writeText(gson.toJson(output), StandardCharsets.UTF_8)
         LOG.info("Bulk export JSON: ${file.absolutePath} (${array.size()} artifacts)")
         return array.size()
@@ -189,9 +193,9 @@ class RallyExporter(private val client: RallyApiClient) {
         // Pre-fetch all descriptions in parallel (10 concurrent)
         val descriptionMap = prefetchDescriptions(artifacts, onProgress)
 
-        val dir = File(outputDir)
-        dir.mkdirs()
-        val file = File(dir, "$fileName.md")
+        val outRoot = Paths.get(outputDir)
+        Files.createDirectories(outRoot)
+        val file = RallyFileUtils.safeResolve(outRoot, "$fileName.md").toFile()
 
         var count = 0
         file.bufferedWriter(StandardCharsets.UTF_8).use { writer ->
@@ -337,13 +341,16 @@ class RallyExporter(private val client: RallyApiClient) {
         }
 
         // Attachments
-        val attachments = try { client.queryAttachments(artifactId) } catch (e: Exception) { emptyList() }
+        val attachments = try { client.queryAttachments(artifactId) } catch (e: Exception) {
+            LOG.warn("Failed to fetch attachments for $artifactId", e)
+            emptyList()
+        }
         output.add("attachments", attachmentsToJsonArray(attachments, artifactId, outputDir))
         output.addProperty("totalAttachments", attachments.size)
 
-        val dir = File(outputDir)
-        dir.mkdirs()
-        val file = File(dir, "$artifactId.json")
+        val outRoot = Paths.get(outputDir)
+        Files.createDirectories(outRoot)
+        val file = RallyFileUtils.safeResolve(outRoot, "$artifactId.json").toFile()
         file.writeText(gson.toJson(output), StandardCharsets.UTF_8)
         LOG.info("Generated JSON: ${file.absolutePath}")
     }
@@ -383,19 +390,21 @@ class RallyExporter(private val client: RallyApiClient) {
         }
 
         // Attachments
-        val attachments = try { client.queryAttachments(artifactId) } catch (e: Exception) { emptyList() }
+        val attachments = try { client.queryAttachments(artifactId) } catch (e: Exception) {
+            LOG.warn("Failed to fetch attachments for $artifactId", e)
+            emptyList()
+        }
         if (attachments.isNotEmpty()) {
             md.appendLine("## Attachments")
             md.appendLine()
             appendAttachmentLinks(md, attachments, artifactId, outputDir)
         }
 
-        Files.createDirectories(Paths.get(outputDir))
-        Files.write(
-            Paths.get(outputDir, "$artifactId.md"),
-            md.toString().toByteArray(StandardCharsets.UTF_8)
-        )
-        LOG.info("Generated Markdown: $outputDir/$artifactId.md")
+        val outRoot = Paths.get(outputDir)
+        Files.createDirectories(outRoot)
+        val mdPath = RallyFileUtils.safeResolve(outRoot, "$artifactId.md")
+        Files.write(mdPath, md.toString().toByteArray(StandardCharsets.UTF_8))
+        LOG.info("Generated Markdown: $mdPath")
     }
 
     // ── Helpers ──────────────────────────────────────────────────
@@ -427,7 +436,7 @@ class RallyExporter(private val client: RallyApiClient) {
         artifactId: String,
         outputDir: String
     ): JsonArray {
-        val attachDir = "$outputDir${File.separator}${artifactId}_attachments"
+        val attachDir = RallyFileUtils.safeResolve(Paths.get(outputDir), "${artifactId}_attachments").toString()
 
         // Download attachments sequentially to avoid apiExecutor self-deadlock
         // (this method is called from within an apiExecutor task during export)
@@ -448,18 +457,13 @@ class RallyExporter(private val client: RallyApiClient) {
         return array
     }
 
-    private fun sanitizeFileName(name: String): String {
-        val sanitized = name.replace(RE_UNSAFE_FILENAME, "_").trimStart('.')
-        return sanitized.ifBlank { "unnamed" }
-    }
-
     private fun downloadAttachmentContent(
         attachment: RallyAttachment,
         attachDir: String,
         fileName: String
     ): String? {
         val contentRef = attachment.content?.ref ?: return null
-        val safeFileName = sanitizeFileName(fileName)
+        val safeFileName = RallyFileUtils.sanitizeFileName(fileName)
         val cacheKey = "$contentRef:$attachDir:$safeFileName"
 
         // Check per-session dedup cache (avoids re-downloading for JSON+Markdown exports)
@@ -472,27 +476,21 @@ class RallyExporter(private val client: RallyApiClient) {
             val base64Content = client.getAttachmentContent(contentRef)
             val fileBytes = Base64.getDecoder().decode(base64Content)
 
-            // Deduplicate: append counter if file already exists
-            var outputFile = File(attachDir, safeFileName)
-            if (outputFile.exists()) {
+            // safeResolve handles sanitization + containment. Dedup on existing names.
+            var outputPath = RallyFileUtils.safeResolve(attachDirPath, safeFileName)
+            if (Files.exists(outputPath)) {
                 val baseName = safeFileName.substringBeforeLast(".", safeFileName)
                 val ext = if (safeFileName.contains(".")) ".${safeFileName.substringAfterLast(".")}" else ""
                 var counter = 1
-                while (outputFile.exists()) {
-                    outputFile = File(attachDir, "${baseName}_$counter$ext")
+                while (Files.exists(outputPath)) {
+                    outputPath = RallyFileUtils.safeResolve(attachDirPath, "${baseName}_$counter$ext")
                     counter++
                 }
             }
 
-            // Final safety check: ensure resolved path is inside attachDir
-            if (!outputFile.canonicalPath.startsWith(attachDirPath.toFile().canonicalPath + File.separator)) {
-                LOG.warn("Attachment filename resolved outside target directory: $fileName")
-                return null
-            }
-
-            Files.write(outputFile.toPath(), fileBytes)
-            LOG.info("Saved attachment: ${outputFile.absolutePath} (${fileBytes.size} bytes)")
-            val path = outputFile.absolutePath
+            Files.write(outputPath, fileBytes)
+            LOG.info("Saved attachment: $outputPath (${fileBytes.size} bytes)")
+            val path = outputPath.toAbsolutePath().toString()
             downloadedPaths[cacheKey] = path
             path
         } catch (e: Exception) {
@@ -510,7 +508,7 @@ class RallyExporter(private val client: RallyApiClient) {
 
         matcher.reset()
         val result = StringBuilder()
-        val imgDir = "$outputDir${File.separator}${artifactId}_images"
+        val imgDir = RallyFileUtils.safeResolve(Paths.get(outputDir), "${artifactId}_images").toString()
         var imgCounter = 0
 
         while (matcher.find()) {
@@ -519,7 +517,8 @@ class RallyExporter(private val client: RallyApiClient) {
             val fileName = matcher.group(4)
             imgCounter++
             val ext = fileName.substringAfterLast('.', "png").lowercase()
-            val uniqueFileName = if (imgCounter == 1) "$artifactId.$ext" else "${artifactId}_$imgCounter.$ext"
+            val rawUnique = if (imgCounter == 1) "$artifactId.$ext" else "${artifactId}_$imgCounter.$ext"
+            val uniqueFileName = RallyFileUtils.sanitizeFileName(rawUnique)
 
             val localPath = downloadRallyImage(objectId, fileName, uniqueFileName, imgDir)
             if (localPath != null) {
@@ -536,7 +535,8 @@ class RallyExporter(private val client: RallyApiClient) {
 
     private fun downloadRallyImage(objectId: String, originalFileName: String, localFileName: String, imgDir: String): String? {
         try {
-            Files.createDirectories(Paths.get(imgDir))
+            val imgDirPath = Paths.get(imgDir)
+            Files.createDirectories(imgDirPath)
 
             val baseUrl = client.serverUrl.trimEnd('/')
             val url = if (!baseUrl.startsWith("http")) "https://$baseUrl" else baseUrl
@@ -544,15 +544,10 @@ class RallyExporter(private val client: RallyApiClient) {
 
             val fileBytes = client.downloadAttachment(imageUrl)
 
-            val outputFile = File(imgDir, localFileName)
-            val canonicalImgDir = File(imgDir).canonicalPath
-            if (!outputFile.canonicalPath.startsWith(canonicalImgDir + File.separator)) {
-                LOG.warn("Image filename resolved outside target directory: $localFileName")
-                return null
-            }
-            Files.write(outputFile.toPath(), fileBytes)
-            LOG.info("Downloaded inline image: ${outputFile.absolutePath} (${fileBytes.size} bytes)")
-            return outputFile.absolutePath
+            val outputPath = RallyFileUtils.safeResolve(imgDirPath, localFileName)
+            Files.write(outputPath, fileBytes)
+            LOG.info("Downloaded inline image: $outputPath (${fileBytes.size} bytes)")
+            return outputPath.toAbsolutePath().toString()
         } catch (e: Exception) {
             LOG.warn("Failed to download image OID=$objectId", e)
             return null
@@ -586,8 +581,8 @@ class RallyExporter(private val client: RallyApiClient) {
         artifactId: String,
         outputDir: String
     ) {
-        val attachDirName = "${artifactId}_attachments"
-        val attachDir = "$outputDir${File.separator}$attachDirName"
+        val attachDirName = RallyFileUtils.sanitizeFileName("${artifactId}_attachments")
+        val attachDir = RallyFileUtils.safeResolve(Paths.get(outputDir), attachDirName).toString()
 
         for (att in attachments) {
             val attName = att.name ?: "unnamed"
