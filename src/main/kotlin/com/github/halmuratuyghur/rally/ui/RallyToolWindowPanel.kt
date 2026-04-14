@@ -564,7 +564,11 @@ class RallyToolWindowPanel(private val project: Project) : Disposable {
             val digest = java.security.MessageDigest.getInstance("SHA-256")
             val hash = digest.digest(key.toByteArray(Charsets.UTF_8))
             val sb = StringBuilder(16)
-            for (i in 0 until 8) sb.append("%02x".format(hash[i]))
+            // Mask each byte to an unsigned int before formatting so negative bytes
+            // render as 2 hex chars (e.g. 0x80) instead of 8 (e.g. ffffff80) — the
+            // sign extension would otherwise blow past the 16-char fingerprint
+            // contract and inflate the snapshot string used to detect credential changes.
+            for (i in 0 until 8) sb.append("%02x".format(hash[i].toInt() and 0xff))
             sb.toString()
         } catch (_: Exception) {
             key.length.toString()
