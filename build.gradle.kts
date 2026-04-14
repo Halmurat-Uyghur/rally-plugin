@@ -63,6 +63,8 @@ tasks {
     }
 
     buildSearchableOptions {
-        enabled = false
+        // Enabled so the Rally settings page shows up in IDE-wide Settings search
+        // (Ctrl+,/Cmd+,). The build cost is small for a single configurable.
+        enabled = true
     }
 }
