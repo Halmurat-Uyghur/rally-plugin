@@ -186,13 +186,14 @@ class RallyToolWindowPanel(private val project: Project) : Disposable {
         toolbar.add(Box.createHorizontalGlue())
         toolbar.add(statsLabel)
 
-        // Filter row
+        // Filter row — labels link to their controls via labelFor so screen readers
+        // can announce the field name when focus moves into a combo box.
         val filterPanel = JPanel(FlowLayout(FlowLayout.LEFT, 4, 2))
-        filterPanel.add(JBLabel("Scope:"))
+        filterPanel.add(JBLabel("Scope:").apply { labelFor = scopeCombo })
         filterPanel.add(scopeCombo)
-        filterPanel.add(JBLabel("State:"))
+        filterPanel.add(JBLabel("State:").apply { labelFor = stateCombo })
         filterPanel.add(stateCombo)
-        filterPanel.add(JBLabel("Project:"))
+        filterPanel.add(JBLabel("Project:").apply { labelFor = projectCombo })
         projectCombo.apply {
             preferredSize = java.awt.Dimension(250, preferredSize.height)
             renderer = object : DefaultListCellRenderer() {
@@ -209,7 +210,7 @@ class RallyToolWindowPanel(private val project: Project) : Disposable {
             isSwingPopup = false
         }
         filterPanel.add(projectCombo)
-        filterPanel.add(JBLabel("Sprint:"))
+        filterPanel.add(JBLabel("Sprint:").apply { labelFor = iterationCombo })
         iterationCombo.apply {
             preferredSize = java.awt.Dimension(250, preferredSize.height)
             renderer = object : DefaultListCellRenderer() {
@@ -238,7 +239,7 @@ class RallyToolWindowPanel(private val project: Project) : Disposable {
             isSwingPopup = false
         }
         filterPanel.add(iterationCombo)
-        filterPanel.add(JBLabel("Search:"))
+        filterPanel.add(JBLabel("Search:").apply { labelFor = searchField.textEditor })
         searchField.preferredSize = java.awt.Dimension(200, searchField.preferredSize.height)
         searchField.textEditor.emptyText.text = "Search by name or ID..."
         filterPanel.add(searchField)

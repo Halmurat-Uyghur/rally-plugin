@@ -80,13 +80,22 @@ class RallySettingsConfigurable : Configurable {
             }
         }
 
+        // Each label is linked to its field via labelFor so screen readers can announce
+        // the field name when focus moves to the input.
+        val serverUrlLabel = JBLabel("Server URL:").apply { labelFor = serverUrlField }
+        val apiKeyLabel = JBLabel("API Key:").apply { labelFor = apiKeyField }
+        val workspaceLabel = JBLabel("Workspace Ref (optional):").apply { labelFor = workspaceRefField }
+        val usernameLabel = JBLabel("Username:").apply { labelFor = usernameField }
+        val exportDirLabel = JBLabel("Export Directory:").apply { labelFor = exportDirField!!.textField }
+        val pageSizeLabel = JBLabel("Page Size:").apply { labelFor = pageSizeField }
+
         return FormBuilder.createFormBuilder()
-            .addLabeledComponent(JBLabel("Server URL:"), serverUrlField!!)
-            .addLabeledComponent(JBLabel("API Key:"), apiKeyField!!)
-            .addLabeledComponent(JBLabel("Workspace Ref (optional):"), workspaceRefField!!)
-            .addLabeledComponent(JBLabel("Username:"), usernameField!!)
-            .addLabeledComponent(JBLabel("Export Directory:"), exportDirField!!)
-            .addLabeledComponent(JBLabel("Page Size:"), pageSizeField!!)
+            .addLabeledComponent(serverUrlLabel, serverUrlField!!)
+            .addLabeledComponent(apiKeyLabel, apiKeyField!!)
+            .addLabeledComponent(workspaceLabel, workspaceRefField!!)
+            .addLabeledComponent(usernameLabel, usernameField!!)
+            .addLabeledComponent(exportDirLabel, exportDirField!!)
+            .addLabeledComponent(pageSizeLabel, pageSizeField!!)
             .addComponent(testButton)
             .addComponentFillVertically(JPanel(), 0)
             .panel
