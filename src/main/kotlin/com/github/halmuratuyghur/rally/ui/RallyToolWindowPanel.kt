@@ -969,8 +969,15 @@ class RallyToolWindowPanel(private val project: Project) : Disposable {
                 } else {
                     null
                 }
+                var assignWarning: String? = null
                 val ownerRef = if (assignToMe && settings.username.isNotBlank()) {
-                    try { client.getUserByUsername(settings.username).ref } catch (_: Exception) { null }
+                    try {
+                        client.getUserByUsername(settings.username).ref
+                    } catch (e: Exception) {
+                        LOG.warn("Failed to resolve user ${settings.username} for assign-to-me", e)
+                        assignWarning = "couldn't resolve user — created without owner"
+                        null
+                    }
                 } else {
                     null
                 }
@@ -988,9 +995,11 @@ class RallyToolWindowPanel(private val project: Project) : Disposable {
 
                 invokeLaterIfAlive {
                     val attachMsg = if (attachment != null) " with attachment" else ""
-                    statusLabel.text = "Created $createdId$attachMsg"
+                    val warningMsg = assignWarning?.let { " ($it)" } ?: ""
+                    val messageType = if (assignWarning != null) MessageType.WARNING else MessageType.INFO
+                    statusLabel.text = "Created $createdId$attachMsg$warningMsg"
                     val balloon = JBPopupFactory.getInstance()
-                        .createHtmlTextBalloonBuilder("Created $createdId$attachMsg", MessageType.INFO, null)
+                        .createHtmlTextBalloonBuilder("Created $createdId$attachMsg$warningMsg", messageType, null)
                         .setFadeoutTime(3000)
                         .createBalloon()
                     balloon.show(RelativePoint.getSouthWestOf(statusLabel), Balloon.Position.above)
@@ -1177,8 +1186,15 @@ class RallyToolWindowPanel(private val project: Project) : Disposable {
                 } else {
                     null
                 }
+                var assignWarning: String? = null
                 val ownerRef = if (assignToMe && settings.username.isNotBlank()) {
-                    try { client.getUserByUsername(settings.username).ref } catch (_: Exception) { null }
+                    try {
+                        client.getUserByUsername(settings.username).ref
+                    } catch (e: Exception) {
+                        LOG.warn("Failed to resolve user ${settings.username} for assign-to-me", e)
+                        assignWarning = "couldn't resolve user — created without owner"
+                        null
+                    }
                 } else {
                     null
                 }
@@ -1196,9 +1212,11 @@ class RallyToolWindowPanel(private val project: Project) : Disposable {
 
                 invokeLaterIfAlive {
                     val attachMsg = if (attachment != null) " with attachment" else ""
-                    statusLabel.text = "Created $createdId$attachMsg"
+                    val warningMsg = assignWarning?.let { " ($it)" } ?: ""
+                    val messageType = if (assignWarning != null) MessageType.WARNING else MessageType.INFO
+                    statusLabel.text = "Created $createdId$attachMsg$warningMsg"
                     val balloon = JBPopupFactory.getInstance()
-                        .createHtmlTextBalloonBuilder("Created $createdId$attachMsg", MessageType.INFO, null)
+                        .createHtmlTextBalloonBuilder("Created $createdId$attachMsg$warningMsg", messageType, null)
                         .setFadeoutTime(3000)
                         .createBalloon()
                     balloon.show(RelativePoint.getSouthWestOf(statusLabel), Balloon.Position.above)
