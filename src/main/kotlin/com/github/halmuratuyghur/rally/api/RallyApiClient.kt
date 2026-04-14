@@ -892,16 +892,12 @@ class RallyApiClient(
                 "?fetch=Name,ObjectID,_ref,StartDate,EndDate,PlannedVelocity,Project,State&pagesize=$pageSize" +
                 "&order=${URLEncoder.encode("StartDate DESC,EndDate DESC,ObjectID", StandardCharsets.UTF_8)}"
 
-        // Filter by project in the query — without this, Rally returns iterations from all projects
-        if (!projectRef.isNullOrBlank()) {
-            val normalizedProjectRef = normalizeRef("project", projectRef!!)
-            val query = "(Project = \"$normalizedProjectRef\")"
-            url += "&query=${URLEncoder.encode(query, StandardCharsets.UTF_8)}"
-        }
-
         if (!workspaceRef.isNullOrBlank()) {
             url += "&workspace=${URLEncoder.encode(normalizeRef("workspace", workspaceRef!!), StandardCharsets.UTF_8)}"
         }
+        // Scope via URL params only. An earlier (Project=...) query filter contradicted
+        // projectScopeUp/Down and silently pinned results to one project. Rely on the
+        // canonical scope params so the chosen project plus its descendants are covered.
         if (!projectRef.isNullOrBlank()) {
             url += "&project=${URLEncoder.encode(normalizeRef("project", projectRef!!), StandardCharsets.UTF_8)}"
             url += "&projectScopeUp=true&projectScopeDown=true"
