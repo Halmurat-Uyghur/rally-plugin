@@ -202,17 +202,31 @@ class RallyApiClient(
     fun clearArtifactCache() {
         // Must synchronize on the map for iteration — Collections.synchronizedMap
         // only guards individual operations, and with accessOrder=true even get() mutates.
+        // Note: detail-level caches (tasksForWp:, testcases:, attachments:, desc:, ...)
+        // are intentionally left alone — they're keyed per-workproduct and unrelated
+        // to list-level mutations.
         synchronized(queryCache) {
             val iter = queryCache.keys.iterator()
             while (iter.hasNext()) {
                 val key = iter.next()
                 if (key.startsWith("artifacts:") || key.startsWith("stories:") ||
-                    key.startsWith("defects:") || key.startsWith("tasks:") ||
+                    key.startsWith("defects:") ||
                     key.startsWith("alltestcases:") || key.startsWith("search:") ||
                     key.startsWith("sprint:") || key.startsWith("currentIteration:")) {
                     iter.remove()
                 }
             }
+        }
+    }
+
+    /**
+     * Invalidate the cached task list for a specific work product. Call after
+     * createTask so the next queryTasksForWorkProduct re-fetches from Rally
+     * instead of returning a stale list missing the new task.
+     */
+    fun clearTasksCache(workProductRef: String) {
+        synchronized(queryCache) {
+            queryCache.remove("tasksForWp:$workProductRef")
         }
     }
 
@@ -1070,7 +1084,10 @@ class RallyApiClient(
      */
     fun queryTasksForWorkProduct(workProductRef: String, pageSize: Int = DEFAULT_PAGE_SIZE): List<RallyTaskItem> {
         val ws = workspaceRef
-        val cacheKey = "tasks:$workProductRef"
+        // Use a distinctive prefix so clearArtifactCache can't accidentally evict
+        // unrelated per-workproduct task lists when an unrelated artifact mutation
+        // happens.
+        val cacheKey = "tasksForWp:$workProductRef"
         getCached<List<RallyTaskItem>>(cacheKey)?.let { return it }
 
         val query = "(WorkProduct = \"$workProductRef\")"

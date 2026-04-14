@@ -764,6 +764,9 @@ class RallyDetailPanel(private val project: Project) : com.intellij.openapi.Disp
         ApplicationManager.getApplication().executeOnPooledThread {
             try {
                 val task = client.createTask(taskName, artifactRef, estimate = estimate)
+                // Invalidate the cached task list for this work product so the next
+                // detail-panel reopen re-fetches and includes the new task.
+                client.clearTasksCache(artifactRef)
                 ApplicationManager.getApplication().invokeLater {
                     if (disposed) return@invokeLater
                     taskListModel.addElement(task)
