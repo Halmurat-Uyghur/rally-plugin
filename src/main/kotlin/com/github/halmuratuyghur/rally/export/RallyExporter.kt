@@ -584,9 +584,7 @@ class RallyExporter(private val client: RallyApiClient) {
             val imgDirPath = Paths.get(imgDir)
             Files.createDirectories(imgDirPath)
 
-            val baseUrl = client.serverUrl.trimEnd('/')
-            val url = if (!baseUrl.startsWith("http")) "https://$baseUrl" else baseUrl
-            val imageUrl = "$url/slm/attachment/$objectId/$originalFileName"
+            val imageUrl = "${client.webBaseUrl}/slm/attachment/$objectId/$originalFileName"
 
             val fileBytes = client.downloadAttachment(imageUrl)
 

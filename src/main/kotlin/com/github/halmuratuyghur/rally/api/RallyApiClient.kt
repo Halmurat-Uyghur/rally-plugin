@@ -70,6 +70,14 @@ class RallyApiClient(
         url
     }
 
+    /**
+     * Public accessor for the normalized base URL — already trimmed of trailing
+     * slashes, with an https:// scheme prepended if the user typed a bare host.
+     * Use this in place of `client.serverUrl.trimEnd('/')` so every call site
+     * agrees on what the canonical URL looks like.
+     */
+    val webBaseUrl: String get() = normalizedServerUrl
+
     /** Pre-computed allowed host and scheme for security validation. */
     private val allowedHost: String
     private val allowedScheme: String

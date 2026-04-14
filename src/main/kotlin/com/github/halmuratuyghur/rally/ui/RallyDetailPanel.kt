@@ -712,11 +712,9 @@ class RallyDetailPanel(private val project: Project) : com.intellij.openapi.Disp
         val selected = testCaseList.selectedValue ?: return
         val client = currentClient ?: return
         val objectId = selected.objectID ?: return
-        val baseUrl = client.serverUrl.trimEnd('/')
-        val url = if (!baseUrl.startsWith("http")) "https://$baseUrl" else baseUrl
         val projectOid = getParentProjectOid()
         val projectSegment = if (projectOid != null) "${projectOid}d/" else ""
-        BrowserUtil.browse("$url/#/${projectSegment}detail/testcase/$objectId")
+        BrowserUtil.browse("${client.webBaseUrl}/#/${projectSegment}detail/testcase/$objectId")
     }
 
     // ── Task Context Menu ───────────────────────────────────────
@@ -746,11 +744,9 @@ class RallyDetailPanel(private val project: Project) : com.intellij.openapi.Disp
         val selected = taskList.selectedValue ?: return
         val client = currentClient ?: return
         val objectId = selected.objectID ?: return
-        val baseUrl = client.serverUrl.trimEnd('/')
-        val url = if (!baseUrl.startsWith("http")) "https://$baseUrl" else baseUrl
         val projectOid = getParentProjectOid()
         val projectSegment = if (projectOid != null) "${projectOid}d/" else ""
-        BrowserUtil.browse("$url/#/${projectSegment}detail/task/$objectId")
+        BrowserUtil.browse("${client.webBaseUrl}/#/${projectSegment}detail/task/$objectId")
     }
 
     private fun showCreateTaskDialog() {
@@ -902,11 +898,9 @@ class RallyDetailPanel(private val project: Project) : com.intellij.openapi.Disp
         val selected = attachmentList.selectedValue ?: return
         val client = currentClient ?: return
         val objectId = selected.objectID ?: return
-        val baseUrl = client.serverUrl.trimEnd('/')
-        val url = if (!baseUrl.startsWith("http")) "https://$baseUrl" else baseUrl
         val projectOid = getParentProjectOid()
         val projectSegment = if (projectOid != null) "${projectOid}d/" else ""
-        BrowserUtil.browse("$url/#/${projectSegment}detail/attachment/$objectId")
+        BrowserUtil.browse("${client.webBaseUrl}/#/${projectSegment}detail/attachment/$objectId")
     }
 
     // ── Helpers ──────────────────────────────────────────────────
@@ -956,8 +950,7 @@ class RallyDetailPanel(private val project: Project) : com.intellij.openapi.Disp
         if (!matcher.find()) return html
 
         matcher.reset()
-        val baseUrl = client.serverUrl.trimEnd('/')
-        val normalizedBase = if (!baseUrl.startsWith("http")) "https://$baseUrl" else baseUrl
+        val normalizedBase = client.webBaseUrl
 
         // Phase 1: Collect image matches (capped to prevent thread pool saturation)
         data class ImageMatch(val start: Int, val end: Int, val fullMatch: String,
