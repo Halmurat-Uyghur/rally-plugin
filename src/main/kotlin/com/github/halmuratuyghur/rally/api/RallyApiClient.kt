@@ -226,6 +226,13 @@ class RallyApiClient(
         private const val MAX_PAGE_SIZE = 2000
         private const val ZSESSION_HEADER = "zsessionid"
         private const val MAX_RETRIES = 3
+        /**
+         * Hard cap on a single backoff sleep. The API executor has only 4 worker threads,
+         * so a 30-second Retry-After on one call would otherwise stall a quarter of the
+         * pool for the full interval. If the server asks for longer, we still honor it
+         * across retries but in smaller chunks, so other work can interleave.
+         */
+        private const val MAX_RETRY_SLEEP_MS = 2_000L
         private val RETRYABLE_STATUS_CODES = setOf(429, 502, 503, 504)
 
         // Fields for list queries (lightweight — no Description)
@@ -776,11 +783,7 @@ class RallyApiClient(
             } catch (e: Exception) {
                 lastException = e
                 if (attempt < MAX_RETRIES) {
-                    try { Thread.sleep(backoffMs(attempt)) }
-                    catch (ie: InterruptedException) {
-                        Thread.currentThread().interrupt()
-                        throw RallyConnectionException("Interrupted during retry backoff", ie)
-                    }
+                    sleepForRetry(backoffMs(attempt))
                     continue
                 }
                 throw RallyConnectionException("Failed to connect to Rally server: ${e.message}", e)
@@ -790,14 +793,12 @@ class RallyApiClient(
                 return response
             }
 
-            // Respect Retry-After header if present, otherwise use exponential backoff
+            // Respect Retry-After header if present, otherwise use exponential backoff.
+            // Both are capped at MAX_RETRY_SLEEP_MS so a single worker thread can't be
+            // parked for 30s on a shared 4-thread pool.
             val retryAfter = response.headers().firstValueAsLong("Retry-After").orElse(-1)
-            val delayMs = if (retryAfter > 0) (retryAfter * 1000).coerceAtMost(30_000) else backoffMs(attempt)
-            try { Thread.sleep(delayMs) }
-            catch (ie: InterruptedException) {
-                Thread.currentThread().interrupt()
-                throw RallyConnectionException("Interrupted during retry backoff", ie)
-            }
+            val delayMs = if (retryAfter > 0) (retryAfter * 1000) else backoffMs(attempt)
+            sleepForRetry(delayMs)
         }
         // Should not reach here, but satisfy the compiler
         throw RallyConnectionException("Failed after $MAX_RETRIES retries", lastException ?: Exception("Unknown error"))
@@ -807,6 +808,22 @@ class RallyApiClient(
         val base = (1000L shl attempt).coerceAtMost(8000)
         val jitter = (Math.random() * base * 0.3).toLong()  // ±30% jitter
         return base + jitter
+    }
+
+    /**
+     * Sleep for up to MAX_RETRY_SLEEP_MS. Callers may pass longer intervals (Rally's
+     * Retry-After, exponential backoff); we clamp them so a single worker thread
+     * can't monopolize the pool for more than a couple of seconds per attempt.
+     */
+    private fun sleepForRetry(delayMs: Long) {
+        val capped = delayMs.coerceIn(0, MAX_RETRY_SLEEP_MS)
+        if (capped <= 0) return
+        try {
+            Thread.sleep(capped)
+        } catch (ie: InterruptedException) {
+            Thread.currentThread().interrupt()
+            throw RallyConnectionException("Interrupted during retry backoff", ie)
+        }
     }
 
     /**
