@@ -1,7 +1,9 @@
+import org.jetbrains.intellij.platform.gradle.TestFrameworkType
+
 plugins {
     id("java")
     id("org.jetbrains.kotlin.jvm") version "1.9.25"
-    id("org.jetbrains.intellij") version "1.17.4"
+    id("org.jetbrains.intellij.platform") version "2.14.0"
 }
 
 group = "com.github.halmuratuyghur"
@@ -9,37 +11,36 @@ version = "1.0.0"
 
 repositories {
     mavenCentral()
+    intellijPlatform {
+        defaultRepositories()
+    }
 }
 
 dependencies {
     implementation("com.google.code.gson:gson:2.10.1")
     testImplementation("junit:junit:4.13.2")
+
+    // Configure IntelliJ Platform target + bundled plugins through the
+    // 2.x DSL (replaces the old `intellij { ... plugins.set(...) }` block).
+    intellijPlatform {
+        intellijIdeaCommunity("2024.1")
+        bundledPlugin("Git4Idea")
+        testFramework(TestFrameworkType.Platform)
+    }
 }
 
-// Configure Gradle IntelliJ Plugin
-intellij {
-    version.set("2024.1")
-    type.set("IC") // IntelliJ IDEA Community Edition
-    plugins.set(listOf("Git4Idea"))
-    sandboxDir.set(layout.projectDirectory.dir(".sandbox").toString())
-}
+intellijPlatform {
+    buildSearchableOptions = true
+    instrumentCode = true
+    sandboxContainer = layout.projectDirectory.dir(".sandbox")
 
-tasks {
-    // Set the JVM compatibility versions
-    withType<JavaCompile> {
-        sourceCompatibility = "17"
-        targetCompatibility = "17"
-    }
+    pluginConfiguration {
+        ideaVersion {
+            sinceBuild = "241"
+            untilBuild = "261.*"
+        }
 
-    withType<org.jetbrains.kotlin.gradle.tasks.KotlinCompile> {
-        compilerOptions.jvmTarget.set(org.jetbrains.kotlin.gradle.dsl.JvmTarget.JVM_17)
-    }
-
-    patchPluginXml {
-        sinceBuild.set("241")
-        untilBuild.set("261.*")
-
-        changeNotes.set("""
+        changeNotes = """
             <h3>1.0.0</h3>
             <ul>
                 <li>Browse User Stories and Defects with scope, state, project, and sprint filters</li>
@@ -49,22 +50,27 @@ tasks {
                 <li>Export artifacts and test cases to JSON/Markdown</li>
                 <li>Sprint summary, auto-load on startup, parallel API queries with caching</li>
             </ul>
-        """.trimIndent())
+        """.trimIndent()
     }
 
-    signPlugin {
-        certificateChain.set(System.getenv("CERTIFICATE_CHAIN"))
-        privateKey.set(System.getenv("PRIVATE_KEY"))
-        password.set(System.getenv("PRIVATE_KEY_PASSWORD"))
+    signing {
+        certificateChainFile = providers.environmentVariable("CERTIFICATE_CHAIN").map { layout.projectDirectory.file(it) }.orNull
+        privateKeyFile = providers.environmentVariable("PRIVATE_KEY").map { layout.projectDirectory.file(it) }.orNull
+        password = providers.environmentVariable("PRIVATE_KEY_PASSWORD")
     }
 
-    publishPlugin {
-        token.set(System.getenv("PUBLISH_TOKEN"))
+    publishing {
+        token = providers.environmentVariable("PUBLISH_TOKEN")
+    }
+}
+
+tasks {
+    withType<JavaCompile> {
+        sourceCompatibility = "17"
+        targetCompatibility = "17"
     }
 
-    buildSearchableOptions {
-        // Enabled so the Rally settings page shows up in IDE-wide Settings search
-        // (Ctrl+,/Cmd+,). The build cost is small for a single configurable.
-        enabled = true
+    withType<org.jetbrains.kotlin.gradle.tasks.KotlinCompile> {
+        compilerOptions.jvmTarget.set(org.jetbrains.kotlin.gradle.dsl.JvmTarget.JVM_17)
     }
 }
