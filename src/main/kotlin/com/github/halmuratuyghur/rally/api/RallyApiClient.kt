@@ -813,8 +813,10 @@ class RallyApiClient(
             val delayMs = if (retryAfter > 0) (retryAfter * 1000) else backoffMs(attempt)
             sleepForRetry(delayMs)
         }
-        // Should not reach here, but satisfy the compiler
-        throw RallyConnectionException("Failed after $MAX_RETRIES retries", lastException ?: Exception("Unknown error"))
+        // Should not reach here, but satisfy the compiler. Don't synthesize a fake
+        // cause when we never captured a real one — leave cause null instead.
+        throw lastException?.let { RallyConnectionException("Failed after $MAX_RETRIES retries", it) }
+            ?: RallyConnectionException("Failed after $MAX_RETRIES retries")
     }
 
     private fun backoffMs(attempt: Int): Long {

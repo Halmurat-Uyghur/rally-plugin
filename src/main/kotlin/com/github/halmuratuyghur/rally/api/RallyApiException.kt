@@ -44,10 +44,18 @@ class RallyAuthenticationException(message: String, statusCode: Int = 401, respo
     : RallyApiException(message, statusCode, responseBody)
 
 /**
- * Exception for connection failures
+ * Exception for connection failures.
+ *
+ * Forwards to the no-cause or with-cause base constructor depending on what the
+ * caller supplies — the previous `cause ?: Exception(message)` synthesized a
+ * fake cause whose stack trace pointed inside this class, which made
+ * `exception.cause` checks misleading for callers that actually wanted to know
+ * whether a real underlying throwable existed.
  */
-class RallyConnectionException(message: String, cause: Throwable? = null)
-    : RallyApiException(message, cause ?: Exception(message))
+class RallyConnectionException : RallyApiException {
+    constructor(message: String) : super(message)
+    constructor(message: String, cause: Throwable) : super(message, cause)
+}
 
 /**
  * Exception for security violations (e.g., request to unexpected host)
