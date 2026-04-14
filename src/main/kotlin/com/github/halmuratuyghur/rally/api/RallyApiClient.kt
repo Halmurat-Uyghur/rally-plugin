@@ -482,7 +482,10 @@ class RallyApiClient(
      */
     fun fetchDescription(artifactRef: String): String? {
         val cacheKey = "desc:$artifactRef"
-        getCached<String>(cacheKey)?.let { return it }
+        // An empty cached value means "known to have no description" — avoids re-fetching
+        // on every detail-panel open for description-less tickets.
+        val cached = getCached<String>(cacheKey)
+        if (cached != null) return cached.ifEmpty { null }
 
         val url = "$artifactRef?fetch=Description"
         return try {
@@ -491,8 +494,9 @@ class RallyApiClient(
             val root = JsonParser.parseString(response.body()).asJsonObject
             // Rally wraps in the type name (HierarchicalRequirement, Defect, Task, etc.)
             val obj = root.entrySet().firstOrNull()?.value?.asJsonObject
-            val desc = obj?.get("Description")?.asString
-            if (desc != null) putCache(cacheKey, desc)
+            val descElement = obj?.get("Description")
+            val desc = if (descElement != null && !descElement.isJsonNull) descElement.asString else null
+            putCache(cacheKey, desc ?: "")
             desc
         } catch (e: RallyAuthenticationException) {
             LOG.warn("Auth failure fetching description for $artifactRef", e)
