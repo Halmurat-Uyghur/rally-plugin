@@ -26,8 +26,19 @@ import java.util.concurrent.Executors
  */
 class RallyApiClient(
     val serverUrl: String,
-    val apiKey: String
+    private val apiKey: String
 ) {
+    /**
+     * Compare credentials/scope against a settings snapshot without exposing the raw key.
+     * Used by the tool window panel to decide whether to recycle or rebuild the client
+     * when the user rotates their API key or changes server/workspace.
+     */
+    fun matchesSettings(serverUrl: String, apiKey: String, workspaceRef: String?): Boolean {
+        return this.serverUrl == serverUrl &&
+                this.apiKey == apiKey &&
+                this.workspaceRef == workspaceRef
+    }
+
     /** Bounded thread pool for API operations (daemon threads so IDE shutdown isn't blocked). */
     val apiExecutor: ExecutorService = Executors.newFixedThreadPool(4) { r ->
         Thread(r, "rally-api-worker").apply { isDaemon = true }

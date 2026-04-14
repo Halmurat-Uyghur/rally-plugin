@@ -1859,11 +1859,7 @@ class RallyToolWindowPanel(private val project: Project) : Disposable {
 
         return synchronized(clientLock) {
             check(!disposed) { "RallyToolWindowPanel has been disposed" }
-            if (currentClient == null ||
-                currentClient?.serverUrl != serverUrl ||
-                currentClient?.apiKey != apiKey ||
-                currentClient?.workspaceRef != workspaceRef
-            ) {
+            if (currentClient?.matchesSettings(serverUrl, apiKey, workspaceRef) != true) {
                 // Shut down the old client's thread pool to prevent thread leaks
                 currentClient?.apiExecutor?.shutdown()
                 currentClient = RallyApiClient(serverUrl, apiKey)
