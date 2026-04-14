@@ -474,7 +474,9 @@ class RallyExporter(private val client: RallyApiClient) {
             Files.createDirectories(attachDirPath)
 
             val base64Content = client.getAttachmentContent(contentRef)
-            val fileBytes = Base64.getDecoder().decode(base64Content)
+            // Rally returns MIME-encoded base64 with line breaks every 76 chars; the strict
+            // decoder throws IllegalArgumentException on real attachments, so use MIME decoder.
+            val fileBytes = Base64.getMimeDecoder().decode(base64Content)
 
             // safeResolve handles sanitization + containment. Dedup on existing names.
             var outputPath = RallyFileUtils.safeResolve(attachDirPath, safeFileName)
