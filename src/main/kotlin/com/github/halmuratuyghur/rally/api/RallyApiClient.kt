@@ -414,9 +414,10 @@ class RallyApiClient(
      * Uses the Rally user query endpoint instead of /user (which always returns the API key owner).
      */
     fun getUserByUsername(username: String): RallyUser {
+        val ws = workspaceRef
         val safeUsername = escapeQueryValue(username)
         val url = buildApiUrl("user") + "?" +
-                buildQuery("(UserName = \"$safeUsername\")", pageSize = 1, workspace = workspaceRef)
+                buildQuery("(UserName = \"$safeUsername\")", pageSize = 1, workspace = ws)
         val response = executeGet(url)
         handleResponse(response)
 
@@ -439,14 +440,16 @@ class RallyApiClient(
         pageSize: Int = DEFAULT_PAGE_SIZE,
         maxResults: Int = MAX_PAGE_SIZE,
         order: String? = "LastUpdateDate DESC",
-        fields: List<String> = LIST_FIELDS
+        fields: List<String> = LIST_FIELDS,
+        workspace: String?,
+        project: String?
     ): List<T> {
         val allResults = mutableListOf<T>()
         var start = 1
 
         do {
             val url = buildApiUrl(endpoint) + "?" +
-                    buildQuery(query, pageSize, start, workspaceRef, projectRef, order, fields)
+                    buildQuery(query, pageSize, start, workspace, project, order, fields)
             val response = executeGet(url)
             handleResponse(response)
             val result: RallyQueryResult<T> = gson.fromJson(response.body(), typeToken)
@@ -467,10 +470,17 @@ class RallyApiClient(
      * Query User Stories (HierarchicalRequirement)
      */
     fun queryUserStories(query: String? = null, pageSize: Int = DEFAULT_PAGE_SIZE, maxResults: Int = MAX_PAGE_SIZE): List<RallyUserStory> {
-        val cacheKey = "stories:${query}|${pageSize}|${maxResults}|${workspaceRef}|${projectRef}"
+        // Snapshot scope once so a concurrent project-dropdown change can't split the
+        // cache key and the actual query URL across different workspace/project values.
+        val ws = workspaceRef
+        val pr = projectRef
+        val cacheKey = "stories:${query}|${pageSize}|${maxResults}|${ws}|${pr}"
         getCached<List<RallyUserStory>>(cacheKey)?.let { return it }
 
-        val results: List<RallyUserStory> = queryAllPages("hierarchicalrequirement", TYPE_USER_STORIES, query, pageSize, maxResults)
+        val results: List<RallyUserStory> = queryAllPages(
+            "hierarchicalrequirement", TYPE_USER_STORIES, query, pageSize, maxResults,
+            workspace = ws, project = pr
+        )
         putCache(cacheKey, results)
         return results
     }
@@ -479,10 +489,15 @@ class RallyApiClient(
      * Query Defects
      */
     fun queryDefects(query: String? = null, pageSize: Int = DEFAULT_PAGE_SIZE, maxResults: Int = MAX_PAGE_SIZE): List<RallyDefect> {
-        val cacheKey = "defects:${query}|${pageSize}|${maxResults}|${workspaceRef}|${projectRef}"
+        val ws = workspaceRef
+        val pr = projectRef
+        val cacheKey = "defects:${query}|${pageSize}|${maxResults}|${ws}|${pr}"
         getCached<List<RallyDefect>>(cacheKey)?.let { return it }
 
-        val results: List<RallyDefect> = queryAllPages("defect", TYPE_DEFECTS, query, pageSize, maxResults)
+        val results: List<RallyDefect> = queryAllPages(
+            "defect", TYPE_DEFECTS, query, pageSize, maxResults,
+            workspace = ws, project = pr
+        )
         putCache(cacheKey, results)
         return results
     }
@@ -546,6 +561,8 @@ class RallyApiClient(
             else -> return null
         }
 
+        val ws = workspaceRef
+        val pr = projectRef
         val safeId = escapeQueryValue(formattedId)
         val query = "(FormattedID = \"$safeId\")"
         // Pass workspace/project so multi-workspace Rally deployments don't return a
@@ -553,8 +570,8 @@ class RallyApiClient(
         val url = buildApiUrl(endpoint) + "?" + buildQuery(
             query,
             pageSize = 1,
-            workspace = workspaceRef,
-            project = projectRef,
+            workspace = ws,
+            project = pr,
             fields = DETAIL_FIELDS
         )
 
@@ -586,7 +603,9 @@ class RallyApiClient(
      * @param maxResults Maximum total items to return per type. Defaults to MAX_PAGE_SIZE (2000).
      */
     fun queryAllArtifacts(query: String? = null, pageSize: Int = DEFAULT_PAGE_SIZE, scope: String? = null, maxResults: Int = MAX_PAGE_SIZE): List<RallyArtifact> {
-        val cacheKey = "artifacts:${query}|${pageSize}|${maxResults}|${scope}|${workspaceRef}|${projectRef}"
+        val ws = workspaceRef
+        val pr = projectRef
+        val cacheKey = "artifacts:${query}|${pageSize}|${maxResults}|${scope}|${ws}|${pr}"
         getCached<List<RallyArtifact>>(cacheKey)?.let { return it }
 
         val results = mutableListOf<RallyArtifact>()
@@ -637,7 +656,9 @@ class RallyApiClient(
         pageSize: Int = 50,
         maxResults: Int = 100
     ): List<RallyArtifact> {
-        val cacheKey = "search:${searchText}|${scope}|${pageSize}|${maxResults}|${workspaceRef}|${projectRef}"
+        val ws = workspaceRef
+        val pr = projectRef
+        val cacheKey = "search:${searchText}|${scope}|${pageSize}|${maxResults}|${ws}|${pr}"
         getCached<List<RallyArtifact>>(cacheKey)?.let { return it }
 
         val safeText = escapeQueryValue(searchText)
@@ -678,13 +699,17 @@ class RallyApiClient(
      * Used when scope is "Test Cases".
      */
     fun queryAllTestCases(query: String? = null, pageSize: Int = DEFAULT_PAGE_SIZE, maxResults: Int = MAX_PAGE_SIZE): List<RallyTestCase> {
-        val cacheKey = "alltestcases:${query}|${pageSize}|${maxResults}|${workspaceRef}|${projectRef}"
+        val ws = workspaceRef
+        val pr = projectRef
+        val cacheKey = "alltestcases:${query}|${pageSize}|${maxResults}|${ws}|${pr}"
         getCached<List<RallyTestCase>>(cacheKey)?.let { return it }
 
         val results: List<RallyTestCase> = queryAllPages(
             "testcase", TYPE_TEST_CASES, query, pageSize, maxResults,
             order = "LastUpdateDate DESC",
-            fields = TC_LIST_FIELDS
+            fields = TC_LIST_FIELDS,
+            workspace = ws,
+            project = pr
         )
         putCache(cacheKey, results)
         return results
@@ -888,14 +913,15 @@ class RallyApiClient(
      * Returns only Open (active) projects, sorted alphabetically by name.
      */
     fun queryProjects(pageSize: Int = MAX_PAGE_SIZE): List<RallyProject> {
+        val ws = workspaceRef
         val query = "(State = \"Open\")"
         val encodedQuery = URLEncoder.encode(query, StandardCharsets.UTF_8)
 
         var url = buildApiUrl("project") +
                 "?query=$encodedQuery&fetch=Name,ObjectID,_ref,State&pagesize=$pageSize&order=Name"
 
-        if (!workspaceRef.isNullOrBlank()) {
-            url += "&workspace=${URLEncoder.encode(normalizeRef("workspace", workspaceRef!!), StandardCharsets.UTF_8)}"
+        if (!ws.isNullOrBlank()) {
+            url += "&workspace=${URLEncoder.encode(normalizeRef("workspace", ws), StandardCharsets.UTF_8)}"
         }
 
         val response = executeGet(url)
@@ -911,18 +937,20 @@ class RallyApiClient(
      * Returns iterations sorted by StartDate descending (most recent first).
      */
     fun queryIterations(pageSize: Int = MAX_PAGE_SIZE): List<RallyIteration> {
+        val ws = workspaceRef
+        val pr = projectRef
         var url = buildApiUrl("iteration") +
                 "?fetch=Name,ObjectID,_ref,StartDate,EndDate,PlannedVelocity,Project,State&pagesize=$pageSize" +
                 "&order=${URLEncoder.encode("StartDate DESC,EndDate DESC,ObjectID", StandardCharsets.UTF_8)}"
 
-        if (!workspaceRef.isNullOrBlank()) {
-            url += "&workspace=${URLEncoder.encode(normalizeRef("workspace", workspaceRef!!), StandardCharsets.UTF_8)}"
+        if (!ws.isNullOrBlank()) {
+            url += "&workspace=${URLEncoder.encode(normalizeRef("workspace", ws), StandardCharsets.UTF_8)}"
         }
         // Scope via URL params only. An earlier (Project=...) query filter contradicted
         // projectScopeUp/Down and silently pinned results to one project. Rely on the
         // canonical scope params so the chosen project plus its descendants are covered.
-        if (!projectRef.isNullOrBlank()) {
-            url += "&project=${URLEncoder.encode(normalizeRef("project", projectRef!!), StandardCharsets.UTF_8)}"
+        if (!pr.isNullOrBlank()) {
+            url += "&project=${URLEncoder.encode(normalizeRef("project", pr), StandardCharsets.UTF_8)}"
             url += "&projectScopeUp=true&projectScopeDown=true"
         }
 
@@ -937,6 +965,7 @@ class RallyApiClient(
      * Query tasks linked to a work product (user story/defect).
      */
     fun queryTasksForWorkProduct(workProductRef: String, pageSize: Int = DEFAULT_PAGE_SIZE): List<RallyTaskItem> {
+        val ws = workspaceRef
         val cacheKey = "tasks:$workProductRef"
         getCached<List<RallyTaskItem>>(cacheKey)?.let { return it }
 
@@ -947,8 +976,8 @@ class RallyApiClient(
                 "?query=$encodedQuery&fetch=FormattedID,Name,State,Owner,Estimate,Actuals,ToDo,ObjectID,_ref" +
                 "&pagesize=$pageSize&order=${URLEncoder.encode("FormattedID ASC", StandardCharsets.UTF_8)}"
 
-        if (!workspaceRef.isNullOrBlank()) {
-            url += "&workspace=${URLEncoder.encode(normalizeRef("workspace", workspaceRef!!), StandardCharsets.UTF_8)}"
+        if (!ws.isNullOrBlank()) {
+            url += "&workspace=${URLEncoder.encode(normalizeRef("workspace", ws), StandardCharsets.UTF_8)}"
         }
 
         val response = executeGet(url)
@@ -963,6 +992,7 @@ class RallyApiClient(
      * Query test cases linked to a work product (user story/defect).
      */
     fun queryTestCases(workProductRef: String, pageSize: Int = DEFAULT_PAGE_SIZE): List<RallyTestCase> {
+        val ws = workspaceRef
         val cacheKey = "testcases:$workProductRef"
         getCached<List<RallyTestCase>>(cacheKey)?.let { return it }
 
@@ -973,8 +1003,8 @@ class RallyApiClient(
                 "?query=$encodedQuery&fetch=FormattedID,Name,Method,Type,LastVerdict,LastRun,Owner,WorkProduct,Description,Priority,ObjectID,_ref" +
                 "&pagesize=$pageSize&order=${URLEncoder.encode("FormattedID ASC", StandardCharsets.UTF_8)}"
 
-        if (!workspaceRef.isNullOrBlank()) {
-            url += "&workspace=${URLEncoder.encode(normalizeRef("workspace", workspaceRef!!), StandardCharsets.UTF_8)}"
+        if (!ws.isNullOrBlank()) {
+            url += "&workspace=${URLEncoder.encode(normalizeRef("workspace", ws), StandardCharsets.UTF_8)}"
         }
 
         val response = executeGet(url)
@@ -989,6 +1019,7 @@ class RallyApiClient(
      * Query test case steps for a given test case FormattedID.
      */
     fun queryTestSteps(testCaseFormattedId: String): List<RallyTestCaseStep> {
+        val ws = workspaceRef
         val cacheKey = "teststeps:$testCaseFormattedId"
         getCached<List<RallyTestCaseStep>>(cacheKey)?.let { return it }
 
@@ -1000,8 +1031,8 @@ class RallyApiClient(
                 "?query=$encodedQuery&fetch=StepIndex,Input,ExpectedResult,_ref" +
                 "&pagesize=$DEFAULT_PAGE_SIZE&order=${URLEncoder.encode("StepIndex ASC", StandardCharsets.UTF_8)}"
 
-        if (!workspaceRef.isNullOrBlank()) {
-            url += "&workspace=${URLEncoder.encode(normalizeRef("workspace", workspaceRef!!), StandardCharsets.UTF_8)}"
+        if (!ws.isNullOrBlank()) {
+            url += "&workspace=${URLEncoder.encode(normalizeRef("workspace", ws), StandardCharsets.UTF_8)}"
         }
 
         val response = executeGet(url)
@@ -1016,6 +1047,7 @@ class RallyApiClient(
      * Query attachments for a given artifact FormattedID.
      */
     fun queryAttachments(artifactFormattedId: String): List<RallyAttachment> {
+        val ws = workspaceRef
         val cacheKey = "attachments:$artifactFormattedId"
         getCached<List<RallyAttachment>>(cacheKey)?.let { return it }
 
@@ -1027,8 +1059,8 @@ class RallyApiClient(
                 "?query=$encodedQuery&fetch=Name,ContentType,Size,Description,Content,ObjectID,_ref" +
                 "&pagesize=$DEFAULT_PAGE_SIZE"
 
-        if (!workspaceRef.isNullOrBlank()) {
-            url += "&workspace=${URLEncoder.encode(normalizeRef("workspace", workspaceRef!!), StandardCharsets.UTF_8)}"
+        if (!ws.isNullOrBlank()) {
+            url += "&workspace=${URLEncoder.encode(normalizeRef("workspace", ws), StandardCharsets.UTF_8)}"
         }
 
         val response = executeGet(url)
@@ -1043,6 +1075,7 @@ class RallyApiClient(
      * Query a single test case by FormattedID.
      */
     fun queryTestCaseByFormattedId(formattedId: String): RallyTestCase? {
+        val ws = workspaceRef
         val cacheKey = "testcase:id:$formattedId"
         getCached<RallyTestCase>(cacheKey)?.let { return it }
 
@@ -1054,8 +1087,8 @@ class RallyApiClient(
                 "?query=$encodedQuery&fetch=FormattedID,Name,Method,Type,LastVerdict,LastRun,Owner,WorkProduct,Description,Priority,ObjectID,_ref" +
                 "&pagesize=1"
 
-        if (!workspaceRef.isNullOrBlank()) {
-            url += "&workspace=${URLEncoder.encode(normalizeRef("workspace", workspaceRef!!), StandardCharsets.UTF_8)}"
+        if (!ws.isNullOrBlank()) {
+            url += "&workspace=${URLEncoder.encode(normalizeRef("workspace", ws), StandardCharsets.UTF_8)}"
         }
 
         val response = executeGet(url)
