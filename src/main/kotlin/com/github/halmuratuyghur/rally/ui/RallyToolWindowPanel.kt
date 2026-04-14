@@ -220,10 +220,14 @@ class RallyToolWindowPanel(private val project: Project) : Disposable {
                 ): Component {
                     val comp = super.getListCellRendererComponent(list, value, index, isSelected, cellHasFocus)
                     val name = value?.toString() ?: ""
+                    // Snapshot cachedIterations into a local — a project switch on a
+                    // background thread could replace the list out from under us
+                    // between the bounds check and the index access.
+                    val snapshot = cachedIterations
                     // Look up iteration dates from cache (index 0 = "All Sprints", so offset by 1)
                     val iterIndex = if (index > 0) index - 1 else -1
-                    if (iterIndex in cachedIterations.indices) {
-                        val iter = cachedIterations[iterIndex]
+                    if (iterIndex in snapshot.indices) {
+                        val iter = snapshot[iterIndex]
                         val start = iter.startDate?.take(10) ?: ""
                         val end = iter.endDate?.take(10) ?: ""
                         if (start.isNotBlank() && end.isNotBlank()) {
