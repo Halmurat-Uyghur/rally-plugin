@@ -403,7 +403,7 @@ class RallyToolWindowPanel(private val project: Project) : Disposable {
 
     fun loadTickets() {
         val settings = RallySettings.getInstance()
-        if (!settings.isConfigured()) {
+        if (!settings.isConfiguredOrLoading()) {
             showNotConfigured()
             return
         }
@@ -923,7 +923,7 @@ class RallyToolWindowPanel(private val project: Project) : Disposable {
 
     private fun showCreateDefectDialog() {
         val settings = RallySettings.getInstance()
-        if (!settings.isConfigured()) {
+        if (!settings.isConfiguredOrLoading()) {
             Messages.showErrorDialog(project, "Configure Rally in Settings \u2192 Tools \u2192 Rally first.", "Rally")
             return
         }
@@ -1133,7 +1133,7 @@ class RallyToolWindowPanel(private val project: Project) : Disposable {
 
     private fun showCreateUserStoryDialog() {
         val settings = RallySettings.getInstance()
-        if (!settings.isConfigured()) {
+        if (!settings.isConfiguredOrLoading()) {
             Messages.showErrorDialog(project, "Configure Rally in Settings → Tools → Rally first.", "Rally")
             return
         }

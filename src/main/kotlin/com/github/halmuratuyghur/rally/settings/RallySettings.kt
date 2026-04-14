@@ -111,6 +111,21 @@ class RallySettings : PersistentStateComponent<RallySettings.State> {
 
     fun isConfigured(): Boolean = myState.serverUrl.isNotBlank() && apiKey.isNotBlank()
 
+    /**
+     * EDT-safe variant of [isConfigured]. Returns `true` optimistically while the
+     * async PasswordSafe load is still in progress, so UI actions immediately after
+     * IDE startup are not blocked by a transient empty apiKey. Off-EDT callers
+     * should keep using [isConfigured], which waits up to 2s on the latch.
+     *
+     * Safe because `cachedApiKey` is only assigned a non-null value once the load
+     * (or migration) completes; while it is `null` the load is still in flight.
+     */
+    fun isConfiguredOrLoading(): Boolean {
+        if (myState.serverUrl.isBlank()) return false
+        val key = cachedApiKey ?: return true   // null = load still in flight
+        return key.isNotBlank()
+    }
+
     companion object {
         private const val CREDENTIAL_USER = "RallyPlugin"
         private val credentialAttributes = CredentialAttributes(
