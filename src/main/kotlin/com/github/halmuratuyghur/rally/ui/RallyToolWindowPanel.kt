@@ -20,6 +20,7 @@ import com.github.halmuratuyghur.rally.api.RallyDefect
 import com.github.halmuratuyghur.rally.api.RallyTestCase
 import com.github.halmuratuyghur.rally.api.RallyIteration
 import com.github.halmuratuyghur.rally.api.RallyProject
+import com.github.halmuratuyghur.rally.api.RallyTaskItem
 import com.github.halmuratuyghur.rally.api.RallyUserStory
 import com.github.halmuratuyghur.rally.export.RallyExporter
 import com.github.halmuratuyghur.rally.settings.RallySettings
@@ -1550,12 +1551,15 @@ class RallyToolWindowPanel(private val project: Project) : Disposable {
                         "Rally - State Change"
                     )
                 }
-                // Optimistic update: patch in-memory list instead of full reload
+                // Optimistic update: patch in-memory list instead of full reload.
+                // Tasks use State, not ScheduleState — the earlier else-branch left
+                // tasks showing stale state until the next manual refresh.
                 allArtifacts = allArtifacts.map { artifact ->
                     if (artifact.ref in successfulRefs) {
                         when (artifact) {
                             is RallyUserStory -> artifact.copy(scheduleState = newState)
                             is RallyDefect -> artifact.copy(scheduleState = newState)
+                            is RallyTaskItem -> artifact.copy(state = newState)
                             else -> artifact
                         }
                     } else artifact
@@ -1751,6 +1755,7 @@ class RallyToolWindowPanel(private val project: Project) : Disposable {
                             when (artifact) {
                                 is RallyUserStory -> artifact.copy(scheduleState = "In-Progress")
                                 is RallyDefect -> artifact.copy(scheduleState = "In-Progress")
+                                is RallyTaskItem -> artifact.copy(state = "In-Progress")
                                 else -> artifact
                             }
                         } else artifact
@@ -1811,6 +1816,7 @@ class RallyToolWindowPanel(private val project: Project) : Disposable {
                             when (artifact) {
                                 is RallyUserStory -> artifact.copy(scheduleState = "Completed")
                                 is RallyDefect -> artifact.copy(scheduleState = "Completed")
+                                is RallyTaskItem -> artifact.copy(state = "Completed")
                                 else -> artifact
                             }
                         } else artifact
