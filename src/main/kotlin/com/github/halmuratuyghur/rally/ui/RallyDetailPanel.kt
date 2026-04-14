@@ -44,6 +44,14 @@ class RallyDetailPanel(private val project: Project) : com.intellij.openapi.Disp
         private const val TAB_TEST_CASES = 0
         private const val TAB_TASKS = 1
         private const val TAB_ATTACHMENTS = 2
+        // Sentinel returned by the description-fetch supplyAsync when Rally rejects
+        // the API key, so the EDT-side renderer can show an actionable error rather
+        // than a generic "No description". The leading control char ensures Rally
+        // HTML can never accidentally collide with this value.
+        private const val DESC_AUTH_FAILED = "\u0001RALLY_AUTH_FAILED\u0001"
+        private const val AUTH_ERROR_HTML =
+            "<span style='color:#c00'><b>Authentication failed.</b> " +
+            "Check your Rally API key in Settings → Tools → Rally.</span>"
 
         // Colors are defined in RallyColors object
         // Matches external src attributes (double- or single-quoted, protocol-relative included)
@@ -322,9 +330,13 @@ class RallyDetailPanel(private val project: Project) : com.intellij.openapi.Disp
                     if (generation.get() != gen) return@supplyAsync null
                     var resolved = desc
                     if (resolved.isNullOrBlank()) {
-                        resolved = try { client.fetchDescription(artifactRef) } catch (e: Exception) {
+                        try {
+                            resolved = client.fetchDescription(artifactRef)
+                        } catch (e: RallyAuthenticationException) {
+                            LOG.warn("Auth failure fetching description for $id", e)
+                            return@supplyAsync DESC_AUTH_FAILED
+                        } catch (e: Exception) {
                             LOG.warn("Failed to fetch description for $id", e)
-                            null
                         }
                     }
                     if (generation.get() != gen) return@supplyAsync null
@@ -348,7 +360,12 @@ class RallyDetailPanel(private val project: Project) : com.intellij.openapi.Disp
                 descFuture.thenAccept { resolvedDesc ->
                     ApplicationManager.getApplication().invokeLater {
                         if (generation.get() != gen || disposed) return@invokeLater
-                        descriptionPane.text = wrapHtml(resolvedDesc ?: "<i>No description</i>")
+                        val text = when {
+                            resolvedDesc == DESC_AUTH_FAILED -> AUTH_ERROR_HTML
+                            !resolvedDesc.isNullOrBlank() -> resolvedDesc
+                            else -> "<i>No description</i>"
+                        }
+                        descriptionPane.text = wrapHtml(text)
                         descriptionPane.caretPosition = 0
                     }
                 }.exceptionally { t -> LOG.warn("Detail panel description update failed", t); null }
@@ -387,9 +404,13 @@ class RallyDetailPanel(private val project: Project) : com.intellij.openapi.Disp
                 if (generation.get() != gen) return@supplyAsync null
                 var resolved = desc
                 if (resolved.isNullOrBlank()) {
-                    resolved = try { client.fetchDescription(artifactRef) } catch (e: Exception) {
+                    try {
+                        resolved = client.fetchDescription(artifactRef)
+                    } catch (e: RallyAuthenticationException) {
+                        LOG.warn("Auth failure fetching description for $id", e)
+                        return@supplyAsync DESC_AUTH_FAILED
+                    } catch (e: Exception) {
                         LOG.warn("Failed to fetch description for $id", e)
-                        null
                     }
                 }
                 if (generation.get() != gen) return@supplyAsync null
@@ -430,11 +451,12 @@ class RallyDetailPanel(private val project: Project) : com.intellij.openapi.Disp
             descFuture.thenAccept { resolvedDesc ->
                 ApplicationManager.getApplication().invokeLater {
                     if (generation.get() != gen || disposed) return@invokeLater
-                    if (!resolvedDesc.isNullOrBlank()) {
-                        descriptionPane.text = wrapHtml(resolvedDesc)
-                    } else {
-                        descriptionPane.text = wrapHtml("<i>No description</i>")
+                    val text = when {
+                        resolvedDesc == DESC_AUTH_FAILED -> AUTH_ERROR_HTML
+                        !resolvedDesc.isNullOrBlank() -> resolvedDesc
+                        else -> "<i>No description</i>"
                     }
+                    descriptionPane.text = wrapHtml(text)
                     descriptionPane.caretPosition = 0
                 }
             }.exceptionally { t -> LOG.warn("Detail panel description update failed", t); null }

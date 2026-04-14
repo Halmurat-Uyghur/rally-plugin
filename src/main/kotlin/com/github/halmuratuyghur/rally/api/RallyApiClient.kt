@@ -532,8 +532,11 @@ class RallyApiClient(
             putCache(cacheKey, desc ?: "")
             desc
         } catch (e: RallyAuthenticationException) {
+            // Surface auth failures so the UI can show an actionable message instead
+            // of a generic "No description" — every other detail-panel call hits the
+            // same credentials, so this almost always means the API key is bad/expired.
             LOG.warn("Auth failure fetching description for $artifactRef", e)
-            null
+            throw e
         } catch (e: RallyApiException) {
             LOG.warn("API error fetching description for $artifactRef: ${e.message}")
             null
