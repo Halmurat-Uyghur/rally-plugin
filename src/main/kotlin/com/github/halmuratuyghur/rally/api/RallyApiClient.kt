@@ -884,12 +884,30 @@ class RallyApiClient(
     }
 
     /**
+     * Allowlist of Rally artifact types we accept on the update/create paths.
+     * The type name is used as a JSON key in the request body, so anything outside
+     * this list could rewrite the structure if it contained a quote or brace.
+     * Keep this in sync with Rally's WSAPI type names.
+     */
+    private val ALLOWED_ARTIFACT_TYPES = setOf(
+        "HierarchicalRequirement", "Defect", "Task", "TestCase", "TestCaseStep",
+        "Attachment", "AttachmentContent"
+    )
+
+    private fun requireValidArtifactType(artifactType: String) {
+        require(artifactType in ALLOWED_ARTIFACT_TYPES) {
+            "Unknown Rally artifact type: $artifactType"
+        }
+    }
+
+    /**
      * Update the state of an artifact.
      * User Stories/Defects use ScheduleState, Tasks use State.
      */
     fun updateArtifactState(artifactRef: String, artifactType: String, newState: String) {
+        requireValidArtifactType(artifactType)
         val stateField = if (artifactType == "Task") "State" else "ScheduleState"
-        val body = """{"$artifactType":${gson.toJson(mapOf(stateField to newState))}}"""
+        val body = gson.toJson(mapOf(artifactType to mapOf(stateField to newState)))
         val response = executePost(artifactRef, body)
         handleResponse(response)
 
@@ -909,7 +927,8 @@ class RallyApiClient(
      * @param ownerRef Full API URL ref of the user
      */
     fun updateArtifactOwner(artifactRef: String, artifactType: String, ownerRef: String) {
-        val body = """{"$artifactType":${gson.toJson(mapOf("Owner" to ownerRef))}}"""
+        requireValidArtifactType(artifactType)
+        val body = gson.toJson(mapOf(artifactType to mapOf("Owner" to ownerRef)))
         val response = executePost(artifactRef, body)
         handleResponse(response)
 
@@ -930,8 +949,9 @@ class RallyApiClient(
      * @param value The new value (String, Number, or null to clear)
      */
     fun updateArtifactField(artifactRef: String, artifactType: String, field: String, value: Any?) {
+        requireValidArtifactType(artifactType)
         val fieldMap = if (value != null) mapOf(field to value) else mapOf(field to com.google.gson.JsonNull.INSTANCE)
-        val body = """{"$artifactType":${gson.toJson(fieldMap)}}"""
+        val body = gson.toJson(mapOf(artifactType to fieldMap))
         val response = executePost(artifactRef, body)
         handleResponse(response)
 
@@ -1265,7 +1285,7 @@ class RallyApiClient(
         if (!description.isNullOrBlank()) fields["Description"] = description
         if (!iterationRef.isNullOrBlank()) fields["Iteration"] = iterationRef
 
-        val body = """{"HierarchicalRequirement":${gson.toJson(fields)}}"""
+        val body = gson.toJson(mapOf("HierarchicalRequirement" to fields))
         val response = executePost(url, body)
         handleResponse(response)
 
@@ -1303,7 +1323,7 @@ class RallyApiClient(
         if (!severity.isNullOrBlank()) fields["Severity"] = severity
         if (!priority.isNullOrBlank()) fields["Priority"] = priority
 
-        val body = """{"Defect":${gson.toJson(fields)}}"""
+        val body = gson.toJson(mapOf("Defect" to fields))
         val response = executePost(url, body)
         handleResponse(response)
 
@@ -1339,7 +1359,7 @@ class RallyApiClient(
         if (!description.isNullOrBlank()) fields["Description"] = description
         if (estimate != null) fields["Estimate"] = estimate
 
-        val body = """{"Task":${gson.toJson(fields)}}"""
+        val body = gson.toJson(mapOf("Task" to fields))
         val response = executePost(url, body)
         handleResponse(response)
 
@@ -1377,7 +1397,7 @@ class RallyApiClient(
 
         // Step 1: Create AttachmentContent
         val contentUrl = buildApiUrl("attachmentcontent/create")
-        val contentBody = """{"AttachmentContent":${gson.toJson(mapOf("Content" to base64Content))}}"""
+        val contentBody = gson.toJson(mapOf("AttachmentContent" to mapOf("Content" to base64Content)))
         val contentResponse = executePost(contentUrl, contentBody)
         handleResponse(contentResponse)
 
@@ -1400,7 +1420,7 @@ class RallyApiClient(
             "Artifact" to artifactRef
         )
         val attachUrl = buildApiUrl("attachment/create")
-        val attachBody = """{"Attachment":${gson.toJson(attachFields)}}"""
+        val attachBody = gson.toJson(mapOf("Attachment" to attachFields))
         val attachResponse = executePost(attachUrl, attachBody)
         handleResponse(attachResponse)
 
