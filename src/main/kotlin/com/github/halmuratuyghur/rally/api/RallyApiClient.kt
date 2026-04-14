@@ -43,6 +43,14 @@ class RallyApiClient(
         Thread(r, "rally-api-worker").apply { isDaemon = true }
     }
 
+    /**
+     * True if this client's executor is still accepting work. Use this from UI
+     * code that wants to bail out before submitting tasks to a client whose
+     * thread pool has already been shut down by a settings change or panel
+     * disposal — otherwise the task throws RejectedExecutionException.
+     */
+    val isAlive: Boolean get() = !apiExecutor.isShutdown
+
     private val httpClient: HttpClient = HttpClient.newBuilder()
         .connectTimeout(Duration.ofSeconds(15))
         .version(HttpClient.Version.HTTP_2)

@@ -276,6 +276,15 @@ class RallyDetailPanel(private val project: Project) : com.intellij.openapi.Disp
             clear()
             return
         }
+        // Bail if the caller passed a client whose thread pool has already been
+        // shut down by a settings change or parent disposal — submitting tasks
+        // to a dead executor would throw RejectedExecutionException from inside
+        // every supplyAsync block below.
+        if (!client.isAlive) {
+            LOG.warn("showArtifact called with a disposed client; skipping")
+            clear()
+            return
+        }
 
         val artifactRef = artifact.ref ?: return
         val gen = generation.incrementAndGet()
