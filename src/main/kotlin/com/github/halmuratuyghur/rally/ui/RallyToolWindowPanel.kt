@@ -1515,14 +1515,19 @@ class RallyToolWindowPanel(private val project: Project) : Disposable {
             return
         }
 
-        val ids = selected.mapNotNull { it.formattedID }.joinToString(", ")
-        val confirm = Messages.showYesNoDialog(
-            project,
-            "Move ${selected.size} ticket(s) to '$newState'?\n$ids",
-            "Rally - Change State",
-            Messages.getQuestionIcon()
-        )
-        if (confirm != Messages.YES) return
+        // Single-item state changes are a one-click reversible action — confirming
+        // every one of them gets in the way. Only ask when bulk-changing more than
+        // one ticket so a stray multi-select doesn't move 50 stories at once.
+        if (selected.size > 1) {
+            val ids = selected.mapNotNull { it.formattedID }.joinToString(", ")
+            val confirm = Messages.showYesNoDialog(
+                project,
+                "Move ${selected.size} tickets to '$newState'?\n$ids",
+                "Rally - Change State",
+                Messages.getQuestionIcon()
+            )
+            if (confirm != Messages.YES) return
+        }
 
         statusLabel.text = "Updating..."
 
