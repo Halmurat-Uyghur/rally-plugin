@@ -80,12 +80,14 @@ class RallyToolWindowPanel(private val project: Project) : Disposable {
     private val statsLabel = JBLabel("0 items")
     private val sprintLabel = JBLabel("")
     private val statusLabel = JBLabel("Ready")
+    /** Cached at construction time so the EDT-side selection listener doesn't reflectively probe Class.forName on every selection change. */
+    private val gitAvailable: Boolean = RallyGitOps.isAvailable()
     private val startWorkingButton = JButton("Start Working", AllIcons.Actions.Execute).apply {
         isFocusable = true
         // Start Working creates a git branch; if the IDE ships without Git4Idea,
         // there's nothing the button can do — keep it visible but disabled so the
         // affordance is obvious.
-        if (!RallyGitOps.isAvailable()) {
+        if (!gitAvailable) {
             isEnabled = false
             toolTipText = "Git integration is not available in this IDE"
         }
@@ -351,7 +353,9 @@ class RallyToolWindowPanel(private val project: Project) : Disposable {
                         sp.dividerLocation = (sp.width * 0.55).toInt()
                     }
                     val isTc = selected is RallyTestCase
-                    startWorkingButton.isEnabled = !isTc
+                    // Start Working stays disabled when Git4Idea is absent regardless of selection
+                    // — clicking it has nowhere to go without git operations.
+                    startWorkingButton.isEnabled = !isTc && gitAvailable
                     finishWorkingButton.isEnabled = !isTc
                 } else {
                     // Auto-collapse detail panel when nothing is selected
