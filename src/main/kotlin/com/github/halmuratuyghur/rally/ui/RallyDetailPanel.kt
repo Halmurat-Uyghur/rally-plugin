@@ -13,6 +13,7 @@ import com.intellij.openapi.ui.ValidationInfo
 import com.github.halmuratuyghur.rally.api.*
 import com.github.halmuratuyghur.rally.export.RallyExporter
 import com.github.halmuratuyghur.rally.settings.RallySettings
+import com.github.halmuratuyghur.rally.util.RallyFileUtils
 import com.github.halmuratuyghur.rally.util.RallyHtmlUtils
 import com.intellij.ui.JBColor
 import com.intellij.ui.components.JBLabel
@@ -321,12 +322,18 @@ class RallyDetailPanel(private val project: Project) : com.intellij.openapi.Disp
                     if (generation.get() != gen) return@supplyAsync null
                     var resolved = desc
                     if (resolved.isNullOrBlank()) {
-                        resolved = try { client.fetchDescription(artifactRef) } catch (e: Exception) { null }
+                        resolved = try { client.fetchDescription(artifactRef) } catch (e: Exception) {
+                            LOG.warn("Failed to fetch description for $id", e)
+                            null
+                        }
                     }
                     if (generation.get() != gen) return@supplyAsync null
                     val resolvedNonNull = resolved
                     if (!resolvedNonNull.isNullOrBlank()) {
-                        try { resolveInlineImages(resolvedNonNull, client, gen) } catch (_: Exception) { resolvedNonNull }
+                        try { resolveInlineImages(resolvedNonNull, client, gen) } catch (e: Exception) {
+                            LOG.warn("Failed to resolve inline images for $id", e)
+                            resolvedNonNull
+                        }
                     } else null
                 }, client.apiExecutor)
 
@@ -830,7 +837,7 @@ class RallyDetailPanel(private val project: Project) : com.intellij.openapi.Disp
             Messages.showErrorDialog(project, "No content reference for this attachment.", "Rally - Download Error")
             return
         }
-        val fileName = (selected.name ?: "attachment").replace(Regex("[/\\\\]"), "_")
+        val fileName = RallyFileUtils.sanitizeFileName(selected.name ?: "attachment")
 
         val descriptor = FileSaverDescriptor("Save Attachment", "Choose where to save the attachment")
         val wrapper = FileChooserFactory.getInstance().createSaveFileDialog(descriptor, project)
