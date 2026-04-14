@@ -17,7 +17,6 @@ import java.time.Duration
 import java.util.Base64
 import java.util.Collections
 import java.util.LinkedHashMap
-import java.util.concurrent.ConcurrentHashMap
 import java.util.concurrent.ExecutorService
 import java.util.concurrent.Executors
 
@@ -121,7 +120,15 @@ class RallyApiClient(
             }
         }
     )
-    private val imageCache = ConcurrentHashMap<String, ByteArray>()
+    /**
+     * Access-ordered LinkedHashMap for true LRU semantics: get() reorders the entry
+     * to the back of the iteration, so eviction removes whichever entry was used
+     * least recently. The previous ConcurrentHashMap had no defined iteration order
+     * and the old "take first 25% of keys" eviction was effectively random.
+     */
+    private val imageCache: MutableMap<String, ByteArray> = Collections.synchronizedMap(
+        object : LinkedHashMap<String, ByteArray>(16, 0.75f, true) {}
+    )
     private val imageCacheBytes = java.util.concurrent.atomic.AtomicLong(0)
 
     /** Default TTL for query caches (2 minutes). */
@@ -1166,15 +1173,23 @@ class RallyApiClient(
             return bytes
         }
         synchronized(imageCache) {
+            // Double-check inside the lock — another thread may have downloaded
+            // the same URL while we were on the network.
             imageCache[url]?.let { return it }
-            if (imageCacheBytes.get() + bytes.size > maxImageCacheBytes) {
-                val toRemove = imageCache.keys.take(imageCache.size / 4)
-                toRemove.forEach { key ->
-                    imageCache.remove(key)?.let { imageCacheBytes.addAndGet(-it.size.toLong()) }
-                }
+
+            // Evict oldest entries until there's room for the new one. The map is
+            // access-ordered, so entries.iterator() yields least-recently-used first.
+            val incoming = bytes.size.toLong()
+            while (imageCacheBytes.get() + incoming > maxImageCacheBytes && imageCache.isNotEmpty()) {
+                val iter = imageCache.entries.iterator()
+                if (!iter.hasNext()) break
+                val eldest = iter.next()
+                iter.remove()
+                imageCacheBytes.addAndGet(-eldest.value.size.toLong())
             }
+
             imageCache[url] = bytes
-            imageCacheBytes.addAndGet(bytes.size.toLong())
+            imageCacheBytes.addAndGet(incoming)
         }
         return bytes
     }
