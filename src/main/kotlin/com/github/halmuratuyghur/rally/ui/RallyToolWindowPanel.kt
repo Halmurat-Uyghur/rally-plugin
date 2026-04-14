@@ -989,13 +989,17 @@ class RallyToolWindowPanel(private val project: Project) : Disposable {
         ApplicationManager.getApplication().executeOnPooledThread {
             try {
                 val client = getClient()
-                val projectRefForCreate = if (selectedProjectIndex > 0 && selectedProjectIndex - 1 < cachedProjects.size) {
-                    cachedProjects[selectedProjectIndex - 1].ref
+                // Snapshot the volatile caches so a background reload mid-create
+                // can't replace the list between the size check and the index access.
+                val projectsSnapshot = cachedProjects
+                val iterationsSnapshot = cachedIterations
+                val projectRefForCreate = if (selectedProjectIndex > 0 && selectedProjectIndex - 1 < projectsSnapshot.size) {
+                    projectsSnapshot[selectedProjectIndex - 1].ref
                 } else {
                     getSelectedProjectRef()
                 }
-                val iterationRefForCreate = if (selectedIterationIndex > 0 && selectedIterationIndex - 1 < cachedIterations.size) {
-                    cachedIterations[selectedIterationIndex - 1].ref
+                val iterationRefForCreate = if (selectedIterationIndex > 0 && selectedIterationIndex - 1 < iterationsSnapshot.size) {
+                    iterationsSnapshot[selectedIterationIndex - 1].ref
                 } else {
                     null
                 }
@@ -1206,13 +1210,17 @@ class RallyToolWindowPanel(private val project: Project) : Disposable {
         ApplicationManager.getApplication().executeOnPooledThread {
             try {
                 val client = getClient()
-                val projectRefForCreate = if (selectedProjectIndex > 0 && selectedProjectIndex - 1 < cachedProjects.size) {
-                    cachedProjects[selectedProjectIndex - 1].ref
+                // Snapshot the volatile caches so a background reload mid-create
+                // can't replace the list between the size check and the index access.
+                val projectsSnapshot = cachedProjects
+                val iterationsSnapshot = cachedIterations
+                val projectRefForCreate = if (selectedProjectIndex > 0 && selectedProjectIndex - 1 < projectsSnapshot.size) {
+                    projectsSnapshot[selectedProjectIndex - 1].ref
                 } else {
                     getSelectedProjectRef()
                 }
-                val iterationRefForCreate = if (selectedIterationIndex > 0 && selectedIterationIndex - 1 < cachedIterations.size) {
-                    cachedIterations[selectedIterationIndex - 1].ref
+                val iterationRefForCreate = if (selectedIterationIndex > 0 && selectedIterationIndex - 1 < iterationsSnapshot.size) {
+                    iterationsSnapshot[selectedIterationIndex - 1].ref
                 } else {
                     null
                 }
