@@ -1,8 +1,10 @@
 package com.github.halmuratuyghur.rally.util
 
+import org.junit.After
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertTrue
 import org.junit.Assert.fail
+import org.junit.Before
 import org.junit.Test
 import java.nio.file.Files
 import java.nio.file.Path
@@ -10,7 +12,23 @@ import java.nio.file.Paths
 
 class RallyFileUtilsTest {
 
-    private val tmp: Path = Files.createTempDirectory("rally-fileutils-test")
+    // JUnit 4 instantiates the test class once per @Test method, so without an
+    // explicit cleanup the property initializer below would leak one temp dir
+    // per test. @Before/@After tear down per-test instead.
+    private lateinit var tmp: Path
+
+    @Before
+    fun createTempDir() {
+        tmp = Files.createTempDirectory("rally-fileutils-test")
+    }
+
+    @After
+    fun deleteTempDir() {
+        if (!::tmp.isInitialized) return
+        Files.walk(tmp).use { stream ->
+            stream.sorted(Comparator.reverseOrder()).forEach { Files.deleteIfExists(it) }
+        }
+    }
 
     @Test
     fun `reserved name CON gets underscore prefix`() {
