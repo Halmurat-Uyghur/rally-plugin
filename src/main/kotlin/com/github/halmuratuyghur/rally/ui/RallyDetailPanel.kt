@@ -471,9 +471,11 @@ class RallyDetailPanel(private val project: Project) : com.intellij.openapi.Disp
                         val manual = testCases.size - automated
                         testCaseSummaryLabel.text = "${testCases.size} total ($automated automated, $manual manual)"
                         tabbedPane.setTitleAt(TAB_TEST_CASES, "Test Cases (${testCases.size})")
+                        tabbedPane.setToolTipTextAt(TAB_TEST_CASES, null)
                     } else {
-                        testCaseSummaryLabel.text = "Failed to load test cases"
+                        testCaseSummaryLabel.text = "Failed to load test cases — see idea.log for details"
                         tabbedPane.setTitleAt(TAB_TEST_CASES, "Test Cases (!)")
+                        tabbedPane.setToolTipTextAt(TAB_TEST_CASES, "Failed to load test cases — see idea.log for details")
                     }
                 }
             }.exceptionally { t -> LOG.warn("Detail panel test cases update failed", t); null }
@@ -485,8 +487,10 @@ class RallyDetailPanel(private val project: Project) : com.intellij.openapi.Disp
                     if (tasks != null) {
                         taskListModel.addAll(tasks)
                         tabbedPane.setTitleAt(TAB_TASKS, "Tasks (${tasks.size})")
+                        tabbedPane.setToolTipTextAt(TAB_TASKS, null)
                     } else {
                         tabbedPane.setTitleAt(TAB_TASKS, "Tasks (!)")
+                        tabbedPane.setToolTipTextAt(TAB_TASKS, "Failed to load tasks — see idea.log for details")
                     }
                 }
             }.exceptionally { t -> LOG.warn("Detail panel tasks update failed", t); null }
@@ -498,8 +502,10 @@ class RallyDetailPanel(private val project: Project) : com.intellij.openapi.Disp
                     if (attachments != null) {
                         attachmentListModel.addAll(attachments)
                         tabbedPane.setTitleAt(TAB_ATTACHMENTS, "Attachments (${attachments.size})")
+                        tabbedPane.setToolTipTextAt(TAB_ATTACHMENTS, null)
                     } else {
                         tabbedPane.setTitleAt(TAB_ATTACHMENTS, "Attachments (!)")
+                        tabbedPane.setToolTipTextAt(TAB_ATTACHMENTS, "Failed to load attachments — see idea.log for details")
                     }
                 }
             }.exceptionally { t -> LOG.warn("Detail panel attachments update failed", t); null }
@@ -700,8 +706,10 @@ class RallyDetailPanel(private val project: Project) : com.intellij.openapi.Disp
                     if (steps != null) {
                         stepListModel.addAll(steps)
                         tabbedPane.setTitleAt(currentStepsTab, "Test Steps (${steps.size})")
+                        tabbedPane.setToolTipTextAt(currentStepsTab, null)
                     } else {
                         tabbedPane.setTitleAt(currentStepsTab, "Test Steps (!)")
+                        tabbedPane.setToolTipTextAt(currentStepsTab, "Failed to load test steps — see idea.log for details")
                     }
                 }
             }
