@@ -1027,11 +1027,11 @@ class RallyDetailPanel(private val project: Project) : com.intellij.openapi.Disp
         }
         val resolved = sb.toString()
         // Neutralize any remaining external http(s) src attributes to prevent JTextPane
-        // network fetches. The previous replacement string `src="" """` left a stray
-        // closing quote inside the tag, which produced malformed HTML in the rendered
-        // output; the pattern already consumes the entire src="..." run via the
-        // backreference, so we just emit a single empty src attribute.
-        return EXTERNAL_SRC_PATTERN.matcher(resolved).replaceAll("""src=""""")
+        // network fetches. The pattern already consumes the entire src="..." run via the
+        // backreference, so we just emit a single empty src attribute. Kept as an
+        // escaped string literal rather than a raw triple-quoted one — the adjacent
+        // closing quotes in the raw form were legal but near-unreadable.
+        return EXTERNAL_SRC_PATTERN.matcher(resolved).replaceAll("src=\"\"")
     }
 
 
