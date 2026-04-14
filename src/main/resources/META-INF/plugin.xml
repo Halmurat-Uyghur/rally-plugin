@@ -30,7 +30,7 @@
     ]]></description>
 
     <depends>com.intellij.modules.platform</depends>
-    <depends>Git4Idea</depends>
+    <depends optional="true" config-file="rally-git.xml">Git4Idea</depends>
 
     <extensions defaultExtensionNs="com.intellij">
         <toolWindow

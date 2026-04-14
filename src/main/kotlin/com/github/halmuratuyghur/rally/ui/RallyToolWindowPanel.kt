@@ -24,9 +24,8 @@ import com.github.halmuratuyghur.rally.api.RallyTaskItem
 import com.github.halmuratuyghur.rally.api.RallyUserStory
 import com.github.halmuratuyghur.rally.export.RallyExporter
 import com.github.halmuratuyghur.rally.settings.RallySettings
+import com.github.halmuratuyghur.rally.util.RallyGitOps
 
-import git4idea.branch.GitBrancher
-import git4idea.repo.GitRepositoryManager
 import com.intellij.ui.awt.RelativePoint
 import com.intellij.ui.JBColor
 import com.intellij.ui.SearchTextField
@@ -1651,63 +1650,22 @@ class RallyToolWindowPanel(private val project: Project) : Disposable {
             val client = getClient()
             val errors = mutableListOf<String>()
 
-            // 1. Create & checkout git branch (synchronized via latch)
+            // 1. Create & checkout git branch — skipped cleanly if Git4Idea isn't installed.
             var branchSucceeded = false
-            try {
-                val repoManager = GitRepositoryManager.getInstance(project)
-                val repos = repoManager.repositories
-                if (repos.isEmpty()) {
-                    errors.add("No Git repository found in this project")
-                } else {
-                    val brancher = GitBrancher.getInstance(project)
-                    val repo = repos.first()
-                    val targetRepos = listOf(repo)
-                    val existingBranches = repo.branches.localBranches.map { it.name }
-                    val branchLatch = java.util.concurrent.CountDownLatch(1)
-                    var branchError: String? = null
-
-                    // GitBrancher handles its own threading/progress — call from background thread.
-                    // The checkout callback fires on EDT after completion; verify on pooled thread.
-                    val verifyCheckout = Runnable {
-                        ApplicationManager.getApplication().executeOnPooledThread {
-                            try {
-                                repo.update()
-                                val currentBranch = repo.currentBranchName
-                                if (currentBranch != branchName) {
-                                    branchError = "Checkout not confirmed (expected: $branchName, current: $currentBranch)"
-                                }
-                            } catch (e: Exception) {
-                                branchError = e.message
-                            } finally {
-                                branchLatch.countDown()
-                            }
-                        }
-                    }
-
-                    try {
-                        if (branchName in existingBranches) {
-                            brancher.checkout(branchName, false, targetRepos, verifyCheckout)
-                        } else {
-                            brancher.createBranch(branchName, mapOf(repo to "HEAD"))
-                            brancher.checkout(branchName, false, targetRepos, verifyCheckout)
-                        }
-                    } catch (e: Exception) {
-                        branchError = e.message
-                        branchLatch.countDown()
-                    }
-
-                    val completed = branchLatch.await(30, java.util.concurrent.TimeUnit.SECONDS)
-                    if (!completed) {
-                        errors.add("Branch operation timed out")
-                    } else if (branchError != null) {
-                        errors.add("Branch operation failed: $branchError")
+            if (!RallyGitOps.isAvailable()) {
+                errors.add("Git4Idea is not available in this IDE — branch creation skipped")
+            } else {
+                try {
+                    val branchError = RallyGitOps.createOrCheckoutBranch(project, branchName)
+                    if (branchError != null) {
+                        errors.add(branchError)
                     } else {
                         branchSucceeded = true
                     }
+                } catch (e: Exception) {
+                    LOG.error("Failed to create branch $branchName", e)
+                    errors.add("Branch creation failed: ${e.message}")
                 }
-            } catch (e: Exception) {
-                LOG.error("Failed to create branch $branchName", e)
-                errors.add("Branch creation failed: ${e.message}")
             }
 
             // Only proceed with Rally state changes if branch was created successfully

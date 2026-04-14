@@ -1,0 +1,9 @@
+<idea-plugin>
+    <!--
+        Loaded only when Git4Idea is installed & enabled. The plugin does not
+        register Git4Idea-specific extensions today; this file exists so the
+        main depends declaration can use `optional="true"` (IDEs without Git
+        should still be able to load the Rally plugin and use the read-only
+        browsing paths).
+    -->
+</idea-plugin>
