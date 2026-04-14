@@ -954,6 +954,9 @@ class RallyApiClient(
      */
     fun queryProjects(pageSize: Int = MAX_PAGE_SIZE): List<RallyProject> {
         val ws = workspaceRef
+        val cacheKey = "projects:${ws}|${pageSize}"
+        getCached<List<RallyProject>>(cacheKey)?.let { return it }
+
         val query = "(State = \"Open\")"
         val encodedQuery = URLEncoder.encode(query, StandardCharsets.UTF_8)
 
@@ -968,7 +971,9 @@ class RallyApiClient(
         handleResponse(response)
 
         val result: RallyQueryResult<RallyProject> = gson.fromJson(response.body(), TYPE_PROJECTS)
-        return result.queryResult.safeResults.sortedBy { it.name?.lowercase() }
+        val sorted = result.queryResult.safeResults.sortedBy { it.name?.lowercase() }
+        putCache(cacheKey, sorted)
+        return sorted
     }
 
     /**
@@ -979,6 +984,9 @@ class RallyApiClient(
     fun queryIterations(pageSize: Int = MAX_PAGE_SIZE): List<RallyIteration> {
         val ws = workspaceRef
         val pr = projectRef
+        val cacheKey = "iterations:${ws}|${pr}|${pageSize}"
+        getCached<List<RallyIteration>>(cacheKey)?.let { return it }
+
         var url = buildApiUrl("iteration") +
                 "?fetch=Name,ObjectID,_ref,StartDate,EndDate,PlannedVelocity,Project,State&pagesize=$pageSize" +
                 "&order=${URLEncoder.encode("StartDate DESC,EndDate DESC,ObjectID", StandardCharsets.UTF_8)}"
@@ -998,7 +1006,9 @@ class RallyApiClient(
         handleResponse(response)
 
         val result: RallyQueryResult<RallyIteration> = gson.fromJson(response.body(), TYPE_ITERATIONS)
-        return result.queryResult.safeResults
+        val iterations = result.queryResult.safeResults
+        putCache(cacheKey, iterations)
+        return iterations
     }
 
     /**
