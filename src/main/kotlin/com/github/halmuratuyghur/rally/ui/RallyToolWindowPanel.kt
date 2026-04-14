@@ -80,7 +80,16 @@ class RallyToolWindowPanel(private val project: Project) : Disposable {
     private val statsLabel = JBLabel("0 items")
     private val sprintLabel = JBLabel("")
     private val statusLabel = JBLabel("Ready")
-    private val startWorkingButton = JButton("Start Working", AllIcons.Actions.Execute).apply { isFocusable = true }
+    private val startWorkingButton = JButton("Start Working", AllIcons.Actions.Execute).apply {
+        isFocusable = true
+        // Start Working creates a git branch; if the IDE ships without Git4Idea,
+        // there's nothing the button can do — keep it visible but disabled so the
+        // affordance is obvious.
+        if (!RallyGitOps.isAvailable()) {
+            isEnabled = false
+            toolTipText = "Git integration is not available in this IDE"
+        }
+    }
     private val finishWorkingButton = JButton("Finish Working", AllIcons.Actions.Checked).apply { isFocusable = true }
 
 
