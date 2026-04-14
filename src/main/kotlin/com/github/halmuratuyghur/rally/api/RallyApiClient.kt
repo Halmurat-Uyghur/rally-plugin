@@ -890,15 +890,24 @@ class RallyApiClient(
     }
 
     /**
-     * Sleep for up to MAX_RETRY_SLEEP_MS. Callers may pass longer intervals (Rally's
-     * Retry-After, exponential backoff); we clamp them so a single worker thread
-     * can't monopolize the pool for more than a couple of seconds per attempt.
+     * Honor the requested retry delay by sleeping in MAX_RETRY_SLEEP_MS chunks.
+     * The earlier implementation hard-clamped the total sleep at 2 s, which
+     * meant a Rally `Retry-After: 30` was retried after just 2 s and risked
+     * making the throttling worse. Sleeping in 2 s chunks instead lets us
+     * still fully honor the server's cool-off while keeping each individual
+     * Thread.sleep short — that bound matters for the 4-thread API executor:
+     * if anything wants to kick the worker (interrupts, dispose), it never
+     * waits more than a chunk for that to be observed.
      */
     private fun sleepForRetry(delayMs: Long) {
-        val capped = delayMs.coerceIn(0, MAX_RETRY_SLEEP_MS)
-        if (capped <= 0) return
+        if (delayMs <= 0) return
+        var remaining = delayMs
         try {
-            Thread.sleep(capped)
+            while (remaining > 0) {
+                val chunk = remaining.coerceAtMost(MAX_RETRY_SLEEP_MS)
+                Thread.sleep(chunk)
+                remaining -= chunk
+            }
         } catch (ie: InterruptedException) {
             Thread.currentThread().interrupt()
             throw RallyConnectionException("Interrupted during retry backoff", ie)
