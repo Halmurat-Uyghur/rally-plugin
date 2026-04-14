@@ -533,7 +533,15 @@ class RallyApiClient(
 
         val safeId = escapeQueryValue(formattedId)
         val query = "(FormattedID = \"$safeId\")"
-        val url = buildApiUrl(endpoint) + "?" + buildQuery(query, 1, fields = DETAIL_FIELDS)
+        // Pass workspace/project so multi-workspace Rally deployments don't return a
+        // same-ID artifact from a different workspace.
+        val url = buildApiUrl(endpoint) + "?" + buildQuery(
+            query,
+            pageSize = 1,
+            workspace = workspaceRef,
+            project = projectRef,
+            fields = DETAIL_FIELDS
+        )
 
         return try {
             val response = executeGet(url)
