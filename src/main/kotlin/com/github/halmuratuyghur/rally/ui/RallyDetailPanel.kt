@@ -888,7 +888,9 @@ class RallyDetailPanel(private val project: Project) : com.intellij.openapi.Disp
         ApplicationManager.getApplication().executeOnPooledThread {
             try {
                 val base64Content = client.getAttachmentContent(contentRef)
-                val bytes = Base64.getDecoder().decode(base64Content)
+                // Rally returns MIME base64 with embedded line breaks — the strict
+                // decoder throws IllegalArgumentException on real attachments.
+                val bytes = Base64.getMimeDecoder().decode(base64Content)
                 targetFile.writeBytes(bytes)
 
                 ApplicationManager.getApplication().invokeLater {
