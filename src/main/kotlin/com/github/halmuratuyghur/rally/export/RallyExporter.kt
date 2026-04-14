@@ -49,6 +49,49 @@ class RallyExporter(private val client: RallyApiClient) {
 
         /** Bounded concurrency for the inline image downloader. Matches the API pool. */
         private const val INLINE_IMAGE_CONCURRENCY = 4
+
+        /**
+         * Escape Markdown special characters that would otherwise corrupt structure
+         * when artifact names/owners/values are inlined into headings, list items,
+         * or table cells. Backslash-escapes the GFM metacharacters; leaves angle
+         * brackets alone (HTML passthrough is fine in our exports).
+         *
+         * Lives on the companion so unit tests can exercise it without constructing
+         * a RallyExporter (which needs a real RallyApiClient).
+         */
+        internal fun escapeMarkdown(text: String): String {
+            if (text.isEmpty()) return text
+            return text
+                .replace("\\", "\\\\")
+                .replace("`", "\\`")
+                .replace("*", "\\*")
+                .replace("_", "\\_")
+                .replace("[", "\\[")
+                .replace("]", "\\]")
+                .replace("|", "\\|")
+                .replace("#", "\\#")
+        }
+
+        /**
+         * Strip HTML tags for plain-text export (for AI readability).
+         * Lives on the companion for the same testing reason as escapeMarkdown.
+         */
+        internal fun stripHtml(html: String): String {
+            if (html.isBlank()) return ""
+            return html
+                .replace(RE_BR, "\n")
+                .replace(RE_P_OPEN, "\n")
+                .replace(RE_P_CLOSE, "")
+                .replace(RE_LI, "- ")
+                .replace(RE_TAG, "")
+                .replace("&nbsp;", " ")
+                .replace("&amp;", "&")
+                .replace("&lt;", "<")
+                .replace("&gt;", ">")
+                .replace("&quot;", "\"")
+                .replace(RE_MULTI_NEWLINE, "\n\n")
+                .trim()
+        }
     }
 
     /** Per-session cache for downloaded attachment paths (deduplicates across JSON+Markdown export). */
@@ -299,44 +342,9 @@ class RallyExporter(private val client: RallyApiClient) {
         return result
     }
 
-    /**
-     * Escape Markdown special characters that would otherwise corrupt structure
-     * when artifact names/owners/values are inlined into headings, list items,
-     * or table cells. Backslash-escapes the GFM metacharacters; leaves angle
-     * brackets alone (HTML passthrough is fine in our exports).
-     */
-    private fun escapeMarkdown(text: String): String {
-        if (text.isEmpty()) return text
-        return text
-            .replace("\\", "\\\\")
-            .replace("`", "\\`")
-            .replace("*", "\\*")
-            .replace("_", "\\_")
-            .replace("[", "\\[")
-            .replace("]", "\\]")
-            .replace("|", "\\|")
-            .replace("#", "\\#")
-    }
+    private fun escapeMarkdown(text: String): String = Companion.escapeMarkdown(text)
 
-    /**
-     * Strip HTML tags for plain-text export (for AI readability).
-     */
-    private fun stripHtml(html: String): String {
-        if (html.isBlank()) return ""
-        return html
-            .replace(RE_BR, "\n")
-            .replace(RE_P_OPEN, "\n")
-            .replace(RE_P_CLOSE, "")
-            .replace(RE_LI, "- ")
-            .replace(RE_TAG, "")
-            .replace("&nbsp;", " ")
-            .replace("&amp;", "&")
-            .replace("&lt;", "<")
-            .replace("&gt;", ">")
-            .replace("&quot;", "\"")
-            .replace(RE_MULTI_NEWLINE, "\n\n")
-            .trim()
-    }
+    private fun stripHtml(html: String): String = Companion.stripHtml(html)
 
     // ── Artifact Export ──────────────────────────────────────────
 
