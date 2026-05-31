@@ -169,33 +169,37 @@ class RallyFileUtilsTest {
     }
 
     @Test
-    fun `safeResolve rejects absolute child that escapes parent`() {
+    fun `safeResolve sanitizes an absolute path argument into a contained filename`() {
+        // An absolute other-dir path, sanitized, becomes a single underscore-joined
+        // filename — still a direct child of `tmp`, never an escape.
         val other = Files.createTempDirectory("rally-fileutils-other")
         try {
-            // An absolute other-dir path, sanitized, becomes a long underscore-joined
-            // filename — still contained within `tmp`. We assert the result stays under tmp.
             val resolved = RallyFileUtils.safeResolve(tmp, other.toAbsolutePath().toString())
             val normalizedParent = tmp.toAbsolutePath().normalize()
             assertTrue(
                 "resolved ($resolved) should stay under parent ($normalizedParent)",
                 resolved.startsWith(normalizedParent)
             )
+            assertEquals("must collapse to a single child segment", normalizedParent, resolved.parent)
         } finally {
             Files.deleteIfExists(other)
         }
     }
 
     @Test
-    fun `safeResolve throws if sanitized result somehow escapes parent`() {
-        // This test documents the containment contract. With the current sanitizer the
-        // only way to reach this branch would be a name that normalizes outside the
-        // parent, which is impossible because sanitizeFileName strips slashes. The
-        // invariant is asserted to catch future regressions in either function.
-        try {
-            val resolved = RallyFileUtils.safeResolve(tmp, "safe_name")
-            assertTrue(resolved.startsWith(tmp.toAbsolutePath().normalize()))
-        } catch (_: IllegalArgumentException) {
-            fail("safeResolve should not throw for a plain safe name")
+    fun `safeResolve neutralizes traversal sequences into a contained direct child`() {
+        // The real defense: traversal-style child names must never resolve outside the
+        // parent. sanitizeFileName strips separators and dots, so each input collapses to
+        // a single contained segment. (This is why the require() throw branch is, by design,
+        // unreachable through the public API — the sanitizer prevents escapes upstream.)
+        val normalizedParent = tmp.toAbsolutePath().normalize()
+        for (evil in listOf("../../etc/passwd", "..\\..\\windows\\system32", "../sibling", "/abs/evil", "....//evil")) {
+            val resolved = RallyFileUtils.safeResolve(tmp, evil)
+            assertTrue(
+                "'$evil' resolved to $resolved which escapes $normalizedParent",
+                resolved.startsWith(normalizedParent)
+            )
+            assertEquals("'$evil' should resolve to a direct child of the parent", normalizedParent, resolved.parent)
         }
     }
 }

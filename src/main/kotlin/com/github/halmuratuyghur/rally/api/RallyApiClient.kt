@@ -51,6 +51,11 @@ class RallyApiClient(
      */
     val isAlive: Boolean get() = !apiExecutor.isShutdown
 
+    // HttpConfigurable is deprecated in 2025.x+ in favor of JdkProxyProvider, but that
+    // class does not exist in 2024.1/2024.2. Since the plugin still supports sinceBuild=241,
+    // we keep HttpConfigurable (present and functional through 261) and suppress the warning.
+    // Migrate to JdkProxyProvider.getInstance().proxySelector once the floor is raised to 243+.
+    @Suppress("DEPRECATION")
     private val httpClient: HttpClient = HttpClient.newBuilder()
         .connectTimeout(Duration.ofSeconds(15))
         .version(HttpClient.Version.HTTP_2)
@@ -95,6 +100,12 @@ class RallyApiClient(
             ?: throw RallySecurityException("Cannot determine host from server URL: $normalizedServerUrl")
         allowedScheme = uri.scheme?.lowercase()
             ?: throw RallySecurityException("Cannot determine scheme from server URL: $normalizedServerUrl")
+        if (allowedScheme == "http") {
+            // The API key travels in the zsessionid header on every request. Over plain HTTP
+            // it is exposed to anyone on the network path. We don't hard-fail (some on-prem
+            // Rally setups front it with an internal HTTP gateway) but surface the risk.
+            LOG.warn("Rally server URL uses plaintext http:// — the API key is transmitted unencrypted. Use https:// if possible.")
+        }
     }
 
     /**
@@ -102,8 +113,10 @@ class RallyApiClient(
      * Relative URLs (null host) pass through safely — they resolve against normalizedServerUrl.
      * Absolute URLs must match both host and scheme so a poisoned `_ref` can't leak the
      * API key to another host or downgrade https → http.
+     *
+     * `internal` (not private) so the security contract is unit-testable from the same module.
      */
-    private fun requireSameHost(url: String) {
+    internal fun requireSameHost(url: String) {
         val uri = try {
             URI(url)
         } catch (_: Exception) {
@@ -1107,7 +1120,7 @@ class RallyApiClient(
         val cacheKey = "tasksForWp:$workProductRef"
         getCached<List<RallyTaskItem>>(cacheKey)?.let { return it }
 
-        val query = "(WorkProduct = \"$workProductRef\")"
+        val query = "(WorkProduct = \"${escapeQueryValue(workProductRef)}\")"
         val encodedQuery = URLEncoder.encode(query, StandardCharsets.UTF_8)
 
         var url = buildApiUrl("task") +
@@ -1134,7 +1147,7 @@ class RallyApiClient(
         val cacheKey = "testcases:$workProductRef"
         getCached<List<RallyTestCase>>(cacheKey)?.let { return it }
 
-        val query = "(WorkProduct = \"$workProductRef\")"
+        val query = "(WorkProduct = \"${escapeQueryValue(workProductRef)}\")"
         val encodedQuery = URLEncoder.encode(query, StandardCharsets.UTF_8)
 
         var url = buildApiUrl("testcase") +

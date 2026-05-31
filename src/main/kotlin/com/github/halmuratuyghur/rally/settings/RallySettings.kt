@@ -52,15 +52,31 @@ class RallySettings : PersistentStateComponent<RallySettings.State> {
                 PasswordSafe.instance.set(credentialAttributes, Credentials(CREDENTIAL_USER, keyToMigrate))
             }
         } else {
-            synchronized(apiKeyReady) { cachedApiKey = null; apiKeyLoaded = false }
-            // Eagerly load the API key from PasswordSafe off-EDT
-            ApplicationManager.getApplication().executeOnPooledThread {
-                val key = PasswordSafe.instance.getPassword(credentialAttributes) ?: ""
-                synchronized(apiKeyReady) {
-                    cachedApiKey = key
-                    apiKeyLoaded = true
-                    apiKeyReady.notifyAll()
-                }
+            loadApiKeyFromPasswordSafe()
+        }
+    }
+
+    /**
+     * Called by the platform when there is NO persisted state (fresh install, or the
+     * settings XML was deleted). Without this, [loadState] never runs, so `apiKeyLoaded`
+     * would stay false forever and every off-EDT [apiKey] read would block the full 2s
+     * deadline. We still trigger the eager PasswordSafe load because the keychain entry
+     * can outlive the settings XML — flipping the flag without loading would make a valid
+     * stored key read as absent.
+     */
+    override fun noStateLoaded() {
+        loadApiKeyFromPasswordSafe()
+    }
+
+    /** Eagerly load the API key from PasswordSafe off-EDT and signal readiness. */
+    private fun loadApiKeyFromPasswordSafe() {
+        synchronized(apiKeyReady) { cachedApiKey = null; apiKeyLoaded = false }
+        ApplicationManager.getApplication().executeOnPooledThread {
+            val key = PasswordSafe.instance.getPassword(credentialAttributes) ?: ""
+            synchronized(apiKeyReady) {
+                cachedApiKey = key
+                apiKeyLoaded = true
+                apiKeyReady.notifyAll()
             }
         }
     }
@@ -128,6 +144,12 @@ class RallySettings : PersistentStateComponent<RallySettings.State> {
 
     companion object {
         private const val CREDENTIAL_USER = "RallyPlugin"
+        // The single-arg CredentialAttributes(serviceName) constructor compiles (against the
+        // 2024.1 SDK) to a synthetic default-args constructor that is marked deprecated in
+        // newer platforms. We deliberately do NOT add a userName here: PasswordSafe keychain
+        // backends key on serviceName+userName, so changing it would orphan already-stored
+        // API keys and force users to re-enter them. serviceName-only is the correct, stable key.
+        @Suppress("DEPRECATION")
         private val credentialAttributes = CredentialAttributes(
             generateServiceName("RallyPlugin", "apiKey")
         )

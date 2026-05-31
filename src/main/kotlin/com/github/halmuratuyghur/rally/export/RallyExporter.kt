@@ -47,9 +47,6 @@ class RallyExporter(private val client: RallyApiClient) {
          */
         private const val MAX_INLINE_IMAGES_PER_DESCRIPTION = 50
 
-        /** Bounded concurrency for the inline image downloader. Matches the API pool. */
-        private const val INLINE_IMAGE_CONCURRENCY = 4
-
         /**
          * Escape Markdown special characters that would otherwise corrupt structure
          * when artifact names/owners/values are inlined into headings, list items,
@@ -568,26 +565,21 @@ class RallyExporter(private val client: RallyApiClient) {
 
         if (jobs.isEmpty()) return html
 
-        // Pass 2: download in parallel with bounded concurrency, against the same
-        // apiExecutor the rest of the client uses, so retries/HTTP/2 multiplexing
-        // are shared.
+        // Pass 2: download sequentially. This MUST NOT submit to client.apiExecutor:
+        // export runs each artifact's exportArtifact{Json,Markdown} as a task ON
+        // apiExecutor (see RallyToolWindowPanel), so submitting inner download tasks
+        // back to the same fixed pool and blocking on .join() self-deadlocks once the
+        // selection count reaches the pool size. downloadAttachments() avoids this the
+        // same way. The HttpClient does its own connection multiplexing, so sequential
+        // here still reuses connections; only request issuance is serialized.
         val imgDir = RallyFileUtils.safeResolve(Paths.get(outputDir), "${artifactId}_images").toString()
-        val downloads = ConcurrentHashMap<String, String>()  // originalSrc -> relative local path
-        val semaphore = Semaphore(INLINE_IMAGE_CONCURRENCY)
-        val futures = jobs.map { job ->
-            CompletableFuture.runAsync({
-                semaphore.acquire()
-                try {
-                    val localPath = downloadRallyImage(job.objectId, job.originalFileName, job.uniqueFileName, imgDir)
-                    if (localPath != null) {
-                        downloads[job.originalSrc] = "${artifactId}_images/${job.uniqueFileName}"
-                    }
-                } finally {
-                    semaphore.release()
-                }
-            }, client.apiExecutor)
+        val downloads = HashMap<String, String>()  // originalSrc -> relative local path
+        for (job in jobs) {
+            val localPath = downloadRallyImage(job.objectId, job.originalFileName, job.uniqueFileName, imgDir)
+            if (localPath != null) {
+                downloads[job.originalSrc] = "${artifactId}_images/${job.uniqueFileName}"
+            }
         }
-        CompletableFuture.allOf(*futures.toTypedArray()).join()
 
         // Pass 3: rewrite the HTML using the downloaded paths. Matches beyond the
         // per-call cap pass through unchanged so the rendered output still has

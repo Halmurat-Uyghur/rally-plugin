@@ -935,6 +935,7 @@ class RallyToolWindowPanel(private val project: Project) : Disposable {
                         }
                     }
                 } catch (e: Exception) {
+                    LOG.warn("Server search failed for query '$query'", e)
                     invokeLaterIfAlive {
                         if (activeServerSearch == query) {
                             statusLabel.text = "Search failed: ${e.message}"
@@ -1156,7 +1157,10 @@ class RallyToolWindowPanel(private val project: Project) : Disposable {
             attachPanel.add(attachmentPathField, BorderLayout.CENTER)
             val browseButton = JButton("Browse...")
             browseButton.addActionListener {
-                val descriptor = com.intellij.openapi.fileChooser.FileChooserDescriptorFactory.createSingleFileDescriptor()
+                // Use NoJars so a .zip is selectable as a single leaf file rather than
+                // navigable like a jar. createSingleFileDescriptor() (no-arg) is deprecated;
+                // this variant is the supported replacement and exists since 2024.1.
+                val descriptor = com.intellij.openapi.fileChooser.FileChooserDescriptorFactory.createSingleFileNoJarsDescriptor()
                     .withTitle("Select ZIP file to attach")
                     .withFileFilter { it.extension.equals("zip", ignoreCase = true) }
                 val chosen = com.intellij.openapi.fileChooser.FileChooser.chooseFile(descriptor, project, null)
@@ -1363,7 +1367,10 @@ class RallyToolWindowPanel(private val project: Project) : Disposable {
             attachPanel.add(attachmentPathField, BorderLayout.CENTER)
             val browseButton = JButton("Browse...")
             browseButton.addActionListener {
-                val descriptor = com.intellij.openapi.fileChooser.FileChooserDescriptorFactory.createSingleFileDescriptor()
+                // Use NoJars so a .zip is selectable as a single leaf file rather than
+                // navigable like a jar. createSingleFileDescriptor() (no-arg) is deprecated;
+                // this variant is the supported replacement and exists since 2024.1.
+                val descriptor = com.intellij.openapi.fileChooser.FileChooserDescriptorFactory.createSingleFileNoJarsDescriptor()
                     .withTitle("Select ZIP file to attach")
                     .withFileFilter { it.extension.equals("zip", ignoreCase = true) }
                 val chosen = com.intellij.openapi.fileChooser.FileChooser.chooseFile(descriptor, project, null)
@@ -1577,9 +1584,17 @@ class RallyToolWindowPanel(private val project: Project) : Disposable {
     }
 
     private fun changeState(newState: String) {
-        val selected = artifactList.selectedValuesList
-        if (selected.isEmpty()) {
+        val rawSelected = artifactList.selectedValuesList
+        if (rawSelected.isEmpty()) {
             Messages.showInfoMessage(project, "Select one or more tickets first.", "Rally")
+            return
+        }
+        // Test cases have no ScheduleState/State. The context menu already hides state
+        // actions for them, but the toolbar buttons are global, so guard here too —
+        // otherwise the Rally API rejects the write and the user sees a confusing error.
+        val selected = rawSelected.filterNot { it is RallyTestCase }
+        if (selected.isEmpty()) {
+            Messages.showInfoMessage(project, "State changes don't apply to test cases.", "Rally")
             return
         }
 

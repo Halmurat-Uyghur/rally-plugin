@@ -3,7 +3,7 @@ import org.jetbrains.intellij.platform.gradle.TestFrameworkType
 plugins {
     id("java")
     id("org.jetbrains.kotlin.jvm") version "1.9.25"
-    id("org.jetbrains.intellij.platform") version "2.14.0"
+    id("org.jetbrains.intellij.platform") version "2.16.0"
 }
 
 group = "com.github.halmuratuyghur"

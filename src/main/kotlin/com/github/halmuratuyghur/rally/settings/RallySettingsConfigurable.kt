@@ -1,6 +1,7 @@
 package com.github.halmuratuyghur.rally.settings
 
 import com.intellij.openapi.application.ApplicationManager
+import com.intellij.openapi.diagnostic.Logger
 import com.intellij.openapi.fileChooser.FileChooserDescriptorFactory
 import com.intellij.openapi.options.Configurable
 import com.intellij.openapi.ui.Messages
@@ -27,6 +28,11 @@ class RallySettingsConfigurable : Configurable {
 
     override fun getDisplayName(): String = "Rally"
 
+    // The 4-arg addBrowseFolderListener(title, description, project, descriptor) used below
+    // is deprecated in newer platforms in favor of a 2-arg overload that does not exist in
+    // 2024.1/2024.2. Suppressed at the method level to keep sinceBuild=241; migrate to
+    // addBrowseFolderListener(project, descriptor.withTitle(...)) once the floor is raised to 243+.
+    @Suppress("DEPRECATION")
     override fun createComponent(): JComponent {
         serverUrlField = JBTextField().apply {
             toolTipText = "Rally server URL (e.g., https://rally1.rallydev.com)"
@@ -190,8 +196,11 @@ class RallySettingsConfigurable : Configurable {
                         val configuredUser = client.getUserByUsername(configuredUsername)
                         val name = configuredUser.displayName ?: configuredUser.refObjectName ?: "Unknown"
                         "\n\nConfigured Username: $configuredUsername\nResolved to: $name (valid)"
-                    } catch (_: Exception) {
-                        "\n\nConfigured Username: $configuredUsername\nWarning: No Rally user found with this UserName! 'My Tickets' filter will not work."
+                    } catch (e: Exception) {
+                        // Could be a genuine "no such user" OR a transient network/auth error.
+                        // Don't assert the username is wrong — log the cause and word it neutrally.
+                        LOG.warn("Username verification failed for '$configuredUsername'", e)
+                        "\n\nConfigured Username: $configuredUsername\nWarning: could not verify this UserName (lookup failed: ${e.message}). If it is correct, 'My Tickets' will still work."
                     }
                 } else {
                     "\n\nUsername field is empty. Enter your Rally UserName (email) for 'My Tickets' filter."
@@ -204,6 +213,7 @@ class RallySettingsConfigurable : Configurable {
                     )
                 }
             } catch (e: Exception) {
+                LOG.warn("Rally test connection failed", e)
                 ApplicationManager.getApplication().invokeLater {
                     Messages.showErrorDialog(
                         "Connection failed: ${e.message}",
@@ -214,5 +224,9 @@ class RallySettingsConfigurable : Configurable {
                 client?.apiExecutor?.shutdownNow()
             }
         }
+    }
+
+    companion object {
+        private val LOG = Logger.getInstance(RallySettingsConfigurable::class.java)
     }
 }

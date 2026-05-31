@@ -78,8 +78,15 @@ object RallyGitOps {
             if (branchName in existingBranches) {
                 brancher.checkout(branchName, false, targetRepos, verifyCheckout)
             } else {
-                brancher.createBranch(branchName, mapOf(repo to "HEAD"))
-                brancher.checkout(branchName, false, targetRepos, verifyCheckout)
+                // createBranch and checkout are both async background tasks with no
+                // ordering guarantee between them. Calling them back-to-back races:
+                // checkout could run before the branch ref exists and fail with
+                // "branch not found". Chaining checkout inside createBranch's completion
+                // callback guarantees the ref is present first. (verifyCheckout still
+                // confirms the final state, so a failed create is caught either way.)
+                brancher.createBranch(branchName, mapOf(repo to "HEAD"), Runnable {
+                    brancher.checkout(branchName, false, targetRepos, verifyCheckout)
+                })
             }
         } catch (e: Exception) {
             LOG.error("Branch operation failed for $branchName", e)

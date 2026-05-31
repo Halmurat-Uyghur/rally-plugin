@@ -90,7 +90,14 @@ class RallyDetailPanel(private val project: Project) : com.intellij.openapi.Disp
     // Test Cases
     private val testCaseListModel = DefaultListModel<RallyTestCase>()
     private val testCaseList = JBList(testCaseListModel)
-    private val testCaseSummaryLabel = JBLabel("")
+    private val testCaseSummaryLabel = JBLabel("").apply { border = JBUI.Borders.empty(2, 4) }
+    // Test Cases tab content (list + summary footer). A field so the tab-rebuild sites in
+    // showArtifact()/clear() reuse it; rebuilding with a bare JBScrollPane(testCaseList)
+    // detached testCaseSummaryLabel and silently dropped the "N total (…)" footer.
+    private val tcPanel = JPanel(BorderLayout()).apply {
+        add(JBScrollPane(testCaseList), BorderLayout.CENTER)
+        add(testCaseSummaryLabel, BorderLayout.SOUTH)
+    }
 
     // Tasks
     private val taskListModel = DefaultListModel<RallyTaskItem>()
@@ -177,11 +184,7 @@ class RallyDetailPanel(private val project: Project) : com.intellij.openapi.Disp
         testCaseList.cellRenderer = TestCaseCellRenderer()
         testCaseList.selectionMode = ListSelectionModel.MULTIPLE_INTERVAL_SELECTION
         testCaseList.emptyText.text = "No test cases"
-        val tcScrollPane = JBScrollPane(testCaseList)
-        val tcPanel = JPanel(BorderLayout())
-        tcPanel.add(tcScrollPane, BorderLayout.CENTER)
-        tcPanel.add(testCaseSummaryLabel, BorderLayout.SOUTH)
-        testCaseSummaryLabel.border = JBUI.Borders.empty(2, 4)
+        // tcPanel (list + summary footer) is built once as a field; see its declaration.
 
         // Tasks tab
         taskList.cellRenderer = TaskCellRenderer()
@@ -295,7 +298,7 @@ class RallyDetailPanel(private val project: Project) : com.intellij.openapi.Disp
         // Restore standard tabs if previously showing a test case
         if (tabbedPane.tabCount != 3 || (tabbedPane.tabCount > 0 && tabbedPane.getTitleAt(0).startsWith("Test Steps"))) {
             tabbedPane.removeAll()
-            tabbedPane.addTab("Test Cases", JBScrollPane(testCaseList))
+            tabbedPane.addTab("Test Cases", tcPanel)
             tabbedPane.addTab("Tasks", JBScrollPane(taskList))
             tabbedPane.addTab("Attachments", JBScrollPane(attachmentList))
         }
@@ -542,7 +545,7 @@ class RallyDetailPanel(private val project: Project) : com.intellij.openapi.Disp
         // Restore standard tabs if previously showing a test case
         if (tabbedPane.tabCount != 3 || (tabbedPane.tabCount > 0 && tabbedPane.getTitleAt(0).startsWith("Test Steps"))) {
             tabbedPane.removeAll()
-            tabbedPane.addTab("Test Cases", JBScrollPane(testCaseList))
+            tabbedPane.addTab("Test Cases", tcPanel)
             tabbedPane.addTab("Tasks", JBScrollPane(taskList))
             tabbedPane.addTab("Attachments", JBScrollPane(attachmentList))
         }
@@ -877,6 +880,10 @@ class RallyDetailPanel(private val project: Project) : com.intellij.openapi.Disp
         }
         val fileName = RallyFileUtils.sanitizeFileName(selected.name ?: "attachment")
 
+        // FileSaverDescriptor's only public constructor through 2024.x is the vararg
+        // (title, description, vararg extensions) form, which newer platforms deprecate.
+        // No alternative exists at sinceBuild=241, so suppress until the floor is raised.
+        @Suppress("DEPRECATION")
         val descriptor = FileSaverDescriptor("Save Attachment", "Choose where to save the attachment")
         val wrapper = FileChooserFactory.getInstance().createSaveFileDialog(descriptor, project)
         val baseDir = com.intellij.openapi.vfs.LocalFileSystem.getInstance().findFileByPath(
@@ -957,7 +964,15 @@ class RallyDetailPanel(private val project: Project) : com.intellij.openapi.Disp
         val safe = html
             .replace("</body>", "&lt;/body&gt;", ignoreCase = true)
             .replace("</html>", "&lt;/html&gt;", ignoreCase = true)
-        return "<html><body style='font-family:sans-serif;font-size:${fontSize}px;margin:4px;'>$safe</body></html>"
+        // Neutralize external http(s):// (and protocol-relative) image src attributes so
+        // JTextPane never makes an off-host network fetch when rendering a Rally-authored
+        // description (tracking pixels / SSRF-style leaks). This is the single chokepoint:
+        // EVERY descriptionPane.text assignment goes through wrapHtml, including the early
+        // "description already loaded" path and descriptions with only external images
+        // (which skip resolveInlineImages' own pass). data:…;base64 URIs produced by
+        // resolveInlineImages are left intact — the pattern only matches http(s):// or //.
+        val neutralized = EXTERNAL_SRC_PATTERN.matcher(safe).replaceAll("src=\"\"")
+        return "<html><body style='font-family:sans-serif;font-size:${fontSize}px;margin:4px;'>$neutralized</body></html>"
     }
 
     /**
