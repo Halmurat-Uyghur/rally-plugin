@@ -99,6 +99,12 @@ class RallyToolWindowPanel(private val project: Project) : Disposable {
     private var mainSplitPane: JSplitPane? = null
 
     @Volatile private var allArtifacts: List<RallyArtifact> = emptyList()
+    // Sprint-summary state. Metadata (name/dates/velocity) comes from the resolved
+    // iteration; the counts/points are derived from `displayedArtifacts` so they track
+    // the active Scope/State/Search filter. `sprintIteration` is written on a pooled
+    // thread and read on the EDT (hence @Volatile); `displayedArtifacts` is EDT-confined.
+    @Volatile private var sprintIteration: RallyIteration? = null
+    private var displayedArtifacts: List<RallyArtifact> = emptyList()
     @Volatile private var currentClient: RallyApiClient? = null
     @Volatile private var loading = false
     @Volatile private var pendingReload = false
@@ -473,11 +479,11 @@ class RallyToolWindowPanel(private val project: Project) : Disposable {
                     cachedIterations.any { it.name == savedIter }) savedIter else ""
                 val query = buildQuery(scope, effectiveIter, settings)
                 val hasIterationFilter = effectiveIter.isNotBlank() && effectiveIter != "All Sprints"
-                // Sprint summary can reuse main artifacts only when the main query has no extra
-                // filters (owner, etc.) beyond the iteration — otherwise counts would be wrong.
-                val mainQueryIsIterationOnly = hasIterationFilter && query == "(Iteration.Name = \"$effectiveIter\")"
 
-                // Load artifacts; sprint summary runs in parallel only when it needs separate API calls
+                // Load artifacts. The sprint summary only needs the iteration's metadata now
+                // (its counts/points are derived from the filtered list in renderSprintSummary),
+                // so the only background work is finding the current iteration when no specific
+                // sprint is selected.
                 val artifactsFuture = java.util.concurrent.CompletableFuture.supplyAsync({
                     if (scope == "Test Cases") {
                         client.queryAllTestCases(query, pageSize, maxResults = pageSize)
@@ -486,24 +492,17 @@ class RallyToolWindowPanel(private val project: Project) : Disposable {
                     }
                 }, client.apiExecutor)
                 val sprintFuture = if (!hasIterationFilter) {
-                    // No iteration selected — sprint summary needs its own API calls
+                    // "All Sprints" — resolve the current iteration (by today's date) for metadata.
                     java.util.concurrent.CompletableFuture.runAsync({
-                        loadSprintSummary(client, settings, null)
-                    }, client.apiExecutor)
-                } else if (!mainQueryIsIterationOnly) {
-                    // Iteration selected but main query has extra filters (e.g. owner) —
-                    // sprint summary needs unfiltered iteration data
-                    java.util.concurrent.CompletableFuture.runAsync({
-                        val sprintArtifacts = client.queryIterationArtifacts(effectiveIter)
-                        computeSprintSummaryFromArtifacts(effectiveIter, sprintArtifacts)
+                        loadSprintSummary(client, settings)
                     }, client.apiExecutor)
                 } else null
 
                 val artifacts = artifactsFuture.get()
 
-                // When main query is iteration-only, reuse loaded artifacts for sprint summary
-                if (mainQueryIsIterationOnly) {
-                    computeSprintSummaryFromArtifacts(effectiveIter, artifacts)
+                // A specific sprint is selected — resolve its metadata from cache (no API call).
+                if (hasIterationFilter) {
+                    resolveSelectedSprint(effectiveIter)
                 }
 
                 // Client-side filtering for state and type
@@ -766,7 +765,7 @@ class RallyToolWindowPanel(private val project: Project) : Disposable {
      * Load sprint summary via API. Called only when no iteration is selected
      * (so we need to find the current sprint by date and fetch its artifacts separately).
      */
-    private fun loadSprintSummary(client: RallyApiClient, settings: RallySettings, preloadedArtifacts: List<RallyArtifact>?) {
+    private fun loadSprintSummary(client: RallyApiClient, settings: RallySettings) {
         try {
             val iteration = client.queryCurrentIteration(
                 if (settings.workspaceRef.isNotBlank()) settings.workspaceRef else null,
@@ -774,14 +773,14 @@ class RallyToolWindowPanel(private val project: Project) : Disposable {
             )
 
             if (iteration == null) {
+                sprintIteration = null
                 invokeLaterIfAlive {
                     sprintLabel.text = "No active sprint"
                 }
                 return
             }
 
-            val sprintArtifacts = preloadedArtifacts ?: client.queryIterationArtifacts(iteration.name ?: "")
-            updateSprintLabel(iteration, sprintArtifacts)
+            setSprintIteration(iteration)
         } catch (e: Exception) {
             LOG.warn("Failed to load sprint summary", e)
             invokeLaterIfAlive {
@@ -791,79 +790,36 @@ class RallyToolWindowPanel(private val project: Project) : Disposable {
     }
 
     /**
-     * Compute sprint summary directly from already-loaded artifacts.
-     * Used when an iteration is selected — avoids redundant API calls.
+     * Resolve the selected sprint's metadata from the cached iteration list (no API call).
+     * The summary counts are rendered from the filtered list in renderSprintSummary().
      */
-    private fun computeSprintSummaryFromArtifacts(iterationName: String, artifacts: List<RallyArtifact>) {
+    private fun resolveSelectedSprint(iterationName: String) {
         val iteration = cachedIterations.firstOrNull { it.name == iterationName }
         if (iteration == null) {
+            sprintIteration = null
             invokeLaterIfAlive {
                 sprintLabel.text = "No active sprint"
             }
             return
         }
-        updateSprintLabel(iteration, artifacts)
+        setSprintIteration(iteration)
     }
 
-    private fun updateSprintLabel(iteration: RallyIteration, artifacts: List<RallyArtifact>) {
-        val stateCounts = mutableMapOf<String, Int>()
-        var totalPoints = 0.0
+    /** Cache the resolved sprint's metadata, then re-render the summary from the filtered list. */
+    private fun setSprintIteration(iteration: RallyIteration) {
+        sprintIteration = iteration
+        invokeLaterIfAlive { renderSprintSummary() }
+    }
 
-        for (artifact in artifacts) {
-            val state = artifact.scheduleState ?: artifact.state ?: "Unknown"
-            stateCounts[state] = (stateCounts[state] ?: 0) + 1
-            val points = when (artifact) {
-                is RallyUserStory -> artifact.planEstimate
-                is RallyDefect -> artifact.planEstimate
-                else -> null
-            }
-            if (points != null) totalPoints += points
-        }
-
-        var completedPoints = 0.0
-        for (artifact in artifacts) {
-            val state = artifact.scheduleState ?: artifact.state ?: ""
-            if (state in setOf("Completed", "Accepted")) {
-                val points = when (artifact) {
-                    is RallyUserStory -> artifact.planEstimate
-                    is RallyDefect -> artifact.planEstimate
-                    else -> null
-                }
-                if (points != null) completedPoints += points
-            }
-        }
-
-        val stateOrder = listOf("Idea", "Defined", "In-Progress", "Completed", "Accepted")
-        val countsText = stateOrder
-            .filter { stateCounts.containsKey(it) }
-            .joinToString(" | ") { "${it}: ${stateCounts[it]}" }
-            .let { ordered ->
-                // Append any states not in the standard list
-                val extra = stateCounts.filter { it.key !in stateOrder }
-                if (extra.isNotEmpty()) {
-                    val extraText = extra.entries.joinToString(" | ") { "${it.key}: ${it.value}" }
-                    if (ordered.isNotEmpty()) "$ordered | $extraText" else extraText
-                } else ordered
-            }
-        val velocityText = iteration.plannedVelocity?.let { " / ${Math.round(it)} planned" } ?: ""
-
-        val startDate = iteration.startDate?.take(10) ?: ""
-        val endDate = iteration.endDate?.take(10) ?: ""
-
-        val daysRemaining = try {
-            if (endDate.length >= 10) {
-                val end = java.time.LocalDate.parse(endDate.take(10))
-                val today = java.time.LocalDate.now()
-                val days = java.time.temporal.ChronoUnit.DAYS.between(today, end)
-                if (days >= 0) "${days}d left" else "${-days}d ago"
-            } else null
-        } catch (_: Exception) { null }
-
-        val daysText = daysRemaining?.let { " | $it" } ?: ""
-
-        invokeLaterIfAlive {
-            sprintLabel.text = "Sprint: ${iteration.name} ($startDate to $endDate)$daysText | $countsText | ${Math.round(completedPoints)}/${Math.round(totalPoints)} pts$velocityText"
-        }
+    /**
+     * EDT-only. Renders the footer sprint summary so its state counts and points track the
+     * active Scope/State/Search filter. Metadata (name, dates, days-left, velocity) comes from
+     * the resolved iteration; counts come from the currently displayed list (see
+     * [buildSprintSummaryLabel], unit-tested in RallySprintSummaryTest).
+     */
+    private fun renderSprintSummary() {
+        val iteration = sprintIteration ?: return
+        sprintLabel.text = buildSprintSummaryLabel(iteration, displayedArtifacts, java.time.LocalDate.now())
     }
 
     // ── Search Filter ────────────────────────────────────────────
@@ -966,6 +922,9 @@ class RallyToolWindowPanel(private val project: Project) : Disposable {
             if (points != null) totalPoints += points
         }
         statsLabel.text = "${artifacts.size} items, ${Math.round(totalPoints)} pts"
+        // Keep the footer sprint summary in sync with the filtered list.
+        displayedArtifacts = artifacts
+        renderSprintSummary()
     }
 
     // ── Actions ──────────────────────────────────────────────────
