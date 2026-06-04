@@ -230,8 +230,13 @@ class RallyApiClient(
             val iter = queryCache.keys.iterator()
             while (iter.hasNext()) {
                 val key = iter.next()
-                if (key.startsWith("artifacts:") || key.startsWith("stories:") ||
-                    key.startsWith("defects:") ||
+                // "artifact:" (singular) is the per-FormattedID lookup cache used by
+                // getArtifactByFormattedId; it must be evicted on list-level mutations
+                // too or an export-after-edit re-fetch returns stale field values.
+                // Note "artifacts:".startsWith("artifact:") is false, so the plural
+                // list cache is matched only by its own prefix below.
+                if (key.startsWith("artifact:") || key.startsWith("artifacts:") ||
+                    key.startsWith("stories:") || key.startsWith("defects:") ||
                     key.startsWith("alltestcases:") || key.startsWith("search:") ||
                     key.startsWith("sprint:") || key.startsWith("currentIteration:")) {
                     iter.remove()
@@ -283,6 +288,16 @@ class RallyApiClient(
          * across retries but in smaller chunks, so other work can interleave.
          */
         private const val MAX_RETRY_SLEEP_MS = 2_000L
+
+        /**
+         * Hard ceiling on the TOTAL delay honored for a single retry attempt. Even if
+         * the server sends a large Retry-After, we never park a worker for more than
+         * this — the API executor has only 4 threads, so a handful of long Retry-After
+         * responses (e.g. during a bulk export) could otherwise starve the whole pool
+         * and freeze the tool window. MAX_RETRY_SLEEP_MS bounds each individual sleep
+         * for interrupt/dispose responsiveness; this bounds the cumulative wait.
+         */
+        private const val MAX_RETRY_DELAY_MS = 30_000L
 
         /**
          * Hard cap on attachment upload size. Each upload base64-encodes the file
@@ -609,7 +624,12 @@ class RallyApiClient(
      * Get artifact by FormattedID (e.g., "S-1234", "DE5678", "TA9012")
      */
     fun getArtifactByFormattedId(formattedId: String): RallyArtifact? {
-        val cacheKey = "artifact:$formattedId"
+        // Scope the cache key by workspace/project: a project switch mutates projectRef
+        // on the same client, and FormattedID lookups are scoped server-side, so an
+        // unscoped key could return an out-of-scope artifact after a switch.
+        val ws = workspaceRef
+        val pr = projectRef
+        val cacheKey = "artifact:$formattedId|$ws|$pr"
         getCached<RallyArtifact>(cacheKey)?.let { return it }
 
         // Determine artifact type from FormattedID prefix
@@ -630,8 +650,6 @@ class RallyApiClient(
             else -> return null
         }
 
-        val ws = workspaceRef
-        val pr = projectRef
         val safeId = escapeQueryValue(formattedId)
         val query = "(FormattedID = \"$safeId\")"
         // Pass workspace/project so multi-workspace Rally deployments don't return a
@@ -652,6 +670,14 @@ class RallyApiClient(
             val artifact = result.queryResult.safeResults.firstOrNull()
             if (artifact != null) putCache(cacheKey, artifact)
             artifact
+        } catch (e: RallyAuthenticationException) {
+            // Don't mask a bad/expired key as "not found" — let callers surface the
+            // real cause (e.g. export shows an auth error instead of a misleading
+            // "artifact not found").
+            throw e
+        } catch (e: RallySecurityException) {
+            // A poisoned host/scheme is a hard security failure, not a miss.
+            throw e
         } catch (e: RallyApiException) {
             LOG.warn("API error fetching artifact $formattedId: ${e.message}")
             null
@@ -708,16 +734,17 @@ class RallyApiClient(
         }
 
         // Partial failure: at least one type returned but at least one failed.
-        // Surface via IDE notification so the user knows the list is incomplete
-        // — previously we silently returned a partial result that looked like a
-        // full success.
+        // Surface via IDE notification so the user knows the list is incomplete,
+        // and DO NOT cache the partial result — otherwise the truncated list would
+        // be served silently (with no further warning) for the full TTL, even after
+        // Rally recovers. The next call retries the failed type from scratch.
+        val sorted = results.sortedByDescending { it.lastUpdateDate }
         if (errors.isNotEmpty()) {
             LOG.warn("queryAllArtifacts partial failure: ${errors.joinToString("; ")}")
             notifyPartialFailure(errors)
+            return sorted
         }
 
-        // Sort by last update date (most recent first)
-        val sorted = results.sortedByDescending { it.lastUpdateDate }
         putCache(cacheKey, sorted)
         return sorted
     }
@@ -884,10 +911,13 @@ class RallyApiClient(
             }
 
             // Respect Retry-After header if present, otherwise use exponential backoff.
-            // Both are capped at MAX_RETRY_SLEEP_MS so a single worker thread can't be
-            // parked for 30s on a shared 4-thread pool.
+            // The total honored delay is capped at MAX_RETRY_DELAY_MS so a single
+            // worker thread can't be parked indefinitely on a shared 4-thread pool,
+            // and each individual sleep is capped at MAX_RETRY_SLEEP_MS for interrupt
+            // responsiveness (see sleepForRetry).
             val retryAfter = response.headers().firstValueAsLong("Retry-After").orElse(-1)
-            val delayMs = if (retryAfter > 0) (retryAfter * 1000) else backoffMs(attempt)
+            val delayMs = (if (retryAfter > 0) (retryAfter * 1000) else backoffMs(attempt))
+                .coerceAtMost(MAX_RETRY_DELAY_MS)
             sleepForRetry(delayMs)
         }
         // Should not reach here, but satisfy the compiler. Don't synthesize a fake
@@ -903,14 +933,11 @@ class RallyApiClient(
     }
 
     /**
-     * Honor the requested retry delay by sleeping in MAX_RETRY_SLEEP_MS chunks.
-     * The earlier implementation hard-clamped the total sleep at 2 s, which
-     * meant a Rally `Retry-After: 30` was retried after just 2 s and risked
-     * making the throttling worse. Sleeping in 2 s chunks instead lets us
-     * still fully honor the server's cool-off while keeping each individual
-     * Thread.sleep short — that bound matters for the 4-thread API executor:
-     * if anything wants to kick the worker (interrupts, dispose), it never
-     * waits more than a chunk for that to be observed.
+     * Sleep for the (already total-capped) retry delay in MAX_RETRY_SLEEP_MS chunks.
+     * The caller clamps the total at MAX_RETRY_DELAY_MS; here we just keep each
+     * individual Thread.sleep short — that bound matters for the 4-thread API
+     * executor: if anything wants to kick the worker (interrupts, dispose), it
+     * never waits more than a chunk for that to be observed.
      */
     private fun sleepForRetry(delayMs: Long) {
         if (delayMs <= 0) return
@@ -1227,7 +1254,10 @@ class RallyApiClient(
      */
     fun queryTestCaseByFormattedId(formattedId: String): RallyTestCase? {
         val ws = workspaceRef
-        val cacheKey = "testcase:id:$formattedId"
+        val pr = projectRef
+        // Scope by workspace/project so a project switch on the same client can't
+        // return an out-of-scope test case from the cache.
+        val cacheKey = "testcase:id:$formattedId|$ws|$pr"
         getCached<RallyTestCase>(cacheKey)?.let { return it }
 
         val safeId = escapeQueryValue(formattedId)

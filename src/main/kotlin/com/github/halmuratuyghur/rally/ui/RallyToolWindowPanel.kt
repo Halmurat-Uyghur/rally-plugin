@@ -1568,10 +1568,16 @@ class RallyToolWindowPanel(private val project: Project) : Disposable {
                         } else artifact
                     }
                     client.clearArtifactCache()
+                    // applySearchFilter() rebuilds the list model, which clears the JList
+                    // selection. Grab the freshly-copied artifact first so we can restore
+                    // the selection and refresh the detail panel with it — otherwise
+                    // artifactList.selectedValue is null and the panel collapses.
+                    val updated = allArtifacts.firstOrNull { it.ref == ref }
                     applySearchFilter()
+                    if (updated != null) artifactList.setSelectedValue(updated, true)
                     statusLabel.text = "Updated ${selected.formattedID} points"
-                    // Refresh detail panel metadata
-                    detailPanel.showArtifact(artifactList.selectedValue, client)
+                    // Refresh detail panel metadata with the updated artifact
+                    detailPanel.showArtifact(updated ?: artifactList.selectedValue, client)
                 }
             } catch (e: Exception) {
                 LOG.error("Failed to update points", e)

@@ -705,6 +705,11 @@ class RallyDetailPanel(private val project: Project) : com.intellij.openapi.Disp
             }
             ApplicationManager.getApplication().invokeLater {
                 if (disposed || generation.get() != gen) return@invokeLater
+                // `generation` is NOT bumped when a different *linked* test case is
+                // double-clicked (no showArtifact/clear happens), so guard on the
+                // selected test case too: otherwise a slow TC-A response can render
+                // its steps under a newly-selected TC-B.
+                if (testCaseList.selectedValue?.formattedID != tcId) return@invokeLater
                 stepListModel.clear()
                 // Re-find the test steps tab index in case tabs changed
                 var currentStepsTab = -1
