@@ -238,7 +238,7 @@ class RallyApiClient(
                 // currentIteration: is NOT evicted here — which sprint is current is a
                 // function of today's date + the sprint calendar; no artifact mutation
                 // can change it. clearCache() (manual Refresh) still evicts it.
-                // ("sprint:" was dead code: no putCache ever writes that prefix.)
+                // Only prefixes actually written by putCache are listed here.
                 if (key.startsWith("artifact:") || key.startsWith("artifacts:") ||
                     key.startsWith("stories:") || key.startsWith("defects:") ||
                     key.startsWith("alltestcases:") || key.startsWith("search:")) {
@@ -1188,9 +1188,9 @@ class RallyApiClient(
         val query = "(WorkProduct = \"${escapeQueryValue(workProductRef)}\")"
         val encodedQuery = URLEncoder.encode(query, StandardCharsets.UTF_8)
 
-        // No Description here: nothing reads it from this list path (the detail tab
-        // renders ID/name/method/verdict; the exporter re-fetches by ID with its own
-        // Description fetch). Saves a full HTML payload per linked test case.
+        // Description is intentionally not fetched on this list path (saves a full
+        // HTML payload per linked test case); consumers needing it must re-fetch
+        // by ID or via fetchDescription().
         var url = buildApiUrl("testcase") +
                 "?query=$encodedQuery&fetch=FormattedID,Name,Method,Type,LastVerdict,LastRun,Owner,WorkProduct,Priority,ObjectID,_ref" +
                 "&pagesize=$pageSize&order=${URLEncoder.encode("FormattedID ASC", StandardCharsets.UTF_8)}"
