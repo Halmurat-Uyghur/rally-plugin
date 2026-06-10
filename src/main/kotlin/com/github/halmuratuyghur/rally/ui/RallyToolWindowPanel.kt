@@ -481,13 +481,25 @@ class RallyToolWindowPanel(private val project: Project) : Disposable {
                 } else 0
                 updateClientProjectRef(effectiveProjectIndex)
 
-                // Load iterations if not yet loaded (or reset after project change)
+                // Load iterations if not yet loaded (or reset after project change).
+                // When no saved sprint must be validated against the list (the default,
+                // and the state after every project switch), the iteration list only
+                // feeds the dropdown — run it concurrently with the artifact fetch
+                // instead of paying a serial round trip before it.
+                val savedIter = RallySettings.getInstance().selectedIteration
+                val needsIterationValidation = savedIter.isNotBlank() && savedIter != "All Sprints"
+                var iterationsFuture: java.util.concurrent.CompletableFuture<Void>? = null
                 if (!iterationsLoaded) {
-                    loadIterations(client)
+                    if (needsIterationValidation) {
+                        loadIterations(client)
+                    } else {
+                        iterationsFuture = java.util.concurrent.CompletableFuture.runAsync({
+                            loadIterations(client)
+                        }, client.apiExecutor)
+                    }
                 }
 
-                val savedIter = RallySettings.getInstance().selectedIteration
-                val effectiveIter = if (savedIter.isNotBlank() && savedIter != "All Sprints" &&
+                val effectiveIter = if (needsIterationValidation &&
                     cachedIterations.any { it.name == savedIter }) savedIter else ""
                 val query = buildQuery(scope, effectiveIter, settings)
                 val hasIterationFilter = effectiveIter.isNotBlank() && effectiveIter != "All Sprints"
@@ -541,6 +553,14 @@ class RallyToolWindowPanel(private val project: Project) : Disposable {
                 if (sprintFuture != null) {
                     try { sprintFuture.get() } catch (e: Exception) {
                         LOG.warn("Failed to load sprint summary", e)
+                    }
+                }
+
+                // loadIterations handles its own errors and UI updates; join only so
+                // this load cycle doesn't report done with the dropdown still pending.
+                if (iterationsFuture != null) {
+                    try { iterationsFuture.get() } catch (e: Exception) {
+                        LOG.warn("Failed to load iterations", e)
                     }
                 }
 
