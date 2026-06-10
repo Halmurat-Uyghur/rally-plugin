@@ -1689,6 +1689,12 @@ class RallyToolWindowPanel(private val project: Project) : Disposable {
                 }
                 client.clearArtifactCache()
                 patchArtifactsInModel(successfulRefs)
+                // The selection survives the in-place patch, so refresh the open
+                // detail panel if its artifact was among the updated rows — otherwise
+                // the header badge keeps showing the pre-update state.
+                artifactList.selectedValue?.let { sel ->
+                    if (sel.ref in successfulRefs) detailPanel.showArtifact(sel, client)
+                }
                 statusLabel.text = "Updated ${results.get()}"
             }
             } catch (e: Exception) {
@@ -1844,7 +1850,13 @@ class RallyToolWindowPanel(private val project: Project) : Disposable {
                     }
                 }
                 client.clearArtifactCache()
-                if (stateChangeSucceeded) patchArtifactsInModel(listOf(ticketRef))
+                if (stateChangeSucceeded) {
+                    patchArtifactsInModel(listOf(ticketRef))
+                    // Keep the open detail panel's header in sync (see changeState).
+                    artifactList.selectedValue?.let { sel ->
+                        if (sel.ref == ticketRef) detailPanel.showArtifact(sel, client)
+                    }
+                }
 
                 if (errors.isNotEmpty()) {
                     Messages.showWarningDialog(
@@ -1905,6 +1917,10 @@ class RallyToolWindowPanel(private val project: Project) : Disposable {
                     }
                     client.clearArtifactCache()
                     patchArtifactsInModel(listOf(ticketRef))
+                    // Keep the open detail panel's header in sync (see changeState).
+                    artifactList.selectedValue?.let { sel ->
+                        if (sel.ref == ticketRef) detailPanel.showArtifact(sel, client)
+                    }
                     statusLabel.text = "Finished $ticketId"
                 }
             } catch (e: Exception) {
