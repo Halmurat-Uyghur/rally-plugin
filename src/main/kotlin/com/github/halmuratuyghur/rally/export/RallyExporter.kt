@@ -528,7 +528,7 @@ class RallyExporter(private val client: RallyApiClient) {
                     val encodedName = java.net.URLEncoder
                         .encode(attachment.name ?: safeFileName, StandardCharsets.UTF_8)
                         .replace("+", "%20")
-                    client.downloadAttachment("${client.webBaseUrl}/slm/attachment/$objectId/$encodedName")
+                    client.downloadAttachment("${client.webBaseUrl}/slm/attachment/$objectId/$encodedName", cache = false)
                 } catch (e: Exception) {
                     LOG.warn("Raw download failed for '$fileName'; falling back to base64 content", e)
                     null
@@ -555,8 +555,9 @@ class RallyExporter(private val client: RallyApiClient) {
             Files.write(outputPath, fileBytes)
             LOG.info("Saved attachment: $outputPath (${fileBytes.size} bytes)")
             val path = outputPath.toAbsolutePath().toString()
-            downloadedPaths[cacheKey] = path
-            path
+            // putIfAbsent: harmless today (passes are sequential per artifact), but keeps
+            // a same-key race from ever returning two different paths for one attachment.
+            downloadedPaths.putIfAbsent(cacheKey, path) ?: path
         } catch (e: Exception) {
             LOG.warn("Failed to download attachment '$fileName'", e)
             // Don't cache failures — allow retry on transient errors
@@ -633,14 +634,13 @@ class RallyExporter(private val client: RallyApiClient) {
 
             val imageUrl = "${client.webBaseUrl}/slm/attachment/$objectId/$originalFileName"
 
-            val fileBytes = client.downloadAttachment(imageUrl)
+            val fileBytes = client.downloadAttachment(imageUrl, cache = false)
 
             val outputPath = RallyFileUtils.safeResolve(imgDirPath, localFileName)
             Files.write(outputPath, fileBytes)
             LOG.info("Downloaded inline image: $outputPath (${fileBytes.size} bytes)")
             val path = outputPath.toAbsolutePath().toString()
-            downloadedImagePaths[cacheKey] = path
-            return path
+            return downloadedImagePaths.putIfAbsent(cacheKey, path) ?: path
         } catch (e: Exception) {
             // Don't cache failures — allow retry on transient errors
             LOG.warn("Failed to download image OID=$objectId", e)

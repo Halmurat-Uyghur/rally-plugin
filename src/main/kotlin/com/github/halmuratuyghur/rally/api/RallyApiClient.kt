@@ -1347,10 +1347,14 @@ class RallyApiClient(
      * Download a Rally attachment by URL using zsessionid auth.
      * Returns raw bytes.
      */
-    fun downloadAttachment(url: String): ByteArray {
+    fun downloadAttachment(url: String, cache: Boolean = true): ByteArray {
         requireSameHost(url)
-        // Small images rarely change, so keep a bounded in-memory cache for repeat views
-        imageCache[url]?.let { return it }
+        // Small images rarely change, so keep a bounded in-memory cache for repeat
+        // views. Callers with their own dedup (the exporter) pass cache=false so a
+        // big export can't evict the detail panel's inline images.
+        if (cache) {
+            imageCache[url]?.let { return it }
+        }
         val request = HttpRequest.newBuilder()
             .uri(URI.create(url))
             .header(ZSESSION_HEADER, apiKey)
@@ -1368,7 +1372,7 @@ class RallyApiClient(
         }
 
         val bytes = response.body()
-        if (bytes.size.toLong() > maxCacheableImageBytes) {
+        if (!cache || bytes.size.toLong() > maxCacheableImageBytes) {
             return bytes
         }
         synchronized(imageCache) {
