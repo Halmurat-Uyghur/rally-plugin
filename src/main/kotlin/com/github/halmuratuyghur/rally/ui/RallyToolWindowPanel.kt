@@ -1963,13 +1963,13 @@ class RallyToolWindowPanel(private val project: Project) : Disposable {
         private val panel = JPanel(BorderLayout(8, 0)).apply { border = JBUI.Borders.empty(4, 6) }
         private val iconLabel = JLabel()
         private val textLabel = JLabel()
-        private val stateLabel = JLabel()
+        private val stateBadge = StatusBadge()
         private val ownerLabel = JLabel()
         private val rightPanel = JPanel(FlowLayout(FlowLayout.RIGHT, 8, 0)).apply { isOpaque = false }
 
         init {
             rightPanel.add(ownerLabel)
-            rightPanel.add(stateLabel)
+            rightPanel.add(stateBadge)
             panel.add(iconLabel, BorderLayout.WEST)
             panel.add(textLabel, BorderLayout.CENTER)
             panel.add(rightPanel, BorderLayout.EAST)
@@ -2010,16 +2010,9 @@ class RallyToolWindowPanel(private val project: Project) : Disposable {
             } else {
                 value.scheduleState ?: value.state ?: "Unknown"
             }
-            stateLabel.text = state
-            stateLabel.foreground = if (isSelected) list.selectionForeground else when (state) {
-                "Pass" -> RallyColors.PASS
-                "Fail" -> RallyColors.FAIL
-                "In-Progress" -> RallyColors.IN_PROGRESS
-                "Completed" -> RallyColors.COMPLETED
-                "Accepted" -> JBColor.GRAY
-                "Defined" -> RallyColors.DEFINED
-                else -> JBColor.DARK_GRAY
-            }
+            // The badge keeps its own colors on selected rows: the tinted fill is its
+            // local background, so it stays readable on the selection highlight.
+            stateBadge.update(state, RallyColors.forState(state))
 
             ownerLabel.text = value.owner?.displayName ?: value.owner?.refObjectName ?: ""
             ownerLabel.foreground = if (isSelected) list.selectionForeground else JBColor.GRAY

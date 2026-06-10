@@ -75,7 +75,7 @@ class RallyDetailPanel(private val project: Project) : com.intellij.openapi.Disp
     val component: JPanel = JPanel(BorderLayout())
 
     private val headerLabel = JBLabel("Select a ticket to view details")
-    private val stateBadge = JBLabel()
+    private val stateBadge = StatusBadge()
     private val metadataLabel = JBLabel("").apply {
         font = font.deriveFont(Font.PLAIN, 11f)
         foreground = JBColor.GRAY
@@ -180,7 +180,6 @@ class RallyDetailPanel(private val project: Project) : com.intellij.openapi.Disp
         headerPanel.border = JBUI.Borders.empty(6, 8)
         headerLabel.font = headerLabel.font.deriveFont(Font.BOLD, 13f)
         headerPanel.add(headerLabel, BorderLayout.CENTER)
-        stateBadge.border = JBUI.Borders.empty(2, 8)
         val headerRightPanel = JPanel(FlowLayout(FlowLayout.RIGHT, 2, 0))
         headerRightPanel.isOpaque = false
         headerRightPanel.add(copyButton)
@@ -325,8 +324,7 @@ class RallyDetailPanel(private val project: Project) : com.intellij.openapi.Disp
         } else {
             artifact.scheduleState ?: artifact.state ?: "Unknown"
         }
-        stateBadge.text = state
-        stateBadge.foreground = stateColor(state)
+        stateBadge.update(state, RallyColors.forState(state))
 
         // Metadata strip
         metadataLabel.text = buildMetadataText(artifact)
@@ -527,7 +525,7 @@ class RallyDetailPanel(private val project: Project) : com.intellij.openapi.Disp
         currentArtifact = null
         currentClient = null
         headerLabel.text = "Select a ticket to view details"
-        stateBadge.text = ""
+        stateBadge.update(null, RallyColors.NEUTRAL)
         metadataLabel.text = ""
         metadataLabel.isVisible = false
         copyButton.isVisible = false
@@ -952,14 +950,6 @@ class RallyDetailPanel(private val project: Project) : com.intellij.openapi.Disp
         return projectRef?.trimEnd('/')?.substringAfterLast('/')
     }
 
-    private fun stateColor(state: String): Color = when (state) {
-        "In-Progress" -> RallyColors.IN_PROGRESS
-        "Completed" -> RallyColors.COMPLETED
-        "Accepted" -> JBColor.GRAY
-        "Defined" -> RallyColors.DEFINED
-        else -> JBColor.DARK_GRAY
-    }
-
     private fun wrapHtml(html: String): String {
         // Use the IDE's label font size so HiDPI displays don't render the
         // description at 11 device pixels (effectively a 5-6pt font on Retina).
@@ -1063,13 +1053,13 @@ class RallyDetailPanel(private val project: Project) : com.intellij.openapi.Disp
         private val panel = JPanel(BorderLayout(8, 0)).apply { border = JBUI.Borders.empty(3, 6) }
         private val iconLabel = JLabel()
         private val textLabel = JLabel()
-        private val methodLabel = JLabel()
-        private val verdictLabel = JLabel()
+        private val methodBadge = StatusBadge()
+        private val verdictBadge = StatusBadge()
         private val rightPanel = JPanel(FlowLayout(FlowLayout.RIGHT, 6, 0)).apply { isOpaque = false }
 
         init {
-            rightPanel.add(verdictLabel)
-            rightPanel.add(methodLabel)
+            rightPanel.add(verdictBadge)
+            rightPanel.add(methodBadge)
             panel.add(iconLabel, BorderLayout.WEST)
             panel.add(textLabel, BorderLayout.CENTER)
             panel.add(rightPanel, BorderLayout.EAST)
@@ -1090,21 +1080,11 @@ class RallyDetailPanel(private val project: Project) : com.intellij.openapi.Disp
             textLabel.foreground = if (isSelected) list.selectionForeground else list.foreground
 
             val method = value.method ?: "Manual"
-            methodLabel.text = method
-            methodLabel.foreground = if (isSelected) list.selectionForeground else if (method == "Automated") {
-                RallyColors.IN_PROGRESS
-            } else {
-                RallyColors.DEFINED
-            }
+            methodBadge.update(method, RallyColors.forMethod(method))
 
-            val verdict = value.lastVerdict ?: ""
-            verdictLabel.isVisible = verdict.isNotBlank()
-            verdictLabel.text = verdict
-            verdictLabel.foreground = if (isSelected) list.selectionForeground else when (verdict) {
-                "Pass" -> RallyColors.PASS
-                "Fail" -> RallyColors.FAIL
-                else -> JBColor.GRAY
-            }
+            // update() hides the badge for blank verdicts; non-Pass/Fail verdicts
+            // (e.g. Blocked) get the neutral chip, matching the old gray fallback.
+            verdictBadge.update(value.lastVerdict, RallyColors.forState(value.lastVerdict))
 
             return panel
         }
@@ -1116,13 +1096,13 @@ class RallyDetailPanel(private val project: Project) : com.intellij.openapi.Disp
         private val panel = JPanel(BorderLayout(8, 0)).apply { border = JBUI.Borders.empty(3, 6) }
         private val iconLabel = JLabel(AllIcons.FileTypes.Any_type)
         private val textLabel = JLabel()
-        private val stateLabel = JLabel()
+        private val stateBadge = StatusBadge()
         private val ownerLabel = JLabel()
         private val todoLabel = JLabel()
         private val rightPanel = JPanel(FlowLayout(FlowLayout.RIGHT, 6, 0)).apply { isOpaque = false }
 
         init {
-            rightPanel.add(stateLabel)
+            rightPanel.add(stateBadge)
             rightPanel.add(ownerLabel)
             rightPanel.add(todoLabel)
             panel.add(iconLabel, BorderLayout.WEST)
@@ -1142,15 +1122,8 @@ class RallyDetailPanel(private val project: Project) : com.intellij.openapi.Disp
             textLabel.text = "${value.formattedID ?: "?"}: ${value.name ?: "Untitled"}"
             textLabel.foreground = if (isSelected) list.selectionForeground else list.foreground
 
-            val state = value.state ?: ""
-            stateLabel.isVisible = state.isNotBlank()
-            stateLabel.text = state
-            stateLabel.foreground = if (isSelected) list.selectionForeground else when (state) {
-                "In-Progress" -> RallyColors.IN_PROGRESS
-                "Completed" -> RallyColors.COMPLETED
-                "Defined" -> RallyColors.DEFINED
-                else -> JBColor.DARK_GRAY
-            }
+            // update() hides the badge when state is blank (same as the old isVisible).
+            stateBadge.update(value.state, RallyColors.forState(value.state))
 
             val ownerName = value.owner?.refObjectName ?: value.owner?.displayName ?: ""
             ownerLabel.isVisible = ownerName.isNotBlank()
