@@ -343,29 +343,8 @@ class RallyDetailPanel(private val project: Project) : com.intellij.openapi.Disp
             stepListModel.clear()
 
             ApplicationManager.getApplication().executeOnPooledThread {
-                val descFuture = CompletableFuture.supplyAsync({
-                    if (generation.get() != gen) return@supplyAsync null
-                    var resolved = desc
-                    if (resolved.isNullOrBlank()) {
-                        try {
-                            resolved = client.fetchDescription(artifactRef)
-                        } catch (e: RallyAuthenticationException) {
-                            LOG.warn("Auth failure fetching description for $id", e)
-                            return@supplyAsync DESC_AUTH_FAILED
-                        } catch (e: Exception) {
-                            LOG.warn("Failed to fetch description for $id", e)
-                        }
-                    }
-                    if (generation.get() != gen) return@supplyAsync null
-                    val resolvedNonNull = resolved
-                    if (!resolvedNonNull.isNullOrBlank()) {
-                        try { resolveInlineImages(resolvedNonNull, client, gen) } catch (e: Exception) {
-                            LOG.warn("Failed to resolve inline images for $id", e)
-                            resolvedNonNull
-                        }
-                    } else null
-                }, client.apiExecutor)
-
+                // Submit the steps query to apiExecutor FIRST so it runs in parallel
+                // with the description work below.
                 val stepsFuture = CompletableFuture.supplyAsync({
                     if (generation.get() != gen) return@supplyAsync null
                     try { client.queryTestSteps(id) } catch (e: Exception) {
@@ -373,19 +352,6 @@ class RallyDetailPanel(private val project: Project) : com.intellij.openapi.Disp
                         null
                     }
                 }, client.apiExecutor)
-
-                descFuture.thenAccept { resolvedDesc ->
-                    ApplicationManager.getApplication().invokeLater {
-                        if (generation.get() != gen || disposed) return@invokeLater
-                        val text = when {
-                            resolvedDesc == DESC_AUTH_FAILED -> AUTH_ERROR_HTML
-                            !resolvedDesc.isNullOrBlank() -> resolvedDesc
-                            else -> "<i>No description</i>"
-                        }
-                        descriptionPane.text = wrapHtml(text)
-                        descriptionPane.caretPosition = 0
-                    }
-                }.exceptionally { t -> LOG.warn("Detail panel description update failed", t); null }
 
                 stepsFuture.thenAccept { steps ->
                     ApplicationManager.getApplication().invokeLater {
@@ -399,6 +365,51 @@ class RallyDetailPanel(private val project: Project) : com.intellij.openapi.Disp
                         }
                     }
                 }.exceptionally { t -> LOG.warn("Detail panel steps update failed", t); null }
+
+                // Description work runs on THIS pooled thread (effectively unbounded
+                // pool): fetchDescription + resolveInlineImages block on image
+                // downloads, and parking one of apiExecutor's 4 shared workers on that
+                // join starved fresh loads during rapid ticket switching. wrapHtml also
+                // runs here so its full-string scans stay off the EDT.
+                try {
+                    val resolvedDesc: String? = run {
+                        if (generation.get() != gen) return@run null
+                        var resolved = desc
+                        if (resolved.isNullOrBlank()) {
+                            try {
+                                resolved = client.fetchDescription(artifactRef)
+                            } catch (e: RallyAuthenticationException) {
+                                LOG.warn("Auth failure fetching description for $id", e)
+                                return@run DESC_AUTH_FAILED
+                            } catch (e: Exception) {
+                                LOG.warn("Failed to fetch description for $id", e)
+                            }
+                        }
+                        if (generation.get() != gen) return@run null
+                        val resolvedNonNull = resolved
+                        if (!resolvedNonNull.isNullOrBlank()) {
+                            try { resolveInlineImages(resolvedNonNull, client, gen) } catch (e: Exception) {
+                                LOG.warn("Failed to resolve inline images for $id", e)
+                                resolvedNonNull
+                            }
+                        } else null
+                    }
+                    if (generation.get() == gen && !disposed) {
+                        val text = when {
+                            resolvedDesc == DESC_AUTH_FAILED -> AUTH_ERROR_HTML
+                            !resolvedDesc.isNullOrBlank() -> resolvedDesc
+                            else -> "<i>No description</i>"
+                        }
+                        val wrapped = wrapHtml(text)
+                        ApplicationManager.getApplication().invokeLater {
+                            if (generation.get() != gen || disposed) return@invokeLater
+                            descriptionPane.text = wrapped
+                            descriptionPane.caretPosition = 0
+                        }
+                    }
+                } catch (t: Exception) {
+                    LOG.warn("Detail panel description update failed", t)
+                }
             }
             return  // Skip the normal story/defect detail loading
         }
@@ -416,30 +427,9 @@ class RallyDetailPanel(private val project: Project) : com.intellij.openapi.Disp
 
         // Load description, test cases, tasks, and attachments in parallel
         ApplicationManager.getApplication().executeOnPooledThread {
-            // Launch all four queries concurrently
-            val descFuture = CompletableFuture.supplyAsync({
-                if (generation.get() != gen) return@supplyAsync null
-                var resolved = desc
-                if (resolved.isNullOrBlank()) {
-                    try {
-                        resolved = client.fetchDescription(artifactRef)
-                    } catch (e: RallyAuthenticationException) {
-                        LOG.warn("Auth failure fetching description for $id", e)
-                        return@supplyAsync DESC_AUTH_FAILED
-                    } catch (e: Exception) {
-                        LOG.warn("Failed to fetch description for $id", e)
-                    }
-                }
-                if (generation.get() != gen) return@supplyAsync null
-                val resolvedNonNull = resolved
-                if (!resolvedNonNull.isNullOrBlank()) {
-                    try { resolveInlineImages(resolvedNonNull, client, gen) } catch (e: Exception) {
-                        LOG.warn("Failed to resolve inline images for $id", e)
-                        resolvedNonNull
-                    }
-                } else null
-            }, client.apiExecutor)
-
+            // Launch tc/task/attach queries concurrently via apiExecutor.
+            // Description work runs on THIS pooled thread — see the test-case branch
+            // for why (apiExecutor starvation + EDT-side wrapHtml cost).
             val tcFuture = CompletableFuture.supplyAsync({
                 if (generation.get() != gen) return@supplyAsync null
                 try { client.queryTestCases(artifactRef) } catch (e: Exception) {
@@ -465,19 +455,6 @@ class RallyDetailPanel(private val project: Project) : com.intellij.openapi.Disp
             }, client.apiExecutor)
 
             // Update UI as each completes
-            descFuture.thenAccept { resolvedDesc ->
-                ApplicationManager.getApplication().invokeLater {
-                    if (generation.get() != gen || disposed) return@invokeLater
-                    val text = when {
-                        resolvedDesc == DESC_AUTH_FAILED -> AUTH_ERROR_HTML
-                        !resolvedDesc.isNullOrBlank() -> resolvedDesc
-                        else -> "<i>No description</i>"
-                    }
-                    descriptionPane.text = wrapHtml(text)
-                    descriptionPane.caretPosition = 0
-                }
-            }.exceptionally { t -> LOG.warn("Detail panel description update failed", t); null }
-
             tcFuture.thenAccept { testCases ->
                 ApplicationManager.getApplication().invokeLater {
                     if (generation.get() != gen || disposed) return@invokeLater
@@ -526,6 +503,48 @@ class RallyDetailPanel(private val project: Project) : com.intellij.openapi.Disp
                     }
                 }
             }.exceptionally { t -> LOG.warn("Detail panel attachments update failed", t); null }
+
+            // Description work runs on THIS pooled thread — see the test-case branch
+            // for why (apiExecutor starvation + EDT-side wrapHtml cost).
+            try {
+                val resolvedDesc: String? = run {
+                    if (generation.get() != gen) return@run null
+                    var resolved = desc
+                    if (resolved.isNullOrBlank()) {
+                        try {
+                            resolved = client.fetchDescription(artifactRef)
+                        } catch (e: RallyAuthenticationException) {
+                            LOG.warn("Auth failure fetching description for $id", e)
+                            return@run DESC_AUTH_FAILED
+                        } catch (e: Exception) {
+                            LOG.warn("Failed to fetch description for $id", e)
+                        }
+                    }
+                    if (generation.get() != gen) return@run null
+                    val resolvedNonNull = resolved
+                    if (!resolvedNonNull.isNullOrBlank()) {
+                        try { resolveInlineImages(resolvedNonNull, client, gen) } catch (e: Exception) {
+                            LOG.warn("Failed to resolve inline images for $id", e)
+                            resolvedNonNull
+                        }
+                    } else null
+                }
+                if (generation.get() == gen && !disposed) {
+                    val text = when {
+                        resolvedDesc == DESC_AUTH_FAILED -> AUTH_ERROR_HTML
+                        !resolvedDesc.isNullOrBlank() -> resolvedDesc
+                        else -> "<i>No description</i>"
+                    }
+                    val wrapped = wrapHtml(text)
+                    ApplicationManager.getApplication().invokeLater {
+                        if (generation.get() != gen || disposed) return@invokeLater
+                        descriptionPane.text = wrapped
+                        descriptionPane.caretPosition = 0
+                    }
+                }
+            } catch (t: Exception) {
+                LOG.warn("Detail panel description update failed", t)
+            }
         }
     }
 
