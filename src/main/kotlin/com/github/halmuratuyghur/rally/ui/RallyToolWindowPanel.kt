@@ -21,6 +21,7 @@ import com.github.halmuratuyghur.rally.api.RallyTestCase
 import com.github.halmuratuyghur.rally.api.RallyIteration
 import com.github.halmuratuyghur.rally.api.RallyProject
 import com.github.halmuratuyghur.rally.api.RallyTaskItem
+import com.github.halmuratuyghur.rally.api.RallyUser
 import com.github.halmuratuyghur.rally.api.RallyUserStory
 import com.github.halmuratuyghur.rally.export.RallyExporter
 import com.github.halmuratuyghur.rally.settings.RallySettings
@@ -263,6 +264,17 @@ class RallyToolWindowPanel(private val project: Project) : Disposable {
 
         // Artifact list
         artifactList.cellRenderer = ArtifactCellRenderer()
+        // Pin the row height from one prototype render. Without fixedCellHeight,
+        // BasicListUI calls the renderer + getPreferredSize() for EVERY element on
+        // EVERY model event (each debounced keystroke, every refresh) to compute row
+        // heights — O(n) nested-layout passes for rows that are all the same height.
+        val prototype = RallyUserStory(
+            formattedID = "US00000", name = "Prototype", scheduleState = "In-Progress",
+            owner = RallyUser(displayName = "Prototype Owner")
+        )
+        artifactList.fixedCellHeight = artifactList.cellRenderer
+            .getListCellRendererComponent(artifactList, prototype, 0, false, false)
+            .preferredSize.height
         artifactList.selectionMode = ListSelectionModel.MULTIPLE_INTERVAL_SELECTION
         artifactList.emptyText.text = "No tickets loaded. Configure Rally in Settings → Tools → Rally, then click Refresh."
         val scrollPane = JBScrollPane(artifactList)
