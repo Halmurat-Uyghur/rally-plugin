@@ -940,7 +940,16 @@ class RallyToolWindowPanel(private val project: Project) : Disposable {
         }
         var patched = false
         for (i in 0 until listModel.size()) {
-            val replacement = listModel.getElementAt(i).ref?.let(byRef::get) ?: continue
+            val ref = listModel.getElementAt(i).ref ?: continue
+            if (ref in refs && ref !in byRef) {
+                // The row came from a server-side search and has no fresh copy in
+                // allArtifacts to patch in. Fall back to a full re-filter, which
+                // re-fires the search against the just-cleared cache — the one case
+                // where the old rebuild path recovered better than an in-place patch.
+                applySearchFilter()
+                return
+            }
+            val replacement = byRef[ref] ?: continue
             listModel.setElementAt(replacement, i)
             patched = true
         }
