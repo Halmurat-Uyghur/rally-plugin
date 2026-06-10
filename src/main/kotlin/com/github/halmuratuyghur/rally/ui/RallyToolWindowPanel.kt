@@ -2010,8 +2010,8 @@ class RallyToolWindowPanel(private val project: Project) : Disposable {
             } else {
                 value.scheduleState ?: value.state ?: "Unknown"
             }
-            // The badge keeps its own colors on selected rows: the tinted fill is its
-            // local background, so it stays readable on the selection highlight.
+            // The badge keeps its own colors on selected rows: its opaque pastel fill
+            // is its local background, so contrast is selection-independent.
             stateBadge.update(state, RallyColors.forState(state))
 
             ownerLabel.text = value.owner?.displayName ?: value.owner?.refObjectName ?: ""

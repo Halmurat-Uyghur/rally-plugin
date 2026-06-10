@@ -1,5 +1,6 @@
 package com.github.halmuratuyghur.rally.ui
 
+import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
 import org.junit.Assert.assertSame
 import org.junit.Test
@@ -45,8 +46,12 @@ class RallyColorsTest {
     }
 
     @Test
-    fun `chip backgrounds are translucent tints, not the foreground color`() {
+    fun `chip backgrounds are opaque pastels distinct from the foreground`() {
         val chip = RallyColors.forState("In-Progress")
         assertFalse(chip.foreground === chip.background)
+        // Opaque: contrast must not depend on what's behind the chip (selection blue).
+        assertEquals(255, chip.background.alpha)
+        // Pastel, not the full-strength hue.
+        assertFalse(chip.foreground.rgb == chip.background.rgb)
     }
 }

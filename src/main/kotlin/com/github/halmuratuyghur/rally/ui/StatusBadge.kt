@@ -5,18 +5,21 @@ import java.awt.Dimension
 import java.awt.Graphics
 import java.awt.Graphics2D
 import java.awt.RenderingHints
+import javax.accessibility.Accessible
+import javax.accessibility.AccessibleContext
+import javax.accessibility.AccessibleRole
 import javax.swing.JComponent
 
 /**
- * A small rounded chip that paints a tinted fill behind a state name.
+ * A small rounded chip that paints an opaque pastel fill behind a state name.
  *
  * Designed for reuse inside shared cell-renderer instances (project convention:
  * no per-paint allocations), so all visual state flows through [update]. The chip
- * keeps its own colors on selected rows — the tinted fill provides local contrast
- * against the selection highlight, unlike the colored-text-on-selection-blue
+ * keeps its own colors on selected rows — the opaque pastel fill makes the chip's
+ * contrast independent of the selection highlight, unlike the colored-text-on-selection-blue
  * clash the plain labels had.
  */
-class StatusBadge : JComponent() {
+class StatusBadge : JComponent(), Accessible {
     private var text: String = ""
     private var colors: StateColors = RallyColors.NEUTRAL
 
@@ -30,6 +33,7 @@ class StatusBadge : JComponent() {
         this.text = text ?: ""
         this.colors = colors
         isVisible = this.text.isNotBlank()
+        getAccessibleContext().accessibleName = this.text
         revalidate()
         repaint()
     }
@@ -49,6 +53,7 @@ class StatusBadge : JComponent() {
         g2.color = colors.background
         g2.fillRoundRect(0, 0, width, height, arc, arc)
         g2.color = colors.foreground
+        com.intellij.util.ui.GraphicsUtil.setupAntialiasing(g2)
         g2.font = font
         val fm = g2.fontMetrics
         g2.drawString(
@@ -57,5 +62,21 @@ class StatusBadge : JComponent() {
             (height - fm.height) / 2 + fm.ascent
         )
         if (oldAA != null) g2.setRenderingHint(RenderingHints.KEY_ANTIALIASING, oldAA)
+    }
+
+    /** The replaced JLabels exposed the state text to screen readers; keep that. */
+    override fun getAccessibleContext(): AccessibleContext {
+        if (accessibleContext == null) {
+            accessibleContext = object : AccessibleJComponent() {
+                override fun getAccessibleRole(): AccessibleRole = AccessibleRole.LABEL
+            }
+        }
+        return accessibleContext
+    }
+
+    /** Re-derive the fixed-size label font after a LaF/font-size switch. */
+    override fun updateUI() {
+        super.updateUI()
+        font = JBUI.Fonts.label(11f)
     }
 }

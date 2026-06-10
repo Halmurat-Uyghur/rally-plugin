@@ -4,8 +4,8 @@ import com.intellij.ui.JBColor
 import java.awt.Color
 
 /**
- * Foreground + chip-fill pair for one state value. The background is a translucent
- * tint of the same hue so the chip reads in both light and dark themes while the
+ * Foreground + chip-fill pair for one state value. The background is an opaque pastel
+ * of the same hue so the chip reads in both light and dark themes while the
  * full-strength foreground keeps text contrast.
  */
 class StateColors(val foreground: JBColor, val background: JBColor)
@@ -49,22 +49,37 @@ object RallyColors {
     val IDEA = JBColor(IDEA_L, IDEA_D)                       // purple (had no color before)
     val DIVIDER = JBColor(Color(80, 80, 80), Color(70, 70, 70))
 
-    /** Translucent fill of the same hue: light theme tints lighter, dark theme a bit stronger. */
-    private fun tint(light: Color, dark: Color) = JBColor(
-        Color(light.red, light.green, light.blue, 34),
-        Color(dark.red, dark.green, dark.blue, 46)
-    )
+    /**
+     * Opaque pastel fill: the hue pre-composited over the theme's default panel
+     * background (white / #3C3F41) at construction. Opaque — not a translucent
+     * tint — so the chip's text contrast is independent of what's behind it,
+     * including the selection highlight.
+     */
+    private fun chipFill(light: Color, dark: Color): JBColor {
+        fun blend(base: Color, hue: Color, alpha: Int): Color {
+            val a = alpha / 255f
+            return Color(
+                (base.red * (1 - a) + hue.red * a).toInt(),
+                (base.green * (1 - a) + hue.green * a).toInt(),
+                (base.blue * (1 - a) + hue.blue * a).toInt()
+            )
+        }
+        return JBColor(
+            blend(Color(255, 255, 255), light, 34),
+            blend(Color(60, 63, 65), dark, 46)
+        )
+    }
 
-    private val IN_PROGRESS_CHIP = StateColors(IN_PROGRESS, tint(IN_PROGRESS_L, IN_PROGRESS_D))
-    private val COMPLETED_CHIP = StateColors(COMPLETED, tint(COMPLETED_L, COMPLETED_D))
-    private val DEFINED_CHIP = StateColors(DEFINED, tint(DEFINED_L, DEFINED_D))
-    private val PASS_CHIP = StateColors(PASS, tint(PASS_L, PASS_D))
-    private val FAIL_CHIP = StateColors(FAIL, tint(FAIL_L, FAIL_D))
-    private val ACCEPTED_CHIP = StateColors(ACCEPTED, tint(ACCEPTED_L, ACCEPTED_D))
-    private val IDEA_CHIP = StateColors(IDEA, tint(IDEA_L, IDEA_D))
+    private val IN_PROGRESS_CHIP = StateColors(IN_PROGRESS, chipFill(IN_PROGRESS_L, IN_PROGRESS_D))
+    private val COMPLETED_CHIP = StateColors(COMPLETED, chipFill(COMPLETED_L, COMPLETED_D))
+    private val DEFINED_CHIP = StateColors(DEFINED, chipFill(DEFINED_L, DEFINED_D))
+    private val PASS_CHIP = StateColors(PASS, chipFill(PASS_L, PASS_D))
+    private val FAIL_CHIP = StateColors(FAIL, chipFill(FAIL_L, FAIL_D))
+    private val ACCEPTED_CHIP = StateColors(ACCEPTED, chipFill(ACCEPTED_L, ACCEPTED_D))
+    private val IDEA_CHIP = StateColors(IDEA, chipFill(IDEA_L, IDEA_D))
 
     /** Fallback chip for null/unknown states ("Unknown", "No Verdict", blank). */
-    val NEUTRAL = StateColors(JBColor(NEUTRAL_L, NEUTRAL_D), tint(NEUTRAL_L, NEUTRAL_D))
+    val NEUTRAL = StateColors(JBColor(NEUTRAL_L, NEUTRAL_D), chipFill(NEUTRAL_L, NEUTRAL_D))
 
     private val STATE_COLORS: Map<String, StateColors> = mapOf(
         // ScheduleState (user stories + defects)
