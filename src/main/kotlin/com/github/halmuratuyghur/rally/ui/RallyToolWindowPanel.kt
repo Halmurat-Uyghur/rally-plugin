@@ -923,6 +923,30 @@ class RallyToolWindowPanel(private val project: Project) : Disposable {
         selectionListeners.forEach { artifactList.addListSelectionListener(it) }
     }
 
+    /**
+     * Patch already-updated artifacts (fresh copies live in [allArtifacts]) into the
+     * visible list model in place. Unlike applySearchFilter()'s clear()+addAll()
+     * rebuild, this fires one contentsChanged event per row and preserves the JList
+     * selection — optimistic updates shouldn't collapse the detail panel, drop a
+     * multi-select, or re-measure every row. Rows filtered out of the current view
+     * are simply absent from the model and skipped, same as before.
+     */
+    private fun patchArtifactsInModel(refs: Collection<String>) {
+        if (refs.isEmpty()) return
+        val byRef = HashMap<String, RallyArtifact>()
+        for (a in allArtifacts) {
+            val r = a.ref ?: continue
+            if (r in refs) byRef[r] = a
+        }
+        var patched = false
+        for (i in 0 until listModel.size()) {
+            val replacement = listModel.getElementAt(i).ref?.let(byRef::get) ?: continue
+            listModel.setElementAt(replacement, i)
+            patched = true
+        }
+        if (patched) updateStats(java.util.Collections.list(listModel.elements()))
+    }
+
     private fun updateStats(artifacts: List<RallyArtifact>) {
         var totalPoints = 0.0
         for (artifact in artifacts) {
@@ -1539,16 +1563,11 @@ class RallyToolWindowPanel(private val project: Project) : Disposable {
                         } else artifact
                     }
                     client.clearArtifactCache()
-                    // applySearchFilter() rebuilds the list model, which clears the JList
-                    // selection. Grab the freshly-copied artifact first so we can restore
-                    // the selection and refresh the detail panel with it — otherwise
-                    // artifactList.selectedValue is null and the panel collapses.
-                    val updated = allArtifacts.firstOrNull { it.ref == ref }
-                    applySearchFilter()
-                    if (updated != null) artifactList.setSelectedValue(updated, true)
+                    // In-place patch preserves the selection, so no restore dance needed.
+                    patchArtifactsInModel(listOf(ref))
                     statusLabel.text = "Updated ${selected.formattedID} points"
                     // Refresh detail panel metadata with the updated artifact
-                    detailPanel.showArtifact(updated ?: artifactList.selectedValue, client)
+                    allArtifacts.firstOrNull { it.ref == ref }?.let { detailPanel.showArtifact(it, client) }
                 }
             } catch (e: Exception) {
                 LOG.error("Failed to update points", e)
@@ -1639,7 +1658,7 @@ class RallyToolWindowPanel(private val project: Project) : Disposable {
                     } else artifact
                 }
                 client.clearArtifactCache()
-                applySearchFilter()
+                patchArtifactsInModel(successfulRefs)
                 statusLabel.text = "Updated ${results.get()}"
             }
             } catch (e: Exception) {
@@ -1795,7 +1814,7 @@ class RallyToolWindowPanel(private val project: Project) : Disposable {
                     }
                 }
                 client.clearArtifactCache()
-                applySearchFilter()
+                if (stateChangeSucceeded) patchArtifactsInModel(listOf(ticketRef))
 
                 if (errors.isNotEmpty()) {
                     Messages.showWarningDialog(
@@ -1855,7 +1874,7 @@ class RallyToolWindowPanel(private val project: Project) : Disposable {
                         } else artifact
                     }
                     client.clearArtifactCache()
-                    applySearchFilter()
+                    patchArtifactsInModel(listOf(ticketRef))
                     statusLabel.text = "Finished $ticketId"
                 }
             } catch (e: Exception) {
