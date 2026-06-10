@@ -235,10 +235,13 @@ class RallyApiClient(
                 // too or an export-after-edit re-fetch returns stale field values.
                 // Note "artifacts:".startsWith("artifact:") is false, so the plural
                 // list cache is matched only by its own prefix below.
+                // currentIteration: is NOT evicted here — which sprint is current is a
+                // function of today's date + the sprint calendar; no artifact mutation
+                // can change it. clearCache() (manual Refresh) still evicts it.
+                // ("sprint:" was dead code: no putCache ever writes that prefix.)
                 if (key.startsWith("artifact:") || key.startsWith("artifacts:") ||
                     key.startsWith("stories:") || key.startsWith("defects:") ||
-                    key.startsWith("alltestcases:") || key.startsWith("search:") ||
-                    key.startsWith("sprint:") || key.startsWith("currentIteration:")) {
+                    key.startsWith("alltestcases:") || key.startsWith("search:")) {
                     iter.remove()
                 }
             }
