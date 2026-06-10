@@ -557,8 +557,8 @@ class RallyToolWindowPanel(private val project: Project) : Disposable {
                 }
 
                 // loadIterations handles its own errors and UI updates; join so this
-                // background cycle doesn't end with the iterations call still in
-                // flight (keeps an immediate follow-up loadTickets from doubling up).
+                // background task's lifetime covers all the work it spawned. Duplicate
+                // concurrent loadIterations calls are prevented by iterationsLoaded.
                 if (iterationsFuture != null) {
                     try { iterationsFuture.get() } catch (e: Exception) {
                         LOG.warn("Failed to load iterations", e)
