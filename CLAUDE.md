@@ -29,7 +29,8 @@ src/main/kotlin/com/github/halmuratuyghur/rally/
 │   ├── RallyToolWindowFactory.kt  # ToolWindowFactory + DumbAware
 │   ├── RallyToolWindowPanel.kt    # Main UI: toolbar, filters, project switcher, ticket list, detail panel, sprint summary
 │   ├── RallyDetailPanel.kt        # Detail panel: description (HTML) + tabbed pane (Test Cases/Steps, Tasks, Attachments)
-│   └── RallyColors.kt             # Shared color constants for UI components
+│   ├── StatusBadge.kt             # Tinted-chip status badge component (opaque pastel fill)
+│   └── RallyColors.kt             # Shared color constants + StateColors chips + forState()/forMethod() lookup
 ├── util/
 │   └── RallyHtmlUtils.kt          # Shared HTML/image utilities
 ```
@@ -41,8 +42,8 @@ src/main/kotlin/com/github/halmuratuyghur/rally/
 - **Collapsible detail panel** — Main panel uses a horizontal split: ticket list (left) + detail panel (right). Detail panel starts collapsed (dividerSize=0), auto-expands when a ticket is selected, auto-collapses when selection clears. Thin dark divider (3px) instead of default Swing divider
 - **Detail panel layout** — Vertical split: description (top, 40%) + JBTabbedPane (bottom, 60%) with three tabs: Test Cases, Tasks, Attachments. When a Test Case is selected, tabs switch to show Test Steps instead. Tab titles show counts (e.g., "Test Cases (5)")
 - **Lazy description loading** — List queries use `LIST_FIELDS` (no Description) for smaller payloads. Description is fetched on demand via `fetchDescription()` when the detail panel opens
-- **Parallel detail loading** — Description, test cases, tasks, and attachments all load concurrently via `CompletableFuture`. Generation-based cancellation (AtomicLong) prevents stale selections from continuing to update the UI
-- **Caching** — LRU query cache (access-ordered `LinkedHashMap`, max 200 entries) with 2-minute TTL. Downloaded images use a bounded in-memory cache (10 MB cap, 1 MB per-image cap). Bulk export mode extends TTL to 15 minutes
+- **Parallel detail loading** — Description runs synchronously on the pooled thread (fetch + image resolution + `wrapHtml` all off-EDT), while test cases, tasks, and attachments load concurrently via `CompletableFuture` on apiExecutor. Generation-based cancellation (AtomicLong) prevents stale selections from continuing to update the UI
+- **Caching** — LRU query cache (access-ordered `LinkedHashMap`, max 200 entries) with 2-minute TTL. Downloaded images use a bounded in-memory cache (10 MB cap, 1 MB per-image cap). Bulk export mode extends TTL to 15 minutes. `getUserByUsername` is cached; `clearArtifactCache` no longer evicts `currentIteration` (date-derived, mutation-independent)
 - **Threading**: `executeOnPooledThread` for API calls, `invokeLater` for UI updates, `CompletableFuture.supplyAsync` for parallel operations. Dedicated `apiExecutor` thread pool in RallyApiClient (4 daemon threads)
 - **Disposal safety** — `RallyToolWindowPanel` implements `Disposable` with a `disposed` flag. `dispose()` and `getClient()` are synchronized on `clientLock` so no client can be created after disposal begins. All `getClient()` call sites are guarded with try/catch to prevent late background tasks from crashing
 - **HTTP/2** — Enabled for connection multiplexing on parallel requests. Respects IDE proxy settings
@@ -79,6 +80,13 @@ src/main/kotlin/com/github/halmuratuyghur/rally/
 | **Reduced thread pool** | API executor reduced from 8 to 4 threads | Prevents thread saturation while maintaining parallelism |
 | **Reduced cache size** | LRU cache reduced from 500 to 200 entries | Lower memory footprint with same hit rate |
 | **Jittered backoff** | ±30% jitter on retry delays | Prevents thundering herd on transient failures |
+| **gzip transport** | `Accept-Encoding: gzip` + transparent decode for all JSON responses (raw-body fallback on mislabeled encoding) | 5-10x smaller payloads on cold loads |
+| **Parallel iterations** | Sprint list loads concurrently with artifacts when no saved sprint needs validation | Removes a serial RTT from cold start/project switch |
+| **In-place row patching** | `patchArtifactsInModel` replaces full list rebuilds after optimistic updates (falls back to re-filter for server-search rows) | Selection preserved, single-cell repaint |
+| **Fixed cell height** | Prototype-measured `fixedCellHeight` on the ticket list | O(1) instead of O(n) layout per model event |
+| **Off-EDT description pipeline** | Description fetch + image resolution + `wrapHtml` run on the unbounded pooled thread, not apiExecutor/EDT | apiExecutor never parks on image joins; EDT stays responsive on multi-MB descriptions |
+| **Export download dedup** | Inline images + attachments deduplicated across JSON+Markdown passes; raw-bytes attachment endpoint with base64 fallback; exporter bypasses the UI image cache | Halves export downloads, ~1x peak heap, no UI-cache eviction |
+| **Streamed JSON export** | `gson.toJson(output, bufferedWriter)` instead of full-string materialization | Halves peak memory of export write phase |
 
 ## Rally WSAPI Gotchas
 
@@ -98,7 +106,7 @@ Core artifact models (`RallyUserStory`, `RallyDefect`, `RallyTaskItem`) include:
 
 ## Testing
 
-10 unit tests for JSON parsing of Rally API responses (user stories, defects, tasks, test cases, test steps, attachments, iterations, projects). Run via `./gradlew test`.
+106 unit tests across 10 classes: Rally API JSON parsing, exporter formatting, file/HTML utils, sprint summary, gzip body decoding, status color mapping, and StatusBadge behavior. Run via `./gradlew test`.
 
 ## Build & Run
 
@@ -151,6 +159,7 @@ Any State, Idea, Defined, In-Progress, Completed, Accepted, Active (excludes Acc
 - **Page Size configurable** — settings UI allows configuring query page size
 - **Blocked/BlockedReason indicator** — visual indicator for blocked artifacts in detail panel
 - **PlannedVelocity and days remaining** — sprint summary shows planned velocity and days remaining in current sprint
+- **Status color chips** — ticket state renders as a tinted chip (`StatusBadge`, opaque pastel fill, screen-reader accessible) in the ticket list, detail panel header, Tasks tab, and Test Cases tab (Method + Verdict). State→color mapping centralized in `RallyColors.forState()`/`forMethod()` covering ScheduleState, Defect State (Submitted/Open/Fixed/Closed), and verdicts
 
 ## API Methods (RallyApiClient)
 
