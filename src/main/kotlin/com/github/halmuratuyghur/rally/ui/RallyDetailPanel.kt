@@ -1050,13 +1050,10 @@ class RallyDetailPanel(private val project: Project) : com.intellij.openapi.Disp
             val replacement = match.fullMatch.replace(match.originalSrc, dataUri)
             sb.replace(match.start, match.end, replacement)
         }
-        val resolved = sb.toString()
-        // Neutralize any remaining external http(s) src attributes to prevent JTextPane
-        // network fetches. The pattern already consumes the entire src="..." run via the
-        // backreference, so we just emit a single empty src attribute. Kept as an
-        // escaped string literal rather than a raw triple-quoted one — the adjacent
-        // closing quotes in the raw form were legal but near-unreadable.
-        return EXTERNAL_SRC_PATTERN.matcher(resolved).replaceAll("src=\"\"")
+        // External-src neutralization happens in wrapHtml — the documented single
+        // chokepoint every descriptionPane.text assignment goes through — so a second
+        // multi-MB regex pass here would be pure duplicate work.
+        return sb.toString()
     }
 
 
