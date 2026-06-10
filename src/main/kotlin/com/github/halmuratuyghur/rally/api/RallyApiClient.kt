@@ -295,9 +295,7 @@ class RallyApiClient(
                 java.util.zip.GZIPInputStream(bytes.inputStream()).use { it.readBytes() }
                     .toString(Charsets.UTF_8)
             } catch (e: java.io.IOException) {
-                // A proxy/LB can mislabel a plain (often error) body as gzip. Fall back
-                // to the raw bytes so the status-code error path stays meaningful
-                // instead of surfacing a raw ZipException.
+                // See KDoc: mislabeled encoding falls back to the raw body.
                 LOG.warn("Response declared Content-Encoding: gzip but failed to decompress; using raw body", e)
                 bytes.toString(Charsets.UTF_8)
             }

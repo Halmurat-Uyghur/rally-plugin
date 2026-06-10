@@ -1040,7 +1040,7 @@ class RallyDetailPanel(private val project: Project) : com.intellij.openapi.Disp
             sb.replace(match.start, match.end, replacement)
         }
         // External-src neutralization happens in wrapHtml — the documented single
-        // chokepoint every descriptionPane.text assignment goes through — so a second
+        // chokepoint every non-empty descriptionPane.text assignment goes through — so a second
         // multi-MB regex pass here would be pure duplicate work.
         return sb.toString()
     }

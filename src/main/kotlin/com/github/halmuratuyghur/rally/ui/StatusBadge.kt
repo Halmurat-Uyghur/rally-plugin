@@ -1,5 +1,6 @@
 package com.github.halmuratuyghur.rally.ui
 
+import com.intellij.util.ui.GraphicsUtil
 import com.intellij.util.ui.JBUI
 import java.awt.Dimension
 import java.awt.Graphics
@@ -47,13 +48,12 @@ class StatusBadge : JComponent(), Accessible {
     override fun paintComponent(g: Graphics) {
         if (text.isEmpty()) return
         val g2 = g as Graphics2D
-        val oldAA = g2.getRenderingHint(RenderingHints.KEY_ANTIALIASING)
         g2.setRenderingHint(RenderingHints.KEY_ANTIALIASING, RenderingHints.VALUE_ANTIALIAS_ON)
         val arc = JBUI.scale(8)
         g2.color = colors.background
         g2.fillRoundRect(0, 0, width, height, arc, arc)
         g2.color = colors.foreground
-        com.intellij.util.ui.GraphicsUtil.setupAntialiasing(g2)
+        GraphicsUtil.setupAntialiasing(g2)
         g2.font = font
         val fm = g2.fontMetrics
         g2.drawString(
@@ -61,7 +61,6 @@ class StatusBadge : JComponent(), Accessible {
             (width - fm.stringWidth(text)) / 2,
             (height - fm.height) / 2 + fm.ascent
         )
-        if (oldAA != null) g2.setRenderingHint(RenderingHints.KEY_ANTIALIASING, oldAA)
     }
 
     /** The replaced JLabels exposed the state text to screen readers; keep that. */

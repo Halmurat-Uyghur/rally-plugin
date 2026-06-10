@@ -180,7 +180,7 @@ Any State, Idea, Defined, In-Progress, Completed, Accepted, Active (excludes Acc
 | `updateArtifactState(ref, type, state)` | Change ScheduleState/State |
 | `updateArtifactOwner(ref, type, ownerRef)` | Change Owner |
 | `getAttachmentContent(contentRef)` | Get base64 attachment content |
-| `downloadAttachment(url)` | Download attachment bytes via HTTP (cached, 10 MB cap) |
+| `downloadAttachment(url, cache)` | Download attachment bytes via HTTP (bounded image cache unless cache=false, 10 MB cap) |
 | `queryProjects()` / `queryIterations()` | Project and sprint lists |
 | `queryCurrentIteration()` | Find active sprint by today's date |
 | `createUserStory()` | Create a new user story |
