@@ -786,6 +786,7 @@ class RallyDetailPanel(private val project: Project) : com.intellij.openapi.Disp
         val taskName = dialog.nameField.text.trim()
         val estimate = dialog.estimateField.text.trim().toDoubleOrNull()
 
+        val gen = generation.get()
         ApplicationManager.getApplication().executeOnPooledThread {
             try {
                 val task = client.createTask(taskName, artifactRef, estimate = estimate)
@@ -793,7 +794,11 @@ class RallyDetailPanel(private val project: Project) : com.intellij.openapi.Disp
                 // detail-panel reopen re-fetches and includes the new task.
                 client.clearTasksCache(artifactRef)
                 ApplicationManager.getApplication().invokeLater {
-                    if (disposed) return@invokeLater
+                    // Generation check: if the user switched artifacts while createTask
+                    // was in flight, this row belongs to the PREVIOUS artifact's Tasks
+                    // tab — clearTasksCache above already guarantees it appears when
+                    // that artifact is next opened.
+                    if (disposed || generation.get() != gen) return@invokeLater
                     taskListModel.addElement(task)
                     val count = taskListModel.size()
                     for (i in 0 until tabbedPane.tabCount) {
