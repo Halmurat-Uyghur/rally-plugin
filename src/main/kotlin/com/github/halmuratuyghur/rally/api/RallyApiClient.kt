@@ -285,12 +285,20 @@ class RallyApiClient(
          * request side sends Accept-Encoding: gzip and this is the matching decode.
          * Servers/proxies that ignore or strip the header fall through to plain UTF-8.
          * Public so unit tests can exercise it without constructing a client.
+         * If the encoding is declared as gzip but decompression fails (e.g. a proxy/LB
+         * mislabelled a plain error page), falls back to raw UTF-8 so the status-code
+         * error path remains meaningful rather than surfacing a raw ZipException.
          */
         fun decodeBody(bytes: ByteArray, contentEncoding: String?): String {
-            return if (contentEncoding != null && contentEncoding.equals("gzip", ignoreCase = true)) {
+            if (!"gzip".equals(contentEncoding, ignoreCase = true)) return bytes.toString(Charsets.UTF_8)
+            return try {
                 java.util.zip.GZIPInputStream(bytes.inputStream()).use { it.readBytes() }
                     .toString(Charsets.UTF_8)
-            } else {
+            } catch (e: java.io.IOException) {
+                // A proxy/LB can mislabel a plain (often error) body as gzip. Fall back
+                // to the raw bytes so the status-code error path stays meaningful
+                // instead of surfacing a raw ZipException.
+                LOG.warn("Response declared Content-Encoding: gzip but failed to decompress; using raw body", e)
                 bytes.toString(Charsets.UTF_8)
             }
         }

@@ -82,4 +82,15 @@ class RallyApiClientCompanionTest {
     fun `decodeBody passes plain utf8 through for identity encoding`() {
         assertEquals("x", RallyApiClient.decodeBody("x".toByteArray(Charsets.UTF_8), "identity"))
     }
+
+    @Test
+    fun `decodeBody falls back to raw utf8 when gzip header lies`() {
+        // Proxies/LBs sometimes label a plain error body as gzip; the decode must
+        // fall back so the status-code error path stays meaningful.
+        val notActuallyGzip = """{"QueryResult":{}}"""
+        assertEquals(
+            notActuallyGzip,
+            RallyApiClient.decodeBody(notActuallyGzip.toByteArray(Charsets.UTF_8), "gzip")
+        )
+    }
 }
