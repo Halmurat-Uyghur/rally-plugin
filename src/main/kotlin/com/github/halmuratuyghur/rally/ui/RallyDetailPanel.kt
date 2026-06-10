@@ -785,13 +785,16 @@ class RallyDetailPanel(private val project: Project) : com.intellij.openapi.Disp
         val client = currentClient ?: return
         val artifactId = artifact.formattedID ?: "?"
 
+        // Capture the generation alongside artifactRef, BEFORE the modal opens, so
+        // the guard can't tag a task created against the old artifact with a newer
+        // generation.
+        val gen = generation.get()
         val dialog = CreateTaskDialog(artifactId)
         if (!dialog.showAndGet()) return
 
         val taskName = dialog.nameField.text.trim()
         val estimate = dialog.estimateField.text.trim().toDoubleOrNull()
 
-        val gen = generation.get()
         ApplicationManager.getApplication().executeOnPooledThread {
             try {
                 val task = client.createTask(taskName, artifactRef, estimate = estimate)
@@ -982,7 +985,7 @@ class RallyDetailPanel(private val project: Project) : com.intellij.openapi.Disp
         // Neutralize external http(s):// (and protocol-relative) image src attributes so
         // JTextPane never makes an off-host network fetch when rendering a Rally-authored
         // description (tracking pixels / SSRF-style leaks). This is the single chokepoint:
-        // EVERY descriptionPane.text assignment goes through wrapHtml, including the early
+        // every non-empty descriptionPane.text assignment goes through wrapHtml, including the early
         // "description already loaded" path and descriptions with only external images
         // (which skip resolveInlineImages' own pass). data:…;base64 URIs produced by
         // resolveInlineImages are left intact — the pattern only matches http(s):// or //.
