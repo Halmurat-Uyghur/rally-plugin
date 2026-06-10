@@ -1177,8 +1177,11 @@ class RallyApiClient(
         val query = "(WorkProduct = \"${escapeQueryValue(workProductRef)}\")"
         val encodedQuery = URLEncoder.encode(query, StandardCharsets.UTF_8)
 
+        // No Description here: nothing reads it from this list path (the detail tab
+        // renders ID/name/method/verdict; the exporter re-fetches by ID with its own
+        // Description fetch). Saves a full HTML payload per linked test case.
         var url = buildApiUrl("testcase") +
-                "?query=$encodedQuery&fetch=FormattedID,Name,Method,Type,LastVerdict,LastRun,Owner,WorkProduct,Description,Priority,ObjectID,_ref" +
+                "?query=$encodedQuery&fetch=FormattedID,Name,Method,Type,LastVerdict,LastRun,Owner,WorkProduct,Priority,ObjectID,_ref" +
                 "&pagesize=$pageSize&order=${URLEncoder.encode("FormattedID ASC", StandardCharsets.UTF_8)}"
 
         if (!ws.isNullOrBlank()) {
