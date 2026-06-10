@@ -111,6 +111,13 @@ class RallyDetailPanel(private val project: Project) : com.intellij.openapi.Disp
     private val stepListModel = DefaultListModel<RallyTestCaseStep>()
     private val stepList = JBList(stepListModel)
 
+    // Scroll panes are fields (like tcPanel) so the tab-restore sites in
+    // showArtifact()/clear() reuse them instead of allocating fresh
+    // JBScrollPane + viewport + scrollbar UI on every selection toggle.
+    private val taskScrollPane = JBScrollPane(taskList)
+    private val attachmentScrollPane = JBScrollPane(attachmentList)
+    private val stepScrollPane = JBScrollPane(stepList)
+
     // Tabbed pane
     private val tabbedPane = JBTabbedPane()
 
@@ -190,13 +197,11 @@ class RallyDetailPanel(private val project: Project) : com.intellij.openapi.Disp
         taskList.cellRenderer = TaskCellRenderer()
         taskList.selectionMode = ListSelectionModel.MULTIPLE_INTERVAL_SELECTION
         taskList.emptyText.text = "No tasks"
-        val taskScrollPane = JBScrollPane(taskList)
 
         // Attachments tab
         attachmentList.cellRenderer = AttachmentCellRenderer()
         attachmentList.selectionMode = ListSelectionModel.SINGLE_SELECTION
         attachmentList.emptyText.text = "No attachments"
-        val attachmentScrollPane = JBScrollPane(attachmentList)
 
         // Test Steps tab
         stepList.cellRenderer = StepCellRenderer()
@@ -299,8 +304,8 @@ class RallyDetailPanel(private val project: Project) : com.intellij.openapi.Disp
         if (tabbedPane.tabCount != 3 || (tabbedPane.tabCount > 0 && tabbedPane.getTitleAt(0).startsWith("Test Steps"))) {
             tabbedPane.removeAll()
             tabbedPane.addTab("Test Cases", tcPanel)
-            tabbedPane.addTab("Tasks", JBScrollPane(taskList))
-            tabbedPane.addTab("Attachments", JBScrollPane(attachmentList))
+            tabbedPane.addTab("Tasks", taskScrollPane)
+            tabbedPane.addTab("Attachments", attachmentScrollPane)
         }
 
         // Update header
@@ -334,7 +339,7 @@ class RallyDetailPanel(private val project: Project) : com.intellij.openapi.Disp
         if (artifact is RallyTestCase) {
             // For test cases: show description + test steps only
             tabbedPane.removeAll()
-            tabbedPane.addTab("Test Steps", JBScrollPane(stepList))
+            tabbedPane.addTab("Test Steps", stepScrollPane)
             stepListModel.clear()
 
             ApplicationManager.getApplication().executeOnPooledThread {
@@ -546,8 +551,8 @@ class RallyDetailPanel(private val project: Project) : com.intellij.openapi.Disp
         if (tabbedPane.tabCount != 3 || (tabbedPane.tabCount > 0 && tabbedPane.getTitleAt(0).startsWith("Test Steps"))) {
             tabbedPane.removeAll()
             tabbedPane.addTab("Test Cases", tcPanel)
-            tabbedPane.addTab("Tasks", JBScrollPane(taskList))
-            tabbedPane.addTab("Attachments", JBScrollPane(attachmentList))
+            tabbedPane.addTab("Tasks", taskScrollPane)
+            tabbedPane.addTab("Attachments", attachmentScrollPane)
         }
         updateTabTitles(0, 0, 0)
     }
@@ -689,7 +694,7 @@ class RallyDetailPanel(private val project: Project) : com.intellij.openapi.Disp
             }
         }
         if (stepsTabIndex < 0) {
-            tabbedPane.addTab("Test Steps (...)", JBScrollPane(stepList))
+            tabbedPane.addTab("Test Steps (...)", stepScrollPane)
             stepsTabIndex = tabbedPane.tabCount - 1
         } else {
             tabbedPane.setTitleAt(stepsTabIndex, "Test Steps (...)")
