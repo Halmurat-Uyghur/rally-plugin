@@ -129,7 +129,9 @@ class RallyExporter(private val client: RallyApiClient) {
         val outRoot = Paths.get(outputDir)
         Files.createDirectories(outRoot)
         val file = RallyFileUtils.safeResolve(outRoot, "$testCaseId.json").toFile()
-        file.writeText(gson.toJson(output), StandardCharsets.UTF_8)
+        // Stream straight to the file: gson.toJson(JsonElement, Appendable) emits
+        // identical output without first materializing the whole document as a String.
+        file.bufferedWriter(StandardCharsets.UTF_8).use { gson.toJson(output, it) }
 
         LOG.info("Generated JSON: ${file.absolutePath}")
     }
@@ -230,7 +232,7 @@ class RallyExporter(private val client: RallyApiClient) {
         val outRoot = Paths.get(outputDir)
         Files.createDirectories(outRoot)
         val file = RallyFileUtils.safeResolve(outRoot, "$fileName.json").toFile()
-        file.writeText(gson.toJson(output), StandardCharsets.UTF_8)
+        file.bufferedWriter(StandardCharsets.UTF_8).use { gson.toJson(output, it) }
         LOG.info("Bulk export JSON: ${file.absolutePath} (${array.size()} artifacts)")
         return array.size()
         } finally {
@@ -393,7 +395,7 @@ class RallyExporter(private val client: RallyApiClient) {
         val outRoot = Paths.get(outputDir)
         Files.createDirectories(outRoot)
         val file = RallyFileUtils.safeResolve(outRoot, "$artifactId.json").toFile()
-        file.writeText(gson.toJson(output), StandardCharsets.UTF_8)
+        file.bufferedWriter(StandardCharsets.UTF_8).use { gson.toJson(output, it) }
         LOG.info("Generated JSON: ${file.absolutePath}")
     }
 
