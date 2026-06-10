@@ -556,8 +556,9 @@ class RallyToolWindowPanel(private val project: Project) : Disposable {
                     }
                 }
 
-                // loadIterations handles its own errors and UI updates; join only so
-                // this load cycle doesn't report done with the dropdown still pending.
+                // loadIterations handles its own errors and UI updates; join so this
+                // background cycle doesn't end with the iterations call still in
+                // flight (keeps an immediate follow-up loadTickets from doubling up).
                 if (iterationsFuture != null) {
                     try { iterationsFuture.get() } catch (e: Exception) {
                         LOG.warn("Failed to load iterations", e)
