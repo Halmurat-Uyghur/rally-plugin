@@ -55,4 +55,31 @@ class RallyApiClientCompanionTest {
         val escaped = RallyApiClient.escapeQueryValue("US1\" OR (1=1)")
         assertEquals("US1 OR (1=1)", escaped)
     }
+
+    @Test
+    fun `decodeBody gunzips when content-encoding is gzip`() {
+        val original = """{"QueryResult":{"Results":[]}}"""
+        val baos = java.io.ByteArrayOutputStream()
+        java.util.zip.GZIPOutputStream(baos).use { it.write(original.toByteArray(Charsets.UTF_8)) }
+        assertEquals(original, RallyApiClient.decodeBody(baos.toByteArray(), "gzip"))
+    }
+
+    @Test
+    fun `decodeBody is case-insensitive for the encoding token`() {
+        val original = "plain"
+        val baos = java.io.ByteArrayOutputStream()
+        java.util.zip.GZIPOutputStream(baos).use { it.write(original.toByteArray(Charsets.UTF_8)) }
+        assertEquals(original, RallyApiClient.decodeBody(baos.toByteArray(), "GZIP"))
+    }
+
+    @Test
+    fun `decodeBody passes plain utf8 through when no encoding`() {
+        val original = """{"User":{"UserName":"a@b.c"}}"""
+        assertEquals(original, RallyApiClient.decodeBody(original.toByteArray(Charsets.UTF_8), null))
+    }
+
+    @Test
+    fun `decodeBody passes plain utf8 through for identity encoding`() {
+        assertEquals("x", RallyApiClient.decodeBody("x".toByteArray(Charsets.UTF_8), "identity"))
+    }
 }

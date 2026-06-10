@@ -279,6 +279,22 @@ class RallyApiClient(
         fun escapeQueryValue(value: String): String =
             value.replace("\\", "").replace("\"", "")
 
+        /**
+         * Decode an HTTP response body, gunzipping when Content-Encoding says gzip.
+         * JDK HttpClient neither requests nor decompresses gzip on its own, so the
+         * request side sends Accept-Encoding: gzip and this is the matching decode.
+         * Servers/proxies that ignore or strip the header fall through to plain UTF-8.
+         * Public so unit tests can exercise it without constructing a client.
+         */
+        fun decodeBody(bytes: ByteArray, contentEncoding: String?): String {
+            return if (contentEncoding != null && contentEncoding.equals("gzip", ignoreCase = true)) {
+                java.util.zip.GZIPInputStream(bytes.inputStream()).use { it.readBytes() }
+                    .toString(Charsets.UTF_8)
+            } else {
+                bytes.toString(Charsets.UTF_8)
+            }
+        }
+
         private const val API_VERSION = "v2.0"
         private const val DEFAULT_PAGE_SIZE = 200
         private const val MAX_PAGE_SIZE = 2000
@@ -372,11 +388,16 @@ class RallyApiClient(
             .header(ZSESSION_HEADER, apiKey)
             .header("Content-Type", "application/json")
             .header("Accept", "application/json")
+            .header("Accept-Encoding", "gzip")
             .timeout(Duration.ofSeconds(60))
             .GET()
             .build()
 
-        return executeWithRetry(request, HttpResponse.BodyHandlers.ofString())
+        val response = executeWithRetry(request, HttpResponse.BodyHandlers.ofByteArray())
+        return DecodedResponse(
+            response,
+            decodeBody(response.body(), response.headers().firstValue("Content-Encoding").orElse(null))
+        )
     }
 
     /**
@@ -888,11 +909,16 @@ class RallyApiClient(
             .header(ZSESSION_HEADER, apiKey)
             .header("Content-Type", "application/json")
             .header("Accept", "application/json")
+            .header("Accept-Encoding", "gzip")
             .timeout(Duration.ofSeconds(60))
             .POST(HttpRequest.BodyPublishers.ofString(jsonBody))
             .build()
 
-        return executeWithRetry(request, HttpResponse.BodyHandlers.ofString())
+        val response = executeWithRetry(request, HttpResponse.BodyHandlers.ofByteArray())
+        return DecodedResponse(
+            response,
+            decodeBody(response.body(), response.headers().firstValue("Content-Encoding").orElse(null))
+        )
     }
 
     /**
@@ -1526,4 +1552,24 @@ class RallyApiClient(
             ?: throw RallyApiException("Unexpected response: missing Object in Attachment CreateResult")
         return gson.fromJson(attachObj, RallyAttachment::class.java)
     }
+}
+
+/**
+ * Presents a byte-array HTTP response as HttpResponse<String> with the body already
+ * decoded (and gunzipped when needed), so the many existing call sites that use
+ * response.body()/statusCode()/headers() stay untouched.
+ */
+private class DecodedResponse(
+    private val delegate: HttpResponse<ByteArray>,
+    private val decoded: String
+) : HttpResponse<String> {
+    override fun statusCode(): Int = delegate.statusCode()
+    override fun request(): HttpRequest = delegate.request()
+    override fun previousResponse(): java.util.Optional<HttpResponse<String>> =
+        java.util.Optional.empty()
+    override fun headers(): java.net.http.HttpHeaders = delegate.headers()
+    override fun body(): String = decoded
+    override fun sslSession(): java.util.Optional<javax.net.ssl.SSLSession> = delegate.sslSession()
+    override fun uri(): URI = delegate.uri()
+    override fun version(): HttpClient.Version = delegate.version()
 }
