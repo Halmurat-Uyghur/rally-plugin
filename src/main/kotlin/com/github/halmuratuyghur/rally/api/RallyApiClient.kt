@@ -497,6 +497,12 @@ class RallyApiClient(
     fun getUserByUsername(username: String): RallyUser {
         val ws = workspaceRef
         val safeUsername = escapeQueryValue(username)
+        // The username -> user-ref mapping effectively never changes mid-session,
+        // yet this sits on the blocking path of every create/Start Working action.
+        // Standard TTL applies; clearCache() on manual Refresh evicts it.
+        val cacheKey = "user:$safeUsername|$ws"
+        getCached<RallyUser>(cacheKey)?.let { return it }
+
         val url = buildApiUrl("user") + "?" +
                 buildQuery("(UserName = \"$safeUsername\")", pageSize = 1, workspace = ws)
         val response = executeGet(url)
@@ -505,7 +511,9 @@ class RallyApiClient(
         val root = JsonParser.parseString(response.body()).asJsonObject
         val results = root.getAsJsonObject("QueryResult")?.getAsJsonArray("Results")
         if (results != null && results.size() > 0) {
-            return gson.fromJson(results.get(0), RallyUser::class.java)
+            val user = gson.fromJson(results.get(0), RallyUser::class.java)
+            putCache(cacheKey, user)
+            return user
         }
         throw RallyApiException("No user found with the configured username")
     }
