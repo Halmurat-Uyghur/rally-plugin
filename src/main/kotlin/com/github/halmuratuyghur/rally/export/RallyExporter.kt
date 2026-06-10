@@ -94,6 +94,10 @@ class RallyExporter(private val client: RallyApiClient) {
     /** Per-session cache for downloaded attachment paths (deduplicates across JSON+Markdown export). */
     private val downloadedPaths = ConcurrentHashMap<String, String>()
 
+    /** Per-session cache for downloaded inline-image paths — same dedup role as
+     *  [downloadedPaths]: the JSON and Markdown passes generate identical image jobs. */
+    private val downloadedImagePaths = ConcurrentHashMap<String, String>()
+
     // ── Test Case Export ─────────────────────────────────────────
 
     fun exportTestCaseJson(testCaseId: String, outputDir: String) {
@@ -601,6 +605,8 @@ class RallyExporter(private val client: RallyApiClient) {
     }
 
     private fun downloadRallyImage(objectId: String, originalFileName: String, localFileName: String, imgDir: String): String? {
+        val cacheKey = "$objectId:$imgDir:$localFileName"
+        downloadedImagePaths[cacheKey]?.let { return it }
         try {
             val imgDirPath = Paths.get(imgDir)
             Files.createDirectories(imgDirPath)
@@ -612,8 +618,11 @@ class RallyExporter(private val client: RallyApiClient) {
             val outputPath = RallyFileUtils.safeResolve(imgDirPath, localFileName)
             Files.write(outputPath, fileBytes)
             LOG.info("Downloaded inline image: $outputPath (${fileBytes.size} bytes)")
-            return outputPath.toAbsolutePath().toString()
+            val path = outputPath.toAbsolutePath().toString()
+            downloadedImagePaths[cacheKey] = path
+            return path
         } catch (e: Exception) {
+            // Don't cache failures — allow retry on transient errors
             LOG.warn("Failed to download image OID=$objectId", e)
             return null
         }
