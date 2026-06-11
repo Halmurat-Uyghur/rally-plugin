@@ -13,6 +13,23 @@ import org.junit.Test
  */
 class RallyExporterFormatTest {
 
+    // ── inlineImageLocalName ─────────────────────────────────────
+
+    @Test
+    fun `inlineImageLocalName keys on the attachment objectId`() {
+        // A per-call counter restarted at 1 for every downloadInlineImages call,
+        // so the description's first image and each test step's first image all
+        // mapped to "$artifactId.$ext" and silently overwrote one another.
+        assertEquals("TC123_111.png", RallyExporter.inlineImageLocalName("TC123", "111", "screenshot.png"))
+        assertEquals("TC123_222.png", RallyExporter.inlineImageLocalName("TC123", "222", "screenshot.png"))
+    }
+
+    @Test
+    fun `inlineImageLocalName lowercases the extension and defaults to png`() {
+        assertEquals("US1_7.jpg", RallyExporter.inlineImageLocalName("US1", "7", "photo.JPG"))
+        assertEquals("US1_7.png", RallyExporter.inlineImageLocalName("US1", "7", "no-extension"))
+    }
+
     // ── escapeMarkdown ───────────────────────────────────────────
 
     @Test

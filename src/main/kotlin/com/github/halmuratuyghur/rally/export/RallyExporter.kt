@@ -89,6 +89,18 @@ class RallyExporter(private val client: RallyApiClient) {
                 .replace(RE_MULTI_NEWLINE, "\n\n")
                 .trim()
         }
+
+        /**
+         * Local file name for an exported inline image. Keyed on the attachment
+         * ObjectID (unique in Rally) rather than a per-call counter: the
+         * description and each test step run their own downloadInlineImages()
+         * call, so counters restart at 1 and distinct images collide on the
+         * same "$artifactId.$ext" name, silently overwriting each other on disk.
+         */
+        internal fun inlineImageLocalName(artifactId: String, objectId: String, originalFileName: String): String {
+            val ext = originalFileName.substringAfterLast('.', "png").lowercase()
+            return RallyFileUtils.sanitizeFileName("${artifactId}_${objectId}.$ext")
+        }
     }
 
     /** Per-session cache for downloaded attachment paths (deduplicates across JSON+Markdown export). */
@@ -576,16 +588,11 @@ class RallyExporter(private val client: RallyApiClient) {
         data class ImageJob(val originalSrc: String, val objectId: String, val originalFileName: String, val uniqueFileName: String)
         val jobs = mutableListOf<ImageJob>()
         matcher.reset()
-        var imgCounter = 0
         while (matcher.find() && jobs.size < MAX_INLINE_IMAGES_PER_DESCRIPTION) {
-            imgCounter++
             val originalSrc = matcher.group(2)
             val objectId = matcher.group(3)
             val fileName = matcher.group(4)
-            val ext = fileName.substringAfterLast('.', "png").lowercase()
-            val rawUnique = if (imgCounter == 1) "$artifactId.$ext" else "${artifactId}_$imgCounter.$ext"
-            val uniqueFileName = RallyFileUtils.sanitizeFileName(rawUnique)
-            jobs.add(ImageJob(originalSrc, objectId, fileName, uniqueFileName))
+            jobs.add(ImageJob(originalSrc, objectId, fileName, inlineImageLocalName(artifactId, objectId, fileName)))
         }
 
         if (jobs.isEmpty()) return html
@@ -632,7 +639,10 @@ class RallyExporter(private val client: RallyApiClient) {
             val imgDirPath = Paths.get(imgDir)
             Files.createDirectories(imgDirPath)
 
-            val imageUrl = "${client.webBaseUrl}/slm/attachment/$objectId/$originalFileName"
+            // inlineImageUrl percent-encodes URI-illegal filenames (spaces, quotes) —
+            // without it the regex match is moot: URI() throws inside the download
+            // layer and the image silently stays remote.
+            val imageUrl = RallyHtmlUtils.inlineImageUrl(client.webBaseUrl, objectId, originalFileName)
 
             val fileBytes = client.downloadAttachment(imageUrl, cache = false)
 

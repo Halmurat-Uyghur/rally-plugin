@@ -60,6 +60,70 @@ class RallyHtmlUtilsTest {
     }
 
     @Test
+    fun `matches filename containing apostrophe inside double quotes`() {
+        // Regression: a [^"']+ filename group stopped at the apostrophe and the
+        // backreference then required an immediate closing quote, so find() failed
+        // and the image rendered broken / kept its remote authenticated URL.
+        val html = """<img src="/slm/attachment/123/John's screenshot.png"/>"""
+        val matcher = pattern.matcher(html)
+        assertTrue("apostrophe inside double-quoted src should match", matcher.find())
+        assertEquals("123", matcher.group(3))
+        assertEquals("John's screenshot.png", matcher.group(4))
+    }
+
+    @Test
+    fun `matches filename containing double quote inside single quotes`() {
+        val html = """<img src='/slm/attachment/55/say "cheese".png'/>"""
+        val matcher = pattern.matcher(html)
+        assertTrue("double quote inside single-quoted src should match", matcher.find())
+        assertEquals("55", matcher.group(3))
+        assertEquals("say \"cheese\".png", matcher.group(4))
+    }
+
+    @Test
+    fun `unterminated quote does not swallow a following valid image`() {
+        // Malformed HTML: the first src never closes its quote. The filename group
+        // must not run across tags and consume the next valid image's opening quote.
+        val html = """<img src="/slm/attachment/7/broken.png><p>text</p><img src="/slm/attachment/8/ok.png"/>"""
+        val matcher = pattern.matcher(html)
+        val found = mutableListOf<String>()
+        while (matcher.find()) found.add(matcher.group(3))
+        assertEquals(listOf("8"), found)
+    }
+
+    @Test
+    fun `inlineImageUrl keeps an already-legal url raw`() {
+        assertEquals(
+            "https://r.example/slm/attachment/7/shot.png",
+            RallyHtmlUtils.inlineImageUrl("https://r.example", "7", "shot.png")
+        )
+    }
+
+    @Test
+    fun `inlineImageUrl keeps pre-encoded filenames untouched`() {
+        // Re-encoding would double-encode %20 into %2520 and break the download.
+        assertEquals(
+            "https://r.example/slm/attachment/7/my%20shot.png",
+            RallyHtmlUtils.inlineImageUrl("https://r.example", "7", "my%20shot.png")
+        )
+    }
+
+    @Test
+    fun `inlineImageUrl encodes URI-illegal filenames`() {
+        // The regex can now match filenames with spaces/quotes, but the download
+        // layer rejects URI-illegal characters — without encoding, the matched
+        // image still fails to download (URI() throws inside requireSameHost).
+        assertEquals(
+            "https://r.example/slm/attachment/123/John%27s%20screenshot.png",
+            RallyHtmlUtils.inlineImageUrl("https://r.example", "123", "John's screenshot.png")
+        )
+        assertEquals(
+            "https://r.example/slm/attachment/55/say%20%22cheese%22.png",
+            RallyHtmlUtils.inlineImageUrl("https://r.example", "55", "say \"cheese\".png")
+        )
+    }
+
+    @Test
     fun `multiple matches in a single description`() {
         val html = """
             <p>First: <img src="/slm/attachment/1/a.png"/></p>
