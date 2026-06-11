@@ -1005,11 +1005,15 @@ class RallyDetailPanel(private val project: Project) : com.intellij.openapi.Disp
             CompletableFuture.supplyAsync({
                 if (generation.get() != gen) return@supplyAsync null
                 try {
-                    val fullUrl = if (match.originalSrc.startsWith("http")) {
-                        match.originalSrc
+                    // inlineImageUrl percent-encodes URI-illegal filenames (spaces,
+                    // quotes) that the regex now matches; raw they'd throw inside
+                    // the download layer's URI parse and render broken.
+                    val base = if (match.originalSrc.startsWith("http")) {
+                        match.originalSrc.substringBefore("/slm/attachment/")
                     } else {
-                        "$normalizedBase${match.originalSrc}"
+                        normalizedBase
                     }
+                    val fullUrl = RallyHtmlUtils.inlineImageUrl(base, match.objectId, match.fileName)
                     val bytes = client.downloadAttachment(fullUrl)
                     if (generation.get() != gen) return@supplyAsync null
                     val base64 = Base64.getEncoder().encodeToString(bytes)

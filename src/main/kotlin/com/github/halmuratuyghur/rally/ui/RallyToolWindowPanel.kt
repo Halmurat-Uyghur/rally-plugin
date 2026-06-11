@@ -113,6 +113,35 @@ class RallyToolWindowPanel(private val project: Project) : Disposable {
     @Volatile private var cachedIterations: List<RallyIteration> = emptyList()
     @Volatile private var projectsLoaded = false
     @Volatile private var iterationsLoaded = false
+
+    /**
+     * Monotonic ticket for iteration loads. loadTickets() releases its `loading`
+     * lock as soon as the artifact list arrives, while the iterations fetch may
+     * still be in flight — so a project switch can start a new iterations load
+     * while the previous project's is unfinished. Each load takes a generation
+     * at submit time and discards its result if a newer generation exists,
+     * preventing a slow stale response from repopulating cachedIterations (and
+     * the Sprint dropdown the create dialogs index into) with the wrong
+     * project's sprints.
+     *
+     * The generation is ALSO bumped at every invalidation point (project switch,
+     * settings change, client rebuild — see [invalidateIterations]), not just at
+     * submit time. Otherwise an in-flight load that nothing has superseded yet
+     * would commit its now-wrong-project results, set iterationsLoaded=true, and
+     * thereby suppress the pending reload's own iterations fetch — leaving the
+     * old project's sprints in place indefinitely.
+     */
+    private val iterationLoadGeneration = java.util.concurrent.atomic.AtomicLong()
+
+    /** Guards the generation-check + cachedIterations write so a stale load can't
+     *  interleave its commit between a newer load's check and write. */
+    private val iterationCommitLock = Any()
+
+    /** Invalidate the iteration dropdown AND any in-flight load (see [iterationLoadGeneration]). */
+    private fun invalidateIterations() {
+        iterationsLoaded = false
+        iterationLoadGeneration.incrementAndGet()
+    }
     @Volatile private var lastSettingsSnapshot: String = ""
     private var lastScope: String = ""
     private var lastState: String = ""
@@ -333,7 +362,7 @@ class RallyToolWindowPanel(private val project: Project) : Disposable {
                 lastProject = newProject
                 updateClientProjectRef(projectCombo.selectedIndex)
                 RallySettings.getInstance().selectedProject = newProject
-                iterationsLoaded = false
+                invalidateIterations()
                 lastIteration = ""
                 loadTickets()
             }
@@ -469,7 +498,7 @@ class RallyToolWindowPanel(private val project: Project) : Disposable {
                 if (!projectsLoaded || snapshot != lastSettingsSnapshot) {
                     lastSettingsSnapshot = snapshot
                     loadProjects(client)
-                    iterationsLoaded = false
+                    invalidateIterations()
                 }
 
                 // Determine effective project selection from saved settings + cached data
@@ -490,11 +519,12 @@ class RallyToolWindowPanel(private val project: Project) : Disposable {
                 val needsIterationValidation = savedIter.isNotBlank() && savedIter != "All Sprints"
                 var iterationsFuture: java.util.concurrent.CompletableFuture<Void>? = null
                 if (!iterationsLoaded) {
+                    val generation = iterationLoadGeneration.incrementAndGet()
                     if (needsIterationValidation) {
-                        loadIterations(client)
+                        loadIterations(client, generation)
                     } else {
                         iterationsFuture = java.util.concurrent.CompletableFuture.runAsync({
-                            loadIterations(client)
+                            loadIterations(client, generation)
                         }, client.apiExecutor)
                     }
                 }
@@ -656,13 +686,23 @@ class RallyToolWindowPanel(private val project: Project) : Disposable {
         }
     }
 
-    private fun loadIterations(client: RallyApiClient) {
+    private fun loadIterations(client: RallyApiClient, generation: Long) {
         try {
-            val iterations = client.queryIterations()
-            cachedIterations = iterations
+            // Dedupe by name: the combo is name-keyed and the create dialogs map
+            // combo index → cachedIterations[index-1], so duplicate names (possible
+            // workspace-wide under "All Projects") would make that mapping ambiguous.
+            val iterations = client.queryIterations().distinctBy { it.name }
+            // Check-and-commit atomically: without the lock, a stale load could pass
+            // the check, get descheduled, and overwrite a newer load's list after it
+            // committed — leaving cachedIterations out of sync with the dropdown.
+            synchronized(iterationCommitLock) {
+                if (generation != iterationLoadGeneration.get()) return  // stale — a newer load owns the dropdown
+                cachedIterations = iterations
+            }
 
             // Populate combo on EDT without blocking the pooled thread
             invokeLaterIfAlive {
+                if (generation != iterationLoadGeneration.get()) return@invokeLaterIfAlive
                 val listeners = iterationCombo.actionListeners
                 listeners.forEach { iterationCombo.removeActionListener(it) }
 
@@ -691,6 +731,8 @@ class RallyToolWindowPanel(private val project: Project) : Disposable {
         } catch (e: Exception) {
             LOG.warn("Failed to load iterations", e)
             invokeLaterIfAlive {
+                // A stale failure must not clobber a newer load's dropdown either.
+                if (generation != iterationLoadGeneration.get()) return@invokeLaterIfAlive
                 iterationCombo.removeAllItems()
                 iterationCombo.addItem("All Sprints")
                 iterationCombo.isEnabled = false
@@ -945,14 +987,20 @@ class RallyToolWindowPanel(private val project: Project) : Disposable {
     }
 
     /**
-     * Patch already-updated artifacts (fresh copies live in [allArtifacts]) into the
-     * visible list model in place. Unlike applySearchFilter()'s clear()+addAll()
-     * rebuild, this fires one contentsChanged event per row and preserves the JList
-     * selection — optimistic updates shouldn't collapse the detail panel, drop a
-     * multi-select, or re-measure every row. Rows filtered out of the current view
-     * are simply absent from the model and skipped, same as before.
+     * Patch already-updated artifacts into the visible list model in place. Unlike
+     * applySearchFilter()'s clear()+addAll() rebuild, this fires one contentsChanged
+     * event per row and preserves the JList selection — optimistic updates shouldn't
+     * collapse the detail panel, drop a multi-select, or re-measure every row. Rows
+     * filtered out of the current view are simply absent from the model and skipped.
+     *
+     * Fresh copies normally live in [allArtifacts]; rows that came from a server-side
+     * search have no copy there, so [transform] (the same optimistic update the caller
+     * applied to allArtifacts) is applied to the row itself. The previous fallback
+     * re-ran applySearchFilter(), which cleared the model with selection listeners
+     * detached and re-fired the async search — dropping the selection, skipping the
+     * caller's detail-panel refresh, and overwriting its status text.
      */
-    private fun patchArtifactsInModel(refs: Collection<String>) {
+    private fun patchArtifactsInModel(refs: Collection<String>, transform: (RallyArtifact) -> RallyArtifact) {
         if (refs.isEmpty()) return
         val byRef = HashMap<String, RallyArtifact>()
         for (a in allArtifacts) {
@@ -961,20 +1009,26 @@ class RallyToolWindowPanel(private val project: Project) : Disposable {
         }
         var patched = false
         for (i in 0 until listModel.size()) {
-            val ref = listModel.getElementAt(i).ref ?: continue
-            if (ref in refs && ref !in byRef) {
-                // The row came from a server-side search and has no fresh copy in
-                // allArtifacts to patch in. Fall back to a full re-filter, which
-                // re-fires the search against the just-cleared cache — the one case
-                // where the old rebuild path recovered better than an in-place patch.
-                applySearchFilter()
-                return
-            }
-            val replacement = byRef[ref] ?: continue
-            listModel.setElementAt(replacement, i)
+            val element = listModel.getElementAt(i)
+            val ref = element.ref ?: continue
+            if (ref !in refs) continue
+            listModel.setElementAt(byRef[ref] ?: transform(element), i)
             patched = true
         }
         if (patched) updateStats(java.util.Collections.list(listModel.elements()))
+    }
+
+    /**
+     * Optimistic copy of an artifact with its state field updated — Stories and
+     * Defects carry ScheduleState, Tasks carry State. Shared by changeState /
+     * startWorking / finishWorking so the three paths can't drift (the missing
+     * RallyTaskItem branch once had to be fixed in all three separately).
+     */
+    private fun withState(artifact: RallyArtifact, newState: String): RallyArtifact = when (artifact) {
+        is RallyUserStory -> artifact.copy(scheduleState = newState)
+        is RallyDefect -> artifact.copy(scheduleState = newState)
+        is RallyTaskItem -> artifact.copy(state = newState)
+        else -> artifact
     }
 
     private fun updateStats(artifacts: List<RallyArtifact>) {
@@ -1019,6 +1073,22 @@ class RallyToolWindowPanel(private val project: Project) : Disposable {
         ApplicationManager.getApplication().executeOnPooledThread {
             try {
                 val client = getClient()
+                // Re-check the attachment just before creating anything: doValidate()
+                // sampled the size at OK-press time on the EDT, but the file can be
+                // appended to or deleted before this task runs — discovering that
+                // AFTER the create would orphan the new artifact.
+                if (attachment != null && (!attachment.exists() || attachment.length() > RallyApiClient.MAX_UPLOAD_BYTES)) {
+                    invokeLaterIfAlive {
+                        statusLabel.text = "Create cancelled"
+                        Messages.showErrorDialog(
+                            project,
+                            "Attachment '${attachment.name}' is missing or exceeds the " +
+                                "${RallyApiClient.MAX_UPLOAD_BYTES / (1024 * 1024)} MB upload limit.",
+                            "Rally"
+                        )
+                    }
+                    return@executeOnPooledThread
+                }
                 // Snapshot the volatile caches so a background reload mid-create
                 // can't replace the list between the size check and the index access.
                 val projectsSnapshot = cachedProjects
@@ -1215,6 +1285,20 @@ class RallyToolWindowPanel(private val project: Project) : Disposable {
             if (nameField.text.isNullOrBlank()) {
                 return ValidationInfo("Name is required", nameField)
             }
+            // Block OK on oversized attachments HERE, before anything is created:
+            // the upload only runs after the artifact create succeeds, so a
+            // client-side size failure at that point leaves a created-but-
+            // unattached artifact behind (and a retry duplicates it).
+            val attachLen = attachmentFile?.length() ?: 0L
+            if (attachLen > RallyApiClient.MAX_UPLOAD_BYTES) {
+                val oneMb = 1024L * 1024
+                return ValidationInfo(
+                    // Round up so a just-over-limit file doesn't display as "50 MB exceeds 50 MB".
+                    "Attachment is ${(attachLen + oneMb - 1) / oneMb} MB — Rally's upload limit is " +
+                        "${RallyApiClient.MAX_UPLOAD_BYTES / oneMb} MB",
+                    attachmentPathField
+                )
+            }
             return null
         }
 
@@ -1243,6 +1327,22 @@ class RallyToolWindowPanel(private val project: Project) : Disposable {
         ApplicationManager.getApplication().executeOnPooledThread {
             try {
                 val client = getClient()
+                // Re-check the attachment just before creating anything: doValidate()
+                // sampled the size at OK-press time on the EDT, but the file can be
+                // appended to or deleted before this task runs — discovering that
+                // AFTER the create would orphan the new artifact.
+                if (attachment != null && (!attachment.exists() || attachment.length() > RallyApiClient.MAX_UPLOAD_BYTES)) {
+                    invokeLaterIfAlive {
+                        statusLabel.text = "Create cancelled"
+                        Messages.showErrorDialog(
+                            project,
+                            "Attachment '${attachment.name}' is missing or exceeds the " +
+                                "${RallyApiClient.MAX_UPLOAD_BYTES / (1024 * 1024)} MB upload limit.",
+                            "Rally"
+                        )
+                    }
+                    return@executeOnPooledThread
+                }
                 // Snapshot the volatile caches so a background reload mid-create
                 // can't replace the list between the size check and the index access.
                 val projectsSnapshot = cachedProjects
@@ -1425,6 +1525,20 @@ class RallyToolWindowPanel(private val project: Project) : Disposable {
             if (nameField.text.isNullOrBlank()) {
                 return ValidationInfo("Name is required", nameField)
             }
+            // Block OK on oversized attachments HERE, before anything is created:
+            // the upload only runs after the artifact create succeeds, so a
+            // client-side size failure at that point leaves a created-but-
+            // unattached artifact behind (and a retry duplicates it).
+            val attachLen = attachmentFile?.length() ?: 0L
+            if (attachLen > RallyApiClient.MAX_UPLOAD_BYTES) {
+                val oneMb = 1024L * 1024
+                return ValidationInfo(
+                    // Round up so a just-over-limit file doesn't display as "50 MB exceeds 50 MB".
+                    "Attachment is ${(attachLen + oneMb - 1) / oneMb} MB — Rally's upload limit is " +
+                        "${RallyApiClient.MAX_UPLOAD_BYTES / oneMb} MB",
+                    attachmentPathField
+                )
+            }
             return null
         }
 
@@ -1583,21 +1697,24 @@ class RallyToolWindowPanel(private val project: Project) : Disposable {
                 client.updateArtifactField(ref, type, "PlanEstimate", points)
                 // Optimistic UI update
                 invokeLaterIfAlive {
-                    allArtifacts = allArtifacts.map { artifact ->
-                        if (artifact.ref == ref) {
-                            when (artifact) {
-                                is RallyUserStory -> artifact.copy(planEstimate = points)
-                                is RallyDefect -> artifact.copy(planEstimate = points)
-                                else -> artifact
-                            }
-                        } else artifact
+                    val withPoints: (RallyArtifact) -> RallyArtifact = { artifact ->
+                        when (artifact) {
+                            is RallyUserStory -> artifact.copy(planEstimate = points)
+                            is RallyDefect -> artifact.copy(planEstimate = points)
+                            else -> artifact
+                        }
                     }
+                    allArtifacts = allArtifacts.map { if (it.ref == ref) withPoints(it) else it }
                     client.clearArtifactCache()
                     // In-place patch preserves the selection, so no restore dance needed.
-                    patchArtifactsInModel(listOf(ref))
+                    patchArtifactsInModel(listOf(ref), withPoints)
                     statusLabel.text = "Updated ${selected.formattedID} points"
-                    // Refresh detail panel metadata with the updated artifact
-                    allArtifacts.firstOrNull { it.ref == ref }?.let { detailPanel.showArtifact(it, client) }
+                    // Refresh detail panel metadata from the patched model row —
+                    // selectedValue covers server-search rows too, which have no
+                    // copy in allArtifacts (same pattern as changeState).
+                    artifactList.selectedValue?.let { sel ->
+                        if (sel.ref == ref) detailPanel.showArtifact(sel, client)
+                    }
                 }
             } catch (e: Exception) {
                 LOG.error("Failed to update points", e)
@@ -1675,20 +1792,9 @@ class RallyToolWindowPanel(private val project: Project) : Disposable {
                     )
                 }
                 // Optimistic update: patch in-memory list instead of full reload.
-                // Tasks use State, not ScheduleState — the earlier else-branch left
-                // tasks showing stale state until the next manual refresh.
-                allArtifacts = allArtifacts.map { artifact ->
-                    if (artifact.ref in successfulRefs) {
-                        when (artifact) {
-                            is RallyUserStory -> artifact.copy(scheduleState = newState)
-                            is RallyDefect -> artifact.copy(scheduleState = newState)
-                            is RallyTaskItem -> artifact.copy(state = newState)
-                            else -> artifact
-                        }
-                    } else artifact
-                }
+                allArtifacts = allArtifacts.map { if (it.ref in successfulRefs) withState(it, newState) else it }
                 client.clearArtifactCache()
-                patchArtifactsInModel(successfulRefs)
+                patchArtifactsInModel(successfulRefs) { withState(it, newState) }
                 // The selection survives the in-place patch, so refresh the open
                 // detail panel if its artifact was among the updated rows — otherwise
                 // the header badge keeps showing the pre-update state.
@@ -1838,20 +1944,11 @@ class RallyToolWindowPanel(private val project: Project) : Disposable {
             invokeLaterIfAlive {
                 // Only update local state if Rally accepted the state change
                 if (stateChangeSucceeded) {
-                    allArtifacts = allArtifacts.map { artifact ->
-                        if (artifact.ref == ticketRef) {
-                            when (artifact) {
-                                is RallyUserStory -> artifact.copy(scheduleState = "In-Progress")
-                                is RallyDefect -> artifact.copy(scheduleState = "In-Progress")
-                                is RallyTaskItem -> artifact.copy(state = "In-Progress")
-                                else -> artifact
-                            }
-                        } else artifact
-                    }
+                    allArtifacts = allArtifacts.map { if (it.ref == ticketRef) withState(it, "In-Progress") else it }
                 }
                 client.clearArtifactCache()
                 if (stateChangeSucceeded) {
-                    patchArtifactsInModel(listOf(ticketRef))
+                    patchArtifactsInModel(listOf(ticketRef)) { withState(it, "In-Progress") }
                     // Keep the open detail panel's header in sync (see changeState).
                     artifactList.selectedValue?.let { sel ->
                         if (sel.ref == ticketRef) detailPanel.showArtifact(sel, client)
@@ -1905,18 +2002,9 @@ class RallyToolWindowPanel(private val project: Project) : Disposable {
                 client.updateArtifactState(ticketRef, ticketType, "Completed")
 
                 invokeLaterIfAlive {
-                    allArtifacts = allArtifacts.map { artifact ->
-                        if (artifact.ref == ticketRef) {
-                            when (artifact) {
-                                is RallyUserStory -> artifact.copy(scheduleState = "Completed")
-                                is RallyDefect -> artifact.copy(scheduleState = "Completed")
-                                is RallyTaskItem -> artifact.copy(state = "Completed")
-                                else -> artifact
-                            }
-                        } else artifact
-                    }
+                    allArtifacts = allArtifacts.map { if (it.ref == ticketRef) withState(it, "Completed") else it }
                     client.clearArtifactCache()
-                    patchArtifactsInModel(listOf(ticketRef))
+                    patchArtifactsInModel(listOf(ticketRef)) { withState(it, "Completed") }
                     // Keep the open detail panel's header in sync (see changeState).
                     artifactList.selectedValue?.let { sel ->
                         if (sel.ref == ticketRef) detailPanel.showArtifact(sel, client)
@@ -1963,7 +2051,7 @@ class RallyToolWindowPanel(private val project: Project) : Disposable {
                 currentClient = RallyApiClient(serverUrl, apiKey)
                 // Reset caches when client changes
                 projectsLoaded = false
-                iterationsLoaded = false
+                invalidateIterations()
             }
             // Workspace always comes from settings
             currentClient!!.workspaceRef = workspaceRef
