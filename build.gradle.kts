@@ -54,8 +54,14 @@ intellijPlatform {
     }
 
     signing {
-        certificateChainFile = providers.environmentVariable("CERTIFICATE_CHAIN").map { layout.projectDirectory.file(it) }.orNull
-        privateKeyFile = providers.environmentVariable("PRIVATE_KEY").map { layout.projectDirectory.file(it) }.orNull
+        // CERTIFICATE_CHAIN and PRIVATE_KEY carry PEM *content* (the convention the
+        // 1.x DSL established), not file paths — map them to the 2.x content
+        // properties, not certificateChainFile/privateKeyFile. Mapping content to
+        // the file properties treats a multi-line PEM blob as a project-relative
+        // path: file-not-found at signPlugin, or InvalidPathException on Windows
+        // at configuration time.
+        certificateChain = providers.environmentVariable("CERTIFICATE_CHAIN")
+        privateKey = providers.environmentVariable("PRIVATE_KEY")
         password = providers.environmentVariable("PRIVATE_KEY_PASSWORD")
     }
 
