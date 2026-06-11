@@ -3,3 +3,4 @@
 /.gradle/
 /.sandbox/
 /.intellijPlatform/
+.DS_Store

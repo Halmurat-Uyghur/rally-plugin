@@ -74,7 +74,7 @@ src/main/kotlin/com/github/halmuratuyghur/rally/
 | **Inline image cap** | Max 10 inline images per description in detail panel | Prevents thread pool saturation |
 | **JBColor pre-allocation** | Static color constants in `RallyColors` object shared across renderers | Avoids GC pressure from repeated allocations |
 | **Precompiled regex** | Static Regex patterns in RallyExporter for HTML stripping | Avoids re-creation per call during bulk export |
-| **Retry with backoff** | Exponential backoff + Retry-After for 429/502/503/504 | Resilient to transient Rally API errors |
+| **Retry with backoff** | Exponential backoff + Retry-After (delta-seconds; HTTP-date falls back to backoff) for 429/502/503/504 — creates/uploads retry only on 429 (rejected before processing, replay-safe) and never on ambiguous 502/504/connection errors | Resilient to transient errors without duplicate-artifact risk |
 | **Pre-allocated TypeToken** | Static TypeToken fields in companion object | Avoids repeated reflection per API call |
 | **Bulk mode in export** | `enterBulkMode()`/`exitBulkMode()` wraps export operations | 15-min cache TTL prevents re-fetching during long exports |
 | **Reduced thread pool** | API executor reduced from 8 to 4 threads | Prevents thread saturation while maintaining parallelism |
@@ -82,7 +82,7 @@ src/main/kotlin/com/github/halmuratuyghur/rally/
 | **Jittered backoff** | ±30% jitter on retry delays | Prevents thundering herd on transient failures |
 | **gzip transport** | `Accept-Encoding: gzip` + transparent decode for all JSON responses (raw-body fallback on mislabeled encoding) | 5-10x smaller payloads on cold loads |
 | **Parallel iterations** | Sprint list loads concurrently with artifacts when no saved sprint needs validation | Removes a serial RTT from cold start/project switch |
-| **In-place row patching** | `patchArtifactsInModel` replaces full list rebuilds after optimistic updates (falls back to re-filter for server-search rows) | Selection preserved, single-cell repaint |
+| **In-place row patching** | `patchArtifactsInModel` replaces full list rebuilds after optimistic updates (server-search rows get the same optimistic transform applied in place) | Selection preserved, single-cell repaint |
 | **Fixed cell height** | Prototype-measured `fixedCellHeight` on the ticket list | O(1) instead of O(n) layout per model event |
 | **Off-EDT description pipeline** | Description fetch + image resolution + `wrapHtml` run on the unbounded pooled thread, not apiExecutor/EDT | apiExecutor never parks on image joins; EDT stays responsive on multi-MB descriptions |
 | **Export download dedup** | Inline images + attachments deduplicated across JSON+Markdown passes; raw-bytes attachment endpoint with base64 fallback; exporter bypasses the UI image cache | Halves export downloads, ~1x peak heap, no UI-cache eviction |
@@ -98,7 +98,10 @@ src/main/kotlin/com/github/halmuratuyghur/rally/
 - Test cases use `WorkProduct` ref to link to parent user stories/defects
 - Attachment content is fetched via a Content ref that returns base64-encoded data
 - Inline images in descriptions use `/slm/attachment/<OID>/<filename>` URLs, downloaded via zsessionid auth
-- Iterations are scoped per-project; the plugin uses server-side project filtering to avoid duplicates
+- Iterations are scoped per-project; the plugin pins `queryIterations()` to the selected project (projectScopeUp/Down=false) and dedupes by name to avoid duplicate same-named sprints
+- Query values escape `"` as `\"` and `\` as `\\` (Broadcom-documented); other documented escapes (`\q` for `'`, `\l`/`\g` for `<`/`>`) are deliberately not applied — those characters round-trip fine unescaped in practice
+- Rally's attachment upload limit is 50 MB; the create dialogs validate size in `doValidate()` and re-check on the pooled thread BEFORE the artifact is created (a post-create upload failure would orphan the new artifact)
+- `requireSameHost` pins host, scheme, AND effective port — the configured Server URL must match the host/port Rally uses in its `_ref` URLs (relevant behind reverse proxies with port rewriting)
 
 ## Data Model (Tier 1 Fields)
 
@@ -106,7 +109,7 @@ Core artifact models (`RallyUserStory`, `RallyDefect`, `RallyTaskItem`) include:
 
 ## Testing
 
-106 unit tests across 10 classes: Rally API JSON parsing, exporter formatting, file/HTML utils, sprint summary, gzip body decoding, status color mapping, and StatusBadge behavior. Run via `./gradlew test`.
+132 unit tests across 10 classes: Rally API JSON parsing, query-value escaping, Retry-After parsing, host/scheme/port validation, field-update bodies, exporter formatting, file/HTML utils, sprint summary, gzip body decoding, status color mapping, and StatusBadge behavior. Run via `./gradlew test`.
 
 ## Build & Run
 
