@@ -91,15 +91,17 @@ class RallyApiClient(
      */
     val webBaseUrl: String get() = normalizedServerUrl
 
-    /** Pre-computed allowed host and scheme for security validation. */
+    /** Pre-computed allowed host, scheme, and effective port for security validation. */
     private val allowedHost: String
     private val allowedScheme: String
+    private val allowedPort: Int
     init {
         val uri = try { URI(normalizedServerUrl) } catch (_: Exception) { null }
         allowedHost = uri?.host?.lowercase()
             ?: throw RallySecurityException("Cannot determine host from server URL: $normalizedServerUrl")
         allowedScheme = uri.scheme?.lowercase()
             ?: throw RallySecurityException("Cannot determine scheme from server URL: $normalizedServerUrl")
+        allowedPort = if (uri.port != -1) uri.port else defaultPort(allowedScheme)
         if (allowedScheme == "http") {
             // The API key travels in the zsessionid header on every request. Over plain HTTP
             // it is exposed to anyone on the network path. We don't hard-fail (some on-prem
@@ -109,10 +111,11 @@ class RallyApiClient(
     }
 
     /**
-     * Validate that a URL targets the configured Rally server on the configured scheme.
-     * Relative URLs (null host) pass through safely — they resolve against normalizedServerUrl.
-     * Absolute URLs must match both host and scheme so a poisoned `_ref` can't leak the
-     * API key to another host or downgrade https → http.
+     * Validate that a URL targets the configured Rally server on the configured scheme
+     * and port. Relative URLs (null host) pass through safely — they resolve against
+     * normalizedServerUrl. Absolute URLs must match host, scheme, and effective port so
+     * a poisoned `_ref` can't leak the API key to another host, downgrade https → http,
+     * or reach a different service on another port of the same (shared, on-prem) host.
      *
      * `internal` (not private) so the security contract is unit-testable from the same module.
      */
@@ -132,6 +135,12 @@ class RallyApiClient(
         if (targetScheme != null && targetScheme != allowedScheme) {
             throw RallySecurityException(
                 "Security: refusing request with scheme '$targetScheme' (expected '$allowedScheme')"
+            )
+        }
+        val targetPort = if (uri.port != -1) uri.port else defaultPort(targetScheme ?: allowedScheme)
+        if (targetPort != allowedPort) {
+            throw RallySecurityException(
+                "Security: refusing request to port $targetPort (expected $allowedPort)"
             )
         }
     }
@@ -273,11 +282,65 @@ class RallyApiClient(
         private val TYPE_TEST_STEPS = object : TypeToken<RallyQueryResult<RallyTestCaseStep>>() {}.type
 
         /**
-         * Escape a value for use inside Rally WSAPI query strings.
-         * Strips quotes and backslashes that could break query syntax.
+         * Escape a value for use inside Rally WSAPI query strings, per the
+         * documented escape table (Broadcom TechDocs, Query Syntax → Escaping
+         * Special Characters): '\' → \\ and '"' → \". These are the only two
+         * characters that can terminate the quoted value, so escaping them
+         * (rather than the previous stripping) keeps names containing quotes
+         * searchable while still preventing breakout from a "(Field = \"...\")"
+         * template — every '"' in the output is preceded by a backslash and
+         * every literal backslash is doubled. Other specials the table lists
+         * (\q for ', \l for <, \g for >, escaped parens, ...) are deliberately
+         * passed through: they can't break out of the quoted string, they have
+         * always round-tripped unescaped in practice, and applying WSAPI's
+         * parser-specific forms would risk breaking searches that work today.
+         * Backslash must be replaced first so introduced escapes aren't doubled.
          */
         fun escapeQueryValue(value: String): String =
-            value.replace("\\", "").replace("\"", "")
+            value.replace("\\", "\\\\").replace("\"", "\\\"")
+
+        /**
+         * Parse a Retry-After header value into milliseconds. Returns null for
+         * anything that isn't a positive delta-seconds value — including the
+         * RFC 7231 HTTP-date form some CDNs/LBs send — so the retry loop falls
+         * back to exponential backoff instead of escaping with an uncaught
+         * NumberFormatException. Seconds are capped at a day; the caller still
+         * clamps the final delay to MAX_RETRY_DELAY_MS.
+         */
+        fun retryAfterMillis(headerValue: String?): Long? =
+            headerValue?.trim()?.toLongOrNull()
+                ?.takeIf { it > 0 }
+                ?.coerceAtMost(86_400)
+                ?.times(1000)
+
+        /**
+         * Gson configured with serializeNulls for field-update bodies only:
+         * an explicit JSON null means "clear this field" to Rally, but default
+         * Gson drops null map entries entirely — turning a clear into an empty
+         * no-op update body that Rally happily accepts without changing anything.
+         */
+        private val GSON_SERIALIZE_NULLS = com.google.gson.GsonBuilder().serializeNulls().create()
+
+        /** Body for updateArtifactField. Public on the companion so the null-clear contract is unit-testable. */
+        fun buildFieldUpdateBody(artifactType: String, field: String, value: Any?): String =
+            GSON_SERIALIZE_NULLS.toJson(mapOf(artifactType to mapOf(field to value)))
+
+        /**
+         * Server-search disjunction for searchArtifacts. FormattedID deliberately
+         * uses `contains` — the server search is the only path that can match
+         * tickets outside the loaded list, and a bare "1234" must still find
+         * US1234/DE1234. Pinned by a unit test because this template silently
+         * regressed to exact-match once already.
+         */
+        fun buildSearchQuery(escapedText: String): String =
+            "((Name contains \"$escapedText\") OR (FormattedID contains \"$escapedText\"))"
+
+        /** Effective port for URLs without an explicit one. */
+        private fun defaultPort(scheme: String?): Int = when (scheme) {
+            "http" -> 80
+            "https" -> 443
+            else -> -1
+        }
 
         /**
          * Decode an HTTP response body, gunzipping when Content-Encoding says gzip.
@@ -325,13 +388,18 @@ class RallyApiClient(
         private const val MAX_RETRY_DELAY_MS = 30_000L
 
         /**
-         * Hard cap on attachment upload size. Each upload base64-encodes the file
-         * (~4N/3 bytes) and then wraps it in a JSON body, so peak heap is roughly
-         * 2-3x the file size. 25 MB caps the worst case at ~75 MB, well within a
-         * typical IDE heap, and still covers anything users would reasonably
-         * attach to a Rally artifact.
+         * Hard cap on attachment upload size — Rally's own documented attachment
+         * limit is 50 MB, so anything larger is guaranteed to fail server-side.
+         * Each upload base64-encodes the file (~4N/3 bytes) and wraps it in a
+         * JSON body, so peak heap is roughly 2-3x the file size; the create
+         * dialogs validate against this limit in doValidate() (before OK is
+         * accepted) and re-check on the pooled thread just before the create
+         * call, so an oversized file can't leave behind a created-but-unattached
+         * story/defect.
+         *
+         * `internal` so the dialogs can pre-validate against the same constant.
          */
-        private const val MAX_UPLOAD_BYTES = 25L * 1024 * 1024
+        internal const val MAX_UPLOAD_BYTES = 50L * 1024 * 1024
         private val RETRYABLE_STATUS_CODES = setOf(429, 502, 503, 504)
 
         // Fields for list queries (lightweight — no Description)
@@ -787,7 +855,17 @@ class RallyApiClient(
         return sorted
     }
 
+    /** Last partial-failure balloon, for throttling. */
+    @Volatile private var lastPartialFailureNotifyMs = 0L
+
     private fun notifyPartialFailure(errors: List<String>) {
+        // Throttle: searchArtifacts calls this from the debounced per-keystroke
+        // search path, so a degraded endpoint would otherwise raise a balloon
+        // (plus an Event Log entry) for every query variation. One reminder a
+        // minute is enough; the WARN log at each call site keeps full fidelity.
+        val now = System.currentTimeMillis()
+        if (now - lastPartialFailureNotifyMs < 60_000) return
+        lastPartialFailureNotifyMs = now
         try {
             val group = com.intellij.notification.NotificationGroupManager.getInstance()
                 .getNotificationGroup("Rally")
@@ -820,8 +898,7 @@ class RallyApiClient(
         val cacheKey = "search:${searchText}|${scope}|${pageSize}|${maxResults}|${ws}|${pr}"
         getCached<List<RallyArtifact>>(cacheKey)?.let { return it }
 
-        val safeText = escapeQueryValue(searchText)
-        val query = "((Name contains \"$safeText\") OR (FormattedID = \"$safeText\"))"
+        val query = buildSearchQuery(escapeQueryValue(searchText))
 
         if (scope == "Test Cases") {
             val tcResults: List<RallyArtifact> = queryAllTestCases(query, pageSize, maxResults)
@@ -849,6 +926,14 @@ class RallyApiClient(
         }
 
         val sorted = results.sortedByDescending { it.lastUpdateDate }
+        // Same partial-failure policy as queryAllArtifacts: surface the gap and
+        // skip the cache, or stories-only results would be served silently for
+        // the full TTL (15 minutes in bulk mode) even after Rally recovers.
+        if (errors.isNotEmpty()) {
+            LOG.warn("searchArtifacts partial failure: ${errors.joinToString("; ")}")
+            notifyPartialFailure(errors)
+            return sorted
+        }
         putCache(cacheKey, sorted)
         return sorted
     }
@@ -907,8 +992,15 @@ class RallyApiClient(
 
     /**
      * Execute HTTP POST request with retry for transient errors.
+     *
+     * @param retry Pass false for non-idempotent requests (creates, uploads): a
+     * 502/504 from a proxy or a dropped connection doesn't prove Rally didn't
+     * commit the write, so replaying the body can create duplicate artifacts.
+     * 429 is still retried even then — a rate-limit rejection happens before
+     * processing, so a replay can't duplicate anything. Updates that set a
+     * field to an absolute value are idempotent and keep the default.
      */
-    private fun executePost(url: String, jsonBody: String): HttpResponse<String> {
+    private fun executePost(url: String, jsonBody: String, retry: Boolean = true): HttpResponse<String> {
         requireSameHost(url)
         val request = HttpRequest.newBuilder()
             .uri(URI.create(url))
@@ -920,7 +1012,12 @@ class RallyApiClient(
             .POST(HttpRequest.BodyPublishers.ofString(jsonBody))
             .build()
 
-        val response = executeWithRetry(request, HttpResponse.BodyHandlers.ofByteArray())
+        val response = executeWithRetry(
+            request,
+            HttpResponse.BodyHandlers.ofByteArray(),
+            retryableStatuses = if (retry) RETRYABLE_STATUS_CODES else setOf(429),
+            retryOnConnectError = retry
+        )
         return DecodedResponse(
             response,
             decodeBody(response.body(), response.headers().firstValue("Content-Encoding").orElse(null))
@@ -929,38 +1026,53 @@ class RallyApiClient(
 
     /**
      * Send an HTTP request with automatic retry + exponential backoff for transient errors.
-     * Retries up to MAX_RETRIES times for status codes 429, 502, 503, 504.
-     * Honors the Retry-After header when present (capped at 30s).
+     * Retries up to MAX_RETRIES times for status codes in [retryableStatuses].
+     * Honors the Retry-After header when present.
+     *
+     * @param retryableStatuses status codes worth retrying. Non-idempotent callers
+     * narrow this to 429 (rejected before processing — replay-safe).
+     * @param retryOnConnectError whether send-level failures retry. Non-idempotent
+     * callers pass false: a dropped connection is ambiguous about whether the
+     * write was committed.
      */
     private fun <T> executeWithRetry(
         request: HttpRequest,
-        bodyHandler: HttpResponse.BodyHandler<T>
+        bodyHandler: HttpResponse.BodyHandler<T>,
+        retryableStatuses: Set<Int> = RETRYABLE_STATUS_CODES,
+        retryOnConnectError: Boolean = true
     ): HttpResponse<T> {
         var lastException: Exception? = null
         for (attempt in 0..MAX_RETRIES) {
             val response = try {
                 httpClient.send(request, bodyHandler)
+            } catch (ie: InterruptedException) {
+                // dispose()/shutdownNow() interrupts workers parked in send(). Don't
+                // burn the interrupt on more retries (up to 3 × 60s against a client
+                // that's being torn down) — restore the flag and abort immediately.
+                Thread.currentThread().interrupt()
+                throw RallyConnectionException("Interrupted while sending request to Rally", ie)
             } catch (e: Exception) {
                 lastException = e
-                if (attempt < MAX_RETRIES) {
+                if (retryOnConnectError && attempt < MAX_RETRIES) {
                     sleepForRetry(backoffMs(attempt))
                     continue
                 }
                 throw RallyConnectionException("Failed to connect to Rally server: ${e.message}", e)
             }
 
-            if (response.statusCode() !in RETRYABLE_STATUS_CODES || attempt == MAX_RETRIES) {
+            if (response.statusCode() !in retryableStatuses || attempt == MAX_RETRIES) {
                 return response
             }
 
             // Respect Retry-After header if present, otherwise use exponential backoff.
+            // retryAfterMillis returns null for the RFC 7231 HTTP-date form (delta-seconds
+            // only), falling back to backoff instead of throwing NumberFormatException.
             // The total honored delay is capped at MAX_RETRY_DELAY_MS so a single
             // worker thread can't be parked indefinitely on a shared 4-thread pool,
             // and each individual sleep is capped at MAX_RETRY_SLEEP_MS for interrupt
             // responsiveness (see sleepForRetry).
-            val retryAfter = response.headers().firstValueAsLong("Retry-After").orElse(-1)
-            val delayMs = (if (retryAfter > 0) (retryAfter * 1000) else backoffMs(attempt))
-                .coerceAtMost(MAX_RETRY_DELAY_MS)
+            val retryAfter = retryAfterMillis(response.headers().firstValue("Retry-After").orElse(null))
+            val delayMs = (retryAfter ?: backoffMs(attempt)).coerceAtMost(MAX_RETRY_DELAY_MS)
             sleepForRetry(delayMs)
         }
         // Should not reach here, but satisfy the compiler. Don't synthesize a fake
@@ -1064,8 +1176,7 @@ class RallyApiClient(
      */
     fun updateArtifactField(artifactRef: String, artifactType: String, field: String, value: Any?) {
         requireValidArtifactType(artifactType)
-        val fieldMap = if (value != null) mapOf(field to value) else mapOf(field to com.google.gson.JsonNull.INSTANCE)
-        val body = gson.toJson(mapOf(artifactType to fieldMap))
+        val body = buildFieldUpdateBody(artifactType, field, value)
         val response = executePost(artifactRef, body)
         handleResponse(response)
 
@@ -1162,12 +1273,14 @@ class RallyApiClient(
         if (!ws.isNullOrBlank()) {
             url += "&workspace=${URLEncoder.encode(normalizeRef("workspace", ws), StandardCharsets.UTF_8)}"
         }
-        // Scope via URL params only. An earlier (Project=...) query filter contradicted
-        // projectScopeUp/Down and silently pinned results to one project. Rely on the
-        // canonical scope params so the chosen project plus its descendants are covered.
+        // Pin to exactly the selected project (scopeUp/Down=false). Rally project
+        // trees routinely name sprints identically across teams ("Sprint 42"), so
+        // including ancestors/descendants floods the dropdown with same-named
+        // duplicates — and the create dialogs map combo index → cachedIterations,
+        // so a duplicate row can resolve to a sibling project's iteration.
         if (!pr.isNullOrBlank()) {
             url += "&project=${URLEncoder.encode(normalizeRef("project", pr), StandardCharsets.UTF_8)}"
-            url += "&projectScopeUp=true&projectScopeDown=true"
+            url += "&projectScopeUp=false&projectScopeDown=false"
         }
 
         val response = executeGet(url)
@@ -1413,7 +1526,7 @@ class RallyApiClient(
         if (!iterationRef.isNullOrBlank()) fields["Iteration"] = iterationRef
 
         val body = gson.toJson(mapOf("HierarchicalRequirement" to fields))
-        val response = executePost(url, body)
+        val response = executePost(url, body, retry = false)
         handleResponse(response)
 
         val json = JsonParser.parseString(response.body()).asJsonObject
@@ -1451,7 +1564,7 @@ class RallyApiClient(
         if (!priority.isNullOrBlank()) fields["Priority"] = priority
 
         val body = gson.toJson(mapOf("Defect" to fields))
-        val response = executePost(url, body)
+        val response = executePost(url, body, retry = false)
         handleResponse(response)
 
         val json = JsonParser.parseString(response.body()).asJsonObject
@@ -1487,7 +1600,7 @@ class RallyApiClient(
         if (estimate != null) fields["Estimate"] = estimate
 
         val body = gson.toJson(mapOf("Task" to fields))
-        val response = executePost(url, body)
+        val response = executePost(url, body, retry = false)
         handleResponse(response)
 
         val json = JsonParser.parseString(response.body()).asJsonObject
@@ -1525,7 +1638,7 @@ class RallyApiClient(
         // Step 1: Create AttachmentContent
         val contentUrl = buildApiUrl("attachmentcontent/create")
         val contentBody = gson.toJson(mapOf("AttachmentContent" to mapOf("Content" to base64Content)))
-        val contentResponse = executePost(contentUrl, contentBody)
+        val contentResponse = executePost(contentUrl, contentBody, retry = false)
         handleResponse(contentResponse)
 
         val contentJson = JsonParser.parseString(contentResponse.body()).asJsonObject
@@ -1548,7 +1661,7 @@ class RallyApiClient(
         )
         val attachUrl = buildApiUrl("attachment/create")
         val attachBody = gson.toJson(mapOf("Attachment" to attachFields))
-        val attachResponse = executePost(attachUrl, attachBody)
+        val attachResponse = executePost(attachUrl, attachBody, retry = false)
         handleResponse(attachResponse)
 
         val attachJson = JsonParser.parseString(attachResponse.body()).asJsonObject

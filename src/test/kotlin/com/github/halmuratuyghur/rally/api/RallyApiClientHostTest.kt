@@ -52,4 +52,46 @@ class RallyApiClientHostTest {
         // Same host with different casing must be treated as the same host, not refused.
         client.requireSameHost("https://RALLY1.RallyDev.COM/slm/webservice/v2.0/defect/1")
     }
+
+    @Test
+    fun `same host on a different port is refused`() {
+        // Host+scheme alone are not enough: a poisoned _ref or inline-image URL
+        // pointing at another port of the same (shared, on-prem) host would still
+        // receive the zsessionid API key.
+        assertThrows(RallySecurityException::class.java) {
+            client.requireSameHost("https://rally1.rallydev.com:8444/slm/webservice/v2.0/user")
+        }
+    }
+
+    @Test
+    fun `explicit default port on same host is allowed`() {
+        // :443 on an https server URL with no explicit port is the same endpoint.
+        client.requireSameHost("https://rally1.rallydev.com:443/slm/webservice/v2.0/defect/1")
+    }
+
+    @Test
+    fun `scheme-relative url on the same host is allowed`() {
+        // No scheme means the effective port falls back to the configured
+        // scheme's default — removing that fallback would break these refs.
+        client.requireSameHost("//rally1.rallydev.com/slm/attachment/1/a.png")
+    }
+
+    @Test
+    fun `http client uses port 80 as its default`() {
+        val plainClient = RallyApiClient("http://rally.internal.example", "fake-key")
+        plainClient.requireSameHost("http://rally.internal.example:80/slm/webservice/v2.0/user")
+        assertThrows(RallySecurityException::class.java) {
+            plainClient.requireSameHost("http://rally.internal.example:8080/slm/webservice/v2.0/user")
+        }
+    }
+
+    @Test
+    fun `client configured with explicit port accepts that port and refuses the default`() {
+        val portClient = RallyApiClient("https://rally.corp.example:8443", "fake-key")
+        portClient.requireSameHost("https://rally.corp.example:8443/slm/webservice/v2.0/user")
+        assertThrows(RallySecurityException::class.java) {
+            // No explicit port resolves to 443 — a different endpoint than :8443.
+            portClient.requireSameHost("https://rally.corp.example/slm/webservice/v2.0/user")
+        }
+    }
 }

@@ -1,6 +1,7 @@
 package com.github.halmuratuyghur.rally.api
 
 import org.junit.Assert.assertEquals
+import org.junit.Assert.assertNull
 import org.junit.Test
 
 /**
@@ -10,20 +11,41 @@ import org.junit.Test
  */
 class RallyApiClientCompanionTest {
 
+    // ── escapeQueryValue ─────────────────────────────────────────
+    // Rally WSAPI documents backslash escapes for query values (Broadcom
+    // TechDocs "Query Syntax → Escaping Special Characters"): '"' → \" and
+    // '\' → \\. Escaping (rather than the old stripping) keeps quoted
+    // sprint/story names searchable while still preventing breakout from a
+    // "(Field = \"...\")" template — every quote in the output is preceded by
+    // a backslash. Only these two are escaped: they're the only characters
+    // that can terminate the quoted string, and other specials (apostrophes,
+    // parens, angle brackets) have always passed through unescaped and worked.
+
     @Test
-    fun `escapeQueryValue strips double quotes`() {
+    fun `escapeQueryValue escapes double quotes`() {
         assertEquals(
-            "Story with quotes",
+            "Story \\\"with\\\" quotes",
             RallyApiClient.escapeQueryValue("Story \"with\" quotes")
         )
     }
 
     @Test
-    fun `escapeQueryValue strips backslashes`() {
+    fun `escapeQueryValue escapes backslashes`() {
         assertEquals(
-            "pathfile",
+            "path\\\\file",
             RallyApiClient.escapeQueryValue("path\\file")
         )
+    }
+
+    @Test
+    fun `escapeQueryValue passes other special characters through`() {
+        // Apostrophes, parens, angle brackets, etc. cannot break out of the
+        // quoted value and have always round-tripped fine — escaping them with
+        // WSAPI's parser-specific forms (\q, \l, \g) would risk breaking
+        // searches that work today on servers that don't honor those forms.
+        assertEquals("John's sprint", RallyApiClient.escapeQueryValue("John's sprint"))
+        assertEquals("<b>bold</b>", RallyApiClient.escapeQueryValue("<b>bold</b>"))
+        assertEquals("a^b{c[d?e(f)g*h", RallyApiClient.escapeQueryValue("a^b{c[d?e(f)g*h"))
     }
 
     @Test
@@ -40,20 +62,116 @@ class RallyApiClientCompanionTest {
     }
 
     @Test
-    fun `escapeQueryValue strips both quotes and backslashes together`() {
-        // A mixed payload that previously could escape out of a "(Field = \"$value\")"
-        // query template — no quotes or backslashes survive the escape.
-        val escaped = RallyApiClient.escapeQueryValue("a\\b\"c\\d\"e")
-        assertEquals("abcde", escaped)
+    fun `escapeQueryValue keeps quoted sprint names searchable`() {
+        // The headline regression of the stripping approach: an iteration named
+        // 'Sprint "Phoenix" 12' built a query for 'Sprint Phoenix 12' — zero
+        // results for a sprint that has tickets. Escaped, the value round-trips.
+        assertEquals(
+            "Sprint \\\"Phoenix\\\" 12",
+            RallyApiClient.escapeQueryValue("Sprint \"Phoenix\" 12")
+        )
     }
 
     @Test
     fun `escapeQueryValue is a defense for FormattedID lookups`() {
         // A user could paste "US1\" OR (1=1)" into a Find-by-ID field. After the
-        // escape, no quote remains, so the surrounding (FormattedID = "...")
-        // wrapper still produces a single bound condition.
-        val escaped = RallyApiClient.escapeQueryValue("US1\" OR (1=1)")
-        assertEquals("US1 OR (1=1)", escaped)
+        // escape, every quote is backslash-escaped, so the surrounding
+        // (FormattedID = "...") wrapper still produces a single bound condition.
+        assertEquals(
+            "US1\\\" OR (1=1)",
+            RallyApiClient.escapeQueryValue("US1\" OR (1=1)")
+        )
+    }
+
+    @Test
+    fun `escapeQueryValue neutralizes trailing backslash`() {
+        // A lone trailing backslash must not be able to swallow the template's
+        // closing quote: it doubles into a literal backslash instead.
+        assertEquals("x\\\\", RallyApiClient.escapeQueryValue("x\\"))
+    }
+
+    @Test
+    fun `escapeQueryValue handles adjacent backslash and quote`() {
+        // Backslash-first ordering: the input backslash doubles, then the quote
+        // gets its own escape — a reversed implementation would re-escape the
+        // backslashes it just introduced.
+        assertEquals("a\\\\\\\"b", RallyApiClient.escapeQueryValue("a\\\"b"))
+    }
+
+    @Test
+    fun `buildSearchQuery uses contains for both Name and FormattedID`() {
+        // Regression pin: 'FormattedID contains' was silently changed to '=' once
+        // on this branch, breaking partial-ID server search ("1234" stopped
+        // finding US1234). The template is load-bearing; keep it pinned.
+        assertEquals(
+            "((Name contains \"abc\") OR (FormattedID contains \"abc\"))",
+            RallyApiClient.buildSearchQuery("abc")
+        )
+    }
+
+    // ── retryAfterMillis ─────────────────────────────────────────
+
+    @Test
+    fun `retryAfterMillis parses delta-seconds`() {
+        assertEquals(5000L, RallyApiClient.retryAfterMillis("5"))
+    }
+
+    @Test
+    fun `retryAfterMillis trims whitespace`() {
+        assertEquals(7000L, RallyApiClient.retryAfterMillis(" 7 "))
+    }
+
+    @Test
+    fun `retryAfterMillis returns null for RFC 7231 http-date`() {
+        // CDNs/LBs may send an HTTP-date instead of delta-seconds; this must
+        // fall back to exponential backoff, not throw NumberFormatException.
+        assertNull(RallyApiClient.retryAfterMillis("Wed, 10 Jun 2026 12:00:00 GMT"))
+    }
+
+    @Test
+    fun `retryAfterMillis returns null for null header`() {
+        assertNull(RallyApiClient.retryAfterMillis(null))
+    }
+
+    @Test
+    fun `retryAfterMillis returns null for zero and negative values`() {
+        assertNull(RallyApiClient.retryAfterMillis("0"))
+        assertNull(RallyApiClient.retryAfterMillis("-3"))
+    }
+
+    @Test
+    fun `retryAfterMillis caps delta-seconds at one day`() {
+        assertEquals(86_400_000L, RallyApiClient.retryAfterMillis("90000"))
+        // The cap is also what keeps the *1000 conversion from overflowing Long.
+        assertEquals(86_400_000L, RallyApiClient.retryAfterMillis("${Long.MAX_VALUE}"))
+    }
+
+    // ── buildFieldUpdateBody ─────────────────────────────────────
+
+    @Test
+    fun `buildFieldUpdateBody serializes explicit null to clear a field`() {
+        // Default Gson (serializeNulls=false) silently drops the name/value
+        // pair, turning "clear PlanEstimate" into an empty no-op update body.
+        assertEquals(
+            """{"HierarchicalRequirement":{"PlanEstimate":null}}""",
+            RallyApiClient.buildFieldUpdateBody("HierarchicalRequirement", "PlanEstimate", null)
+        )
+    }
+
+    @Test
+    fun `buildFieldUpdateBody serializes numeric values`() {
+        assertEquals(
+            """{"HierarchicalRequirement":{"PlanEstimate":8.0}}""",
+            RallyApiClient.buildFieldUpdateBody("HierarchicalRequirement", "PlanEstimate", 8.0)
+        )
+    }
+
+    @Test
+    fun `buildFieldUpdateBody serializes string values`() {
+        assertEquals(
+            """{"Defect":{"Severity":"Major Problem"}}""",
+            RallyApiClient.buildFieldUpdateBody("Defect", "Severity", "Major Problem")
+        )
     }
 
     @Test
