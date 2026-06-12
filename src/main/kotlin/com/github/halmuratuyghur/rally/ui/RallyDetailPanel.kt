@@ -15,12 +15,14 @@ import com.github.halmuratuyghur.rally.export.RallyExporter
 import com.github.halmuratuyghur.rally.settings.RallySettings
 import com.github.halmuratuyghur.rally.util.RallyFileUtils
 import com.github.halmuratuyghur.rally.util.RallyHtmlUtils
+import com.intellij.ui.ColorUtil
 import com.intellij.ui.JBColor
 import com.intellij.ui.components.JBLabel
 import com.intellij.ui.components.JBList
 import com.intellij.ui.components.JBScrollPane
 import com.intellij.ui.components.JBTabbedPane
 import com.intellij.util.ui.JBUI
+import com.intellij.util.ui.UIUtil
 import java.awt.*
 import java.awt.event.MouseAdapter
 import java.awt.event.MouseEvent
@@ -49,8 +51,12 @@ class RallyDetailPanel(private val project: Project) : com.intellij.openapi.Disp
         // than a generic "No description". The leading control char ensures Rally
         // HTML can never accidentally collide with this value.
         private const val DESC_AUTH_FAILED = "\u0001RALLY_AUTH_FAILED\u0001"
+        // Uses a `class` (not an inline `style='color:...'`) because wrapHtml runs the
+        // description through RallyHtmlUtils.stripInlineColors, which would otherwise strip
+        // the red. The `.rally-error` rule is defined in wrapHtml's <style> block, so the
+        // error keeps its emphasis while Rally-authored colors are normalized away.
         private const val AUTH_ERROR_HTML =
-            "<span style='color:#c00'><b>Authentication failed.</b> " +
+            "<span class='rally-error'><b>Authentication failed.</b> " +
             "Check your Rally API key in Settings → Tools → Rally.</span>"
 
         // Colors are defined in RallyColors object
@@ -963,6 +969,12 @@ class RallyDetailPanel(private val project: Project) : com.intellij.openapi.Disp
         val safe = html
             .replace("</body>", "&lt;/body&gt;", ignoreCase = true)
             .replace("</html>", "&lt;/html&gt;", ignoreCase = true)
+        // Strip Rally's baked-in inline colors so the theme colors below win. Rally
+        // descriptions carry colors authored for its light web UI; on a dark IDE theme
+        // those render as white blocks and invisible dark-on-dark text (see
+        // RallyHtmlUtils.stripInlineColors). Done before the src neutralizer — they
+        // target disjoint attributes, so order is irrelevant.
+        val decolored = RallyHtmlUtils.stripInlineColors(safe)
         // Neutralize external http(s):// (and protocol-relative) image src attributes so
         // JTextPane never makes an off-host network fetch when rendering a Rally-authored
         // description (tracking pixels / SSRF-style leaks). This is the single chokepoint:
@@ -970,8 +982,32 @@ class RallyDetailPanel(private val project: Project) : com.intellij.openapi.Disp
         // "description already loaded" path and descriptions with only external images
         // (which skip resolveInlineImages' own pass). data:…;base64 URIs produced by
         // resolveInlineImages are left intact — the pattern only matches http(s):// or //.
-        val neutralized = EXTERNAL_SRC_PATTERN.matcher(safe).replaceAll("src=\"\"")
-        return "<html><body style='font-family:sans-serif;font-size:${fontSize}px;margin:4px;'>$neutralized</body></html>"
+        val neutralized = EXTERNAL_SRC_PATTERN.matcher(decolored).replaceAll("src=\"\"")
+        // Pin text + link colors to the current IDE theme. With inline colors stripped
+        // above, the body color cascades to every span, so the description renders in one
+        // consistent, readable color on the pane's theme background (and adapts to a Light
+        // theme too). Swing anchors keep their own color and ignore the body color, so they
+        // get their own rule. ColorUtil.toHex returns 6 hex digits with no leading '#'.
+        // These UIManager-backed reads are cheap and thread-safe; wrapHtml runs on a pooled
+        // thread for freshly fetched descriptions and on the EDT for the already-loaded fast
+        // path (showArtifact) — both are fine. An open description won't recolor live on a
+        // theme switch; reselecting the ticket re-renders it.
+        val fg = ColorUtil.toHex(UIUtil.getLabelForeground())
+        val link = ColorUtil.toHex(JBUI.CurrentTheme.Link.Foreground.ENABLED)
+        // The error red must be theme-derived too — a hardcoded #c00 is dim on dark
+        // themes, the same low-contrast problem this whole strip exists to fix.
+        val err = ColorUtil.toHex(JBColor.namedColor("Label.errorForeground", JBColor.RED))
+        // The theme-variable body color lives in the per-document inline <body style>, so it
+        // is discarded with the document on the next setText and can never accumulate stale
+        // entries in the shared HTMLEditorKit stylesheet across ticket selections / theme
+        // switches. The static <style> selectors (link, error class) can't be expressed
+        // inline; they're idempotent, so repeated identical inserts are harmless.
+        return "<html><head><style>" +
+            "a{color:#$link;}" +
+            ".rally-error{color:#$err;}" +
+            "</style></head>" +
+            "<body style='font-family:sans-serif;font-size:${fontSize}px;margin:4px;color:#$fg;'>" +
+            "$neutralized</body></html>"
     }
 
     /**
