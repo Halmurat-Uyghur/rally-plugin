@@ -32,7 +32,7 @@ src/main/kotlin/com/github/halmuratuyghur/rally/
 │   ├── StatusBadge.kt             # Tinted-chip status badge component (opaque pastel fill)
 │   └── RallyColors.kt             # Shared color constants + StateColors chips + forState()/forMethod() lookup
 ├── util/
-│   └── RallyHtmlUtils.kt          # Shared HTML/image utilities
+│   └── RallyHtmlUtils.kt          # Shared HTML/image utilities + author-color stripping
 ```
 
 ## Key Design Decisions
@@ -43,6 +43,7 @@ src/main/kotlin/com/github/halmuratuyghur/rally/
 - **Detail panel layout** — Vertical split: description (top, 40%) + JBTabbedPane (bottom, 60%) with three tabs: Test Cases, Tasks, Attachments. When a Test Case is selected, tabs switch to show Test Steps instead. Tab titles show counts (e.g., "Test Cases (5)")
 - **Lazy description loading** — List queries use `LIST_FIELDS` (no Description) for smaller payloads. Description is fetched on demand via `fetchDescription()` when the detail panel opens
 - **Parallel detail loading** — Description runs synchronously on the pooled thread (fetch + image resolution + `wrapHtml` all off-EDT), while test cases, tasks, and attachments load concurrently via `CompletableFuture` on apiExecutor. Generation-based cancellation (AtomicLong) prevents stale selections from continuing to update the UI
+- **Theme-pinned description colors** — `wrapHtml` (the single chokepoint for every non-empty `descriptionPane.text` assignment) runs descriptions through `RallyHtmlUtils.stripInlineColors`: inline `color`/`background-color`/`background` declarations, presentational `color`/`bgcolor` attributes, and whole `<style>`/`<link>` elements are removed — Rally colors are authored for its light web UI and render as white blocks / dark-on-dark text on dark themes. Body/link/error colors are then pinned from the current theme (`UIUtil.getLabelForeground()`, `JBUI.CurrentTheme.Link.Foreground.ENABLED`, `Label.errorForeground` via the `.rally-error` class). Stripping is required because Swing's HTMLEditorKit gives author inline styles precedence over stylesheet rules (no `!important`). No live re-render on LaF switch — reselecting the ticket re-renders; a `LafManagerListener` is a known follow-up. Exporter paths intentionally keep author colors
 - **Caching** — LRU query cache (access-ordered `LinkedHashMap`, max 200 entries) with 2-minute TTL. Downloaded images use a bounded in-memory cache (10 MB cap, 1 MB per-image cap). Bulk export mode extends TTL to 15 minutes. `getUserByUsername` is cached; `clearArtifactCache` no longer evicts `currentIteration` (date-derived, mutation-independent)
 - **Threading**: `executeOnPooledThread` for API calls, `invokeLater` for UI updates, `CompletableFuture.supplyAsync` for parallel operations. Dedicated `apiExecutor` thread pool in RallyApiClient (4 daemon threads)
 - **Disposal safety** — `RallyToolWindowPanel` implements `Disposable` with a `disposed` flag. `dispose()` and `getClient()` are synchronized on `clientLock` so no client can be created after disposal begins. All `getClient()` call sites are guarded with try/catch to prevent late background tasks from crashing
@@ -109,7 +110,7 @@ Core artifact models (`RallyUserStory`, `RallyDefect`, `RallyTaskItem`) include:
 
 ## Testing
 
-132 unit tests across 10 classes: Rally API JSON parsing, query-value escaping, Retry-After parsing, host/scheme/port validation, field-update bodies, exporter formatting, file/HTML utils, sprint summary, gzip body decoding, status color mapping, and StatusBadge behavior. Run via `./gradlew test`.
+145 unit tests across 10 classes: Rally API JSON parsing, query-value escaping, Retry-After parsing, host/scheme/port validation, field-update bodies, exporter formatting, file/HTML utils (incl. inline-color/embedded-stylesheet stripping), sprint summary, gzip body decoding, status color mapping, and StatusBadge behavior. Run via `./gradlew test`.
 
 ## Build & Run
 
@@ -120,6 +121,8 @@ Core artifact models (`RallyUserStory`, `RallyDefect`, `RallyTaskItem`) include:
 ```
 
 Warnings during `runIde` about GradleJvmSupportMatrix, Maven, or memory leaks on UI switch are IntelliJ 2024.1 internal issues — not from this plugin.
+
+`verifyPlugin` uses a pinned IDE list (`pluginVerification.ides`, one release per major across 241–261) instead of the default dynamic `recommended()` feed: that feed serves 2025.3.x distributions whose layout (no `modules/module-descriptors.jar`) the newest Plugin Verifier (1.405) cannot read, which kills the whole task with `InvalidIdeException`. Re-add 2025.3 or return to `recommended()` once the verifier supports the new layout. Verifier-reported deprecated/scheduled-for-removal API usages (7 on newer IDEs) are the deliberate 241-floor keeps.
 
 ## Current Filter Options (in Tool Window)
 
@@ -132,7 +135,7 @@ Any State, Idea, Defined, In-Progress, Completed, Accepted, Active (excludes Acc
 ## What's Implemented
 
 - Tool window with ticket list, search (debounced client-side + server-side fallback), filters, and sprint summary
-- **Detail panel** — selecting a ticket shows its HTML description (with inline images resolved to base64 data URIs, capped at 10 and guarded against stale selections) and three tabs:
+- **Detail panel** — selecting a ticket shows its HTML description (inline images resolved to base64 data URIs, capped at 10 and guarded against stale selections; Rally's light-UI author colors stripped and body/link/error colors pinned to the IDE theme) and three tabs:
   - **Test Cases** — linked test cases with Method (Automated/Manual) badges and LastVerdict (Pass/Fail)
   - **Tasks** — child tasks with State badge, Owner name, ToDo hours
   - **Attachments** — linked files with content-type icon and human-readable file size. Double-click to save to disk. Context menu: Save to Disk, Open in Browser
