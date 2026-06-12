@@ -20,6 +20,7 @@ import com.github.halmuratuyghur.rally.util.RallyFileUtils
 import com.github.halmuratuyghur.rally.util.RallyHtmlUtils
 import com.intellij.ui.ColorUtil
 import com.intellij.ui.JBColor
+import com.intellij.ui.OnePixelSplitter
 import com.intellij.ui.awt.RelativePoint
 import com.intellij.ui.components.JBLabel
 import com.intellij.ui.components.JBList
@@ -237,21 +238,13 @@ class RallyDetailPanel(private val project: Project) : com.intellij.openapi.Disp
         tabbedPane.addTab("Tasks", taskScrollPane)
         tabbedPane.addTab("Attachments", attachmentScrollPane)
 
-        // Split: description (40%) / tabbed pane (60%) with thin dark divider
-        val splitPane = JSplitPane(JSplitPane.VERTICAL_SPLIT, descScrollPane, tabbedPane)
-        splitPane.resizeWeight = 0.4
-        splitPane.border = null
-        splitPane.dividerSize = 3
-        splitPane.setUI(object : javax.swing.plaf.basic.BasicSplitPaneUI() {
-            override fun createDefaultDivider(): javax.swing.plaf.basic.BasicSplitPaneDivider {
-                return object : javax.swing.plaf.basic.BasicSplitPaneDivider(this) {
-                    override fun paint(g: Graphics) {
-                        g.color = RallyColors.DIVIDER
-                        g.fillRect(0, 0, width, height)
-                    }
-                }
-            }
-        })
+        // Split: description (top, 40%) / tabbed pane (bottom). OnePixelSplitter renders a
+        // thin divider but exposes a wide invisible drag zone, so the boundary is easy to
+        // grab — a raw 3px JSplitPane divider tucked under the description's titled border
+        // was technically draggable but practically impossible to hit.
+        val splitPane = OnePixelSplitter(true, 0.4f)
+        splitPane.firstComponent = descScrollPane
+        splitPane.secondComponent = tabbedPane
 
         val headerWrapper = JPanel(BorderLayout())
         headerWrapper.add(headerPanel, BorderLayout.NORTH)
