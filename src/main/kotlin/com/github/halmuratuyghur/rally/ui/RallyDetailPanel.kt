@@ -8,8 +8,11 @@ import com.intellij.openapi.fileChooser.FileChooserFactory
 import com.intellij.openapi.fileChooser.FileSaverDescriptor
 import com.intellij.openapi.project.Project
 import com.intellij.openapi.ui.DialogWrapper
+import com.intellij.openapi.ui.MessageType
 import com.intellij.openapi.ui.Messages
 import com.intellij.openapi.ui.ValidationInfo
+import com.intellij.openapi.ui.popup.Balloon
+import com.intellij.openapi.ui.popup.JBPopupFactory
 import com.github.halmuratuyghur.rally.api.*
 import com.github.halmuratuyghur.rally.export.RallyExporter
 import com.github.halmuratuyghur.rally.settings.RallySettings
@@ -17,6 +20,7 @@ import com.github.halmuratuyghur.rally.util.RallyFileUtils
 import com.github.halmuratuyghur.rally.util.RallyHtmlUtils
 import com.intellij.ui.ColorUtil
 import com.intellij.ui.JBColor
+import com.intellij.ui.awt.RelativePoint
 import com.intellij.ui.components.JBLabel
 import com.intellij.ui.components.JBList
 import com.intellij.ui.components.JBScrollPane
@@ -152,13 +156,16 @@ class RallyDetailPanel(private val project: Project) : com.intellij.openapi.Disp
         isVisible = false
         isBorderPainted = false
         isContentAreaFilled = false
-        border = JBUI.Borders.empty(0, 4)
+        isFocusPainted = false
+        // Zero the LaF's default button margin (~14px horizontally on some themes) so the
+        // copy/browser icons sit snugly together; keep a hair of padding via the border.
+        margin = JBUI.emptyInsets()
+        border = JBUI.Borders.empty(0, 2)
         addActionListener {
             val id = currentArtifact?.formattedID ?: return@addActionListener
             val clipboard = java.awt.Toolkit.getDefaultToolkit().systemClipboard
             clipboard.setContents(java.awt.datatransfer.StringSelection(id), null)
-            toolTipText = "Copied $id!"
-            javax.swing.Timer(2000) { toolTipText = "Copy FormattedID" }.apply { isRepeats = false; start() }
+            showCopiedBalloon("Copied $id", this)
         }
     }
 
@@ -167,7 +174,9 @@ class RallyDetailPanel(private val project: Project) : com.intellij.openapi.Disp
         isVisible = false
         isBorderPainted = false
         isContentAreaFilled = false
-        border = JBUI.Borders.empty(0, 4)
+        isFocusPainted = false
+        margin = JBUI.emptyInsets()
+        border = JBUI.Borders.empty(0, 2)
         addActionListener {
             val artifact = currentArtifact ?: return@addActionListener
             val client = currentClient ?: return@addActionListener
@@ -186,10 +195,15 @@ class RallyDetailPanel(private val project: Project) : com.intellij.openapi.Disp
         headerPanel.border = JBUI.Borders.empty(6, 8)
         headerLabel.font = headerLabel.font.deriveFont(Font.BOLD, 13f)
         headerPanel.add(headerLabel, BorderLayout.CENTER)
-        val headerRightPanel = JPanel(FlowLayout(FlowLayout.RIGHT, 2, 0))
+        // Copy + browser icons grouped with no gap so they read as one cluster; a wider
+        // gap then separates that cluster from the state badge.
+        val actionButtonsPanel = JPanel(FlowLayout(FlowLayout.RIGHT, 0, 0))
+        actionButtonsPanel.isOpaque = false
+        actionButtonsPanel.add(copyButton)
+        actionButtonsPanel.add(browserButton)
+        val headerRightPanel = JPanel(FlowLayout(FlowLayout.RIGHT, 8, 0))
         headerRightPanel.isOpaque = false
-        headerRightPanel.add(copyButton)
-        headerRightPanel.add(browserButton)
+        headerRightPanel.add(actionButtonsPanel)
         headerRightPanel.add(stateBadge)
         headerPanel.add(headerRightPanel, BorderLayout.EAST)
 
@@ -607,6 +621,19 @@ class RallyDetailPanel(private val project: Project) : com.intellij.openapi.Disp
             tabbedPane.setTitleAt(TAB_TASKS, "Tasks ($tasks)")
             tabbedPane.setTitleAt(TAB_ATTACHMENTS, "Attachments ($attachments)")
         }
+    }
+
+    /** Brief, self-fading "Copied …" balloon anchored above [anchor] — visible clipboard feedback. */
+    private fun showCopiedBalloon(message: String, anchor: JComponent) {
+        if (disposed) return
+        // createHtmlTextBalloonBuilder treats its argument as HTML; FormattedIDs are safe
+        // but escape defensively so an unexpected value can never inject markup.
+        val safe = com.intellij.openapi.util.text.StringUtil.escapeXmlEntities(message)
+        val balloon = JBPopupFactory.getInstance()
+            .createHtmlTextBalloonBuilder(safe, MessageType.INFO, null)
+            .setFadeoutTime(1500)
+            .createBalloon()
+        balloon.show(RelativePoint.getCenterOf(anchor), Balloon.Position.above)
     }
 
     // ── Test Case Context Menu ──────────────────────────────────
