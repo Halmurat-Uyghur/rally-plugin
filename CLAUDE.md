@@ -10,12 +10,12 @@ IntelliJ IDEA plugin that provides a **Tool Window** for browsing and managing R
 - **Build**: Gradle with Kotlin DSL, `org.jetbrains.intellij.platform` plugin 2.16.0 (IntelliJ Platform Gradle Plugin 2.x). `instrumentCode = false` (all-Kotlin module, zero `.java`/`.form` files, so the form/@NotNull instrumentation pass is pure overhead)
 - **Target IDE**: IntelliJ IDEA Community 2024.1 (builds 241–263.*)
 - **Dependencies**: Gson 2.10.1 (JSON), JUnit 4.13.2 (tests)
-- **Plugin ID**: `com.github.halmuratuyghur.rally` (NOT `com.intellij.*` — that prefix is reserved by JetBrains)
+- **Plugin ID**: `com.github.halmurat.rally` (NOT `com.intellij.*` — that prefix is reserved by JetBrains)
 
 ## Architecture
 
 ```
-src/main/kotlin/com/github/halmuratuyghur/rally/
+src/main/kotlin/com/github/halmurat/rally/
 ├── api/
 │   ├── RallyApiClient.kt         # HTTP client for Rally WSAPI 2.0 (caching + parallel queries; requireNoErrors, queryAllArtifactsParallel, parseCreateResult/checkOperationResult helpers)
 │   ├── RallyApiModels.kt         # Data classes + ArtifactQueryResult (partial-failure wrapper) + requireNoErrors extension

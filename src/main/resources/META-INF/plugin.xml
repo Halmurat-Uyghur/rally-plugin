@@ -1,5 +1,5 @@
 <idea-plugin>
-    <id>com.github.halmuratuyghur.rally</id>
+    <id>com.github.halmurat.rally</id>
     <name>Rally Integration</name>
     <vendor url="https://github.com/Halmurat-Uyghur">Halmurat</vendor>
 
@@ -37,16 +37,16 @@
             id="Rally"
             anchor="bottom"
             icon="/icons/rally.svg"
-            factoryClass="com.github.halmuratuyghur.rally.ui.RallyToolWindowFactory"/>
+            factoryClass="com.github.halmurat.rally.ui.RallyToolWindowFactory"/>
 
         <applicationConfigurable
             parentId="tools"
-            id="com.github.halmuratuyghur.rally.settings"
+            id="com.github.halmurat.rally.settings"
             displayName="Rally"
-            instance="com.github.halmuratuyghur.rally.settings.RallySettingsConfigurable"/>
+            instance="com.github.halmurat.rally.settings.RallySettingsConfigurable"/>
 
         <applicationService
-            serviceImplementation="com.github.halmuratuyghur.rally.settings.RallySettings"/>
+            serviceImplementation="com.github.halmurat.rally.settings.RallySettings"/>
 
         <notificationGroup
             id="Rally"
