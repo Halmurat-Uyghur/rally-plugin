@@ -118,6 +118,18 @@ class RallyExporter(private val client: RallyApiClient) {
         }
     }
 
+    /**
+     * Create a dedicated, DAEMON-threaded download pool. Daemon so an in-flight export can never
+     * stall IDE/tool-window shutdown: CompletableFuture.join() is not interruptible, so a worker
+     * parked on it ignores apiExecutor.shutdownNow(); daemon threads let the JVM/IDE proceed
+     * regardless. Separate from client.apiExecutor to avoid the self-deadlock the export path
+     * runs ON apiExecutor would otherwise hit (see the call sites).
+     */
+    private fun newDownloadPool(size: Int) =
+        Executors.newFixedThreadPool(size) { r ->
+            Thread(r, "rally-export-download").apply { isDaemon = true }
+        }
+
     /** Per-session cache for downloaded attachment paths (deduplicates across JSON+Markdown export). */
     private val downloadedPaths = ConcurrentHashMap<String, String>()
 
@@ -348,6 +360,13 @@ class RallyExporter(private val client: RallyApiClient) {
     /**
      * Pre-fetch descriptions for all artifacts in parallel (bounded to 10 concurrent).
      * Returns a map of FormattedID -> description HTML.
+     *
+     * THREADING CONTRACT: this fans out N tasks onto [RallyApiClient.apiExecutor] (the fixed
+     * 4-thread pool) and blocks the caller on join(), so it MUST NOT be called from an
+     * apiExecutor thread — that worker would park on join() while its own tasks queue behind it,
+     * starving the pool (the same hazard `queryAllArtifactsParallel` and the dedicated export
+     * download pools are designed around). Its callers (`bulkExport*`) run on
+     * `executeOnPooledThread`, never on apiExecutor.
      */
     private fun prefetchDescriptions(
         artifacts: List<com.github.halmuratuyghur.rally.api.RallyArtifact>,
@@ -568,7 +587,7 @@ class RallyExporter(private val client: RallyApiClient) {
         // into an index-keyed array so the emitted JSON order matches the input order
         // regardless of completion order.
         val savedPaths = arrayOfNulls<String>(attachments.size)
-        val pool = Executors.newFixedThreadPool(minOf(DOWNLOAD_POOL_SIZE, attachments.size))
+        val pool = newDownloadPool(minOf(DOWNLOAD_POOL_SIZE, attachments.size))
         try {
             val futures = attachments.mapIndexed { index, att ->
                 val attName = att.name ?: "unnamed"
@@ -704,7 +723,7 @@ class RallyExporter(private val client: RallyApiClient) {
         val imgDir = RallyFileUtils.safeResolve(Paths.get(outputDir), "${artifactId}_images").toString()
         val byFile = ConcurrentHashMap<String, String>()  // uniqueFileName -> relative local path
         val uniqueJobs = jobs.distinctBy { it.uniqueFileName }
-        val pool = Executors.newFixedThreadPool(minOf(DOWNLOAD_POOL_SIZE, uniqueJobs.size))
+        val pool = newDownloadPool(minOf(DOWNLOAD_POOL_SIZE, uniqueJobs.size))
         try {
             val futures = uniqueJobs.map { job ->
                 CompletableFuture.runAsync({

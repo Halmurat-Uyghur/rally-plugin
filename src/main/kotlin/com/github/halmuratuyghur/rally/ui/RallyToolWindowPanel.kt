@@ -1192,12 +1192,37 @@ class RallyToolWindowPanel(private val project: Project) : Disposable {
                         .setFadeoutTime(3000)
                         .createBalloon()
                     balloon.show(RelativePoint.getSouthWestOf(statusLabel), Balloon.Position.above)
-                    // Optimistic update: prepend new item instead of full reload
-                    allArtifacts = listOf(created) + allArtifacts
                     client.clearArtifactCache()
-                    applySearchFilter()
-                    val index = listModel.indexOf(created)
-                    if (index >= 0) artifactList.selectedIndex = index
+                    // Optimistic update: prepend the new item instead of a full reload — but only
+                    // if it belongs in the current view, and make it visible if a filter would hide
+                    // it. Otherwise a successful create looks like a silent no-op and invites a
+                    // duplicate. The new row's type comes from its concrete class (a fresh
+                    // CreateResult may not echo _type/ScheduleState).
+                    val scope = scopeCombo.selectedItem as? String ?: Scope.ALL_TICKETS.displayName
+                    val matchesScope = when (Scope.fromDisplay(scope)) {
+                        Scope.USER_STORIES -> created is RallyUserStory
+                        Scope.DEFECTS -> created is RallyDefect
+                        Scope.TEST_CASES -> created is RallyTestCase
+                        else -> true
+                    }
+                    if (matchesScope) {
+                        allArtifacts = listOf(created) + allArtifacts
+                        // A fresh CreateResult doesn't echo ScheduleState/State, so any non-"Any
+                        // State" filter would hide the new row. Relax it (client-side, no network)
+                        // so the just-created ticket is actually shown.
+                        val stateFilter = stateCombo.selectedItem as? String ?: StateFilter.ANY.displayName
+                        if (StateFilter.fromDisplay(stateFilter) != StateFilter.ANY &&
+                            applyStateFilter(stateFilter, listOf(created)).isEmpty()) {
+                            stateCombo.selectedItem = StateFilter.ANY.displayName  // listener re-runs applySearchFilter
+                        } else {
+                            applySearchFilter()
+                        }
+                        val index = listModel.indexOf(created)
+                        if (index >= 0) artifactList.selectedIndex = index
+                    }
+                    // Wrong-scope create (e.g. a User Story while viewing "Defects"): not shown
+                    // here — the success balloon confirms it; it appears on the next refresh /
+                    // scope switch (the cache was already cleared above).
                 }
 
                 // Phase 2: optional attachment upload. A failure here is NON-fatal — the
