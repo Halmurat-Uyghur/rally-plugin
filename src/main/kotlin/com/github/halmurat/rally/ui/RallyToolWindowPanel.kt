@@ -98,6 +98,10 @@ class RallyToolWindowPanel(private val project: Project) : Disposable {
     // thread and read on the EDT (hence @Volatile); `displayedArtifacts` is EDT-confined.
     @Volatile private var sprintIteration: RallyIteration? = null
     private var displayedArtifacts: List<RallyArtifact> = emptyList()
+    // Whether the last loadTickets() returned a partial result (one of stories/defects failed).
+    // Remembered so a later client-side state-filter change can re-render the "N loaded" status
+    // with the right count AND keep the "(incomplete)" + warning marker (LOW-9 follow-up).
+    private var lastLoadIncomplete = false
     @Volatile private var currentClient: RallyApiClient? = null
     @Volatile private var loading = false
     @Volatile private var pendingReload = false
@@ -348,6 +352,10 @@ class RallyToolWindowPanel(private val project: Project) : Disposable {
             // (P6/LOW-9). Scope/project/sprint changes still call loadTickets() because they
             // can require a different query.
             applySearchFilter()
+            // applySearchFilter() updates statsLabel but not the "N loaded" status; refresh it so
+            // the count tracks the new filter. Skip while a search is active — the search path owns
+            // statusLabel ("Searching Rally...", "N found via server search").
+            if (searchField.text.isBlank()) refreshLoadedStatus()
         }
 
         // Project change — also reset iteration cache since iterations are project-scoped
@@ -568,6 +576,7 @@ class RallyToolWindowPanel(private val project: Project) : Disposable {
 
                 invokeLaterIfAlive {
                     allArtifacts = scopeFiltered
+                    lastLoadIncomplete = result.isPartial
                     detailPanel.clear()
                     applySearchFilter()
                     loading = false
@@ -917,6 +926,18 @@ class RallyToolWindowPanel(private val project: Project) : Disposable {
         artifactList.emptyText.text = "No tickets found for $filterDesc in project: $projectName"
     }
 
+    /**
+     * Refresh the "N loaded" status line to match the currently displayed count. A client-side
+     * state-filter change re-filters the loaded list in memory without going through loadTickets()
+     * (P6/LOW-9), so without this the status would keep the stale count set by the last load.
+     * The partial-failure marker is preserved via [lastLoadIncomplete].
+     */
+    private fun refreshLoadedStatus() {
+        val count = displayedArtifacts.size
+        statusLabel.text = if (lastLoadIncomplete) "$count loaded (incomplete)" else "$count loaded"
+        statusLabel.icon = if (lastLoadIncomplete) AllIcons.General.Warning else null
+    }
+
     private fun applySearchFilter() {
         if (disposed) return
         val query = searchField.text.trim()
@@ -1186,12 +1207,6 @@ class RallyToolWindowPanel(private val project: Project) : Disposable {
                 invokeLaterIfAlive {
                     val warningMsg = assignWarning?.let { " ($it)" } ?: ""
                     val messageType = if (assignWarning != null) MessageType.WARNING else MessageType.INFO
-                    statusLabel.text = "Created $createdId$warningMsg"
-                    val balloon = JBPopupFactory.getInstance()
-                        .createHtmlTextBalloonBuilder("Created $createdId$warningMsg", messageType, null)
-                        .setFadeoutTime(3000)
-                        .createBalloon()
-                    balloon.show(RelativePoint.getSouthWestOf(statusLabel), Balloon.Position.above)
                     client.clearArtifactCache()
                     // Optimistic update: prepend the new item instead of a full reload — but only
                     // if it belongs in the current view, and make it visible if a filter would hide
@@ -1220,6 +1235,15 @@ class RallyToolWindowPanel(private val project: Project) : Disposable {
                         val index = listModel.indexOf(created)
                         if (index >= 0) artifactList.selectedIndex = index
                     }
+                    // Announce the result LAST: relaxing the state filter above re-runs the
+                    // stateCombo listener (refreshLoadedStatus), which would otherwise overwrite
+                    // this status with the "N loaded" count. The balloon is the durable confirmation.
+                    statusLabel.text = "Created $createdId$warningMsg"
+                    val balloon = JBPopupFactory.getInstance()
+                        .createHtmlTextBalloonBuilder("Created $createdId$warningMsg", messageType, null)
+                        .setFadeoutTime(3000)
+                        .createBalloon()
+                    balloon.show(RelativePoint.getSouthWestOf(statusLabel), Balloon.Position.above)
                     // Wrong-scope create (e.g. a User Story while viewing "Defects"): not shown
                     // here — the success balloon confirms it; it appears on the next refresh /
                     // scope switch (the cache was already cleared above).

@@ -5,6 +5,7 @@ import com.intellij.ui.JBColor
 import com.intellij.util.ui.JBUI
 import com.github.halmurat.rally.api.RallyArtifact
 import com.github.halmurat.rally.api.RallyDefect
+import com.github.halmurat.rally.api.RallyType
 import com.github.halmurat.rally.api.RallyUserStory
 import com.github.halmurat.rally.api.effectiveState
 import java.awt.BorderLayout
@@ -47,9 +48,9 @@ internal class ArtifactCellRenderer : ListCellRenderer<RallyArtifact> {
         panel.background = if (isSelected) list.selectionBackground else list.background
 
         iconLabel.icon = when (value.type) {
-            "HierarchicalRequirement" -> AllIcons.Nodes.PpLib
-            "Defect" -> AllIcons.General.Error
-            "TestCase" -> AllIcons.RunConfigurations.TestState.Run
+            RallyType.USER_STORY -> AllIcons.Nodes.PpLib
+            RallyType.DEFECT -> AllIcons.General.Error
+            RallyType.TEST_CASE -> AllIcons.RunConfigurations.TestState.Run
             else -> AllIcons.FileTypes.Any_type
         }
 
