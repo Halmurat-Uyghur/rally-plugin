@@ -63,7 +63,16 @@ class RallyToolWindowPanel(private val project: Project) : Disposable {
 
     private val mainPanel = JPanel(BorderLayout())
     private val listModel = DefaultListModel<RallyArtifact>()
-    private val artifactList = JBList(listModel)
+    private val artifactList = object : JBList<RallyArtifact>(listModel) {
+        // Clamp every cell to the viewport width. Without this, BasicListUI lays rows out
+        // at their (potentially huge) preferred width when a ticket name is long: a
+        // horizontal scrollbar appears and the EAST column of the cell renderer (owner +
+        // state badge) is pushed off the visible edge, forcing the user to scroll to see
+        // the assignee. Returning true keeps each row at the visible width so the center
+        // name truncates with an ellipsis (full name stays in the row tooltip) while the
+        // owner/badge stay pinned to the right edge — and re-clamp automatically on resize.
+        override fun getScrollableTracksViewportWidth(): Boolean = true
+    }
     private val scopeCombo = ComboBox(SCOPE_OPTIONS)
     private val stateCombo = ComboBox(STATE_OPTIONS)
     private val projectCombo = ComboBox<String>().apply { isEnabled = false }
