@@ -10,7 +10,16 @@ import com.intellij.openapi.components.State
 import com.intellij.openapi.components.Storage
 
 @State(
-    name = "com.github.halmurat.rally.settings.RallySettings",
+    // Opaque persistence key written into RallyPlugin.xml as <component name="…">. The IDE uses
+    // this string VERBATIM as the storage id — it is NOT resolved as a class, so it is fully
+    // independent of this class's package. FROZEN at the original (pre-rename) package string ON
+    // PURPOSE: the class moved to com.github.halmurat.rally during the package rename, but changing
+    // this id would point the platform at a different <component> name and orphan every user's saved
+    // settings (serverUrl, workspaceRef, username, selectedProject, selectedIteration, …), silently
+    // breaking the "My Tickets" filter (buildQuery skips the owner condition when username is blank).
+    // MUST NOT change on future renames — same stability rule as the PasswordSafe serviceName
+    // below. Pinned by RallySettingsPersistenceKeysTest.
+    name = "com.github.halmuratuyghur.rally.settings.RallySettings",
     storages = [Storage("RallyPlugin.xml")]
 )
 class RallySettings : PersistentStateComponent<RallySettings.State> {
@@ -143,7 +152,15 @@ class RallySettings : PersistentStateComponent<RallySettings.State> {
     }
 
     companion object {
-        private const val CREDENTIAL_USER = "RallyPlugin"
+        // PasswordSafe credential identifiers. Together with the @State name above, these are the
+        // plugin's persistence keys: changing any of them orphans the user's stored API key and
+        // forces re-entry, exactly like a changed @State name orphans the settings XML. They are
+        // NOT derived from the package name on purpose and MUST stay frozen across renames.
+        // Pinned by RallySettingsPersistenceKeysTest.
+        internal const val CREDENTIAL_USER = "RallyPlugin"
+        internal const val CREDENTIAL_SERVICE_SUBSYSTEM = "RallyPlugin"
+        internal const val CREDENTIAL_SERVICE_KEY = "apiKey"
+
         // The single-arg CredentialAttributes(serviceName) constructor compiles (against the
         // 2024.1 SDK) to a synthetic default-args constructor that is marked deprecated in
         // newer platforms. We deliberately do NOT add a userName here: PasswordSafe keychain
@@ -151,7 +168,7 @@ class RallySettings : PersistentStateComponent<RallySettings.State> {
         // API keys and force users to re-enter them. serviceName-only is the correct, stable key.
         @Suppress("DEPRECATION")
         private val credentialAttributes = CredentialAttributes(
-            generateServiceName("RallyPlugin", "apiKey")
+            generateServiceName(CREDENTIAL_SERVICE_SUBSYSTEM, CREDENTIAL_SERVICE_KEY)
         )
 
         fun getInstance(): RallySettings {
