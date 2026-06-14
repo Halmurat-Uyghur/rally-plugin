@@ -1,6 +1,7 @@
 package com.github.halmuratuyghur.rally.api
 
 import com.google.gson.Gson
+import com.google.gson.JsonObject
 import com.google.gson.JsonParser
 import com.google.gson.reflect.TypeToken
 import java.net.InetSocketAddress
@@ -17,6 +18,7 @@ import java.time.Duration
 import java.util.Base64
 import java.util.Collections
 import java.util.LinkedHashMap
+import java.util.concurrent.CompletableFuture
 import java.util.concurrent.ExecutorService
 import java.util.concurrent.Executors
 
@@ -72,7 +74,10 @@ class RallyApiClient(
         }
         .build()
 
-    private val gson = Gson()
+    // `internal` (not private) so the `internal inline reified` parseCreateResult helper
+    // can reference it — inline functions are expanded at the call site and cannot see
+    // private members of the enclosing class.
+    internal val gson = Gson()
 
     /** Pre-computed normalized server URL (computed once at construction time). */
     private val normalizedServerUrl: String = run {
@@ -178,24 +183,41 @@ class RallyApiClient(
     /** Do not keep very large attachment images in memory between selections. */
     private val maxCacheableImageBytes = 1L * 1024 * 1024
 
-    /** Extended TTL for bulk mode (null = use default). */
-    @Volatile private var bulkModeTtlMs: Long? = null
+    /**
+     * Reentrant bulk-mode nesting depth (MED-7). Bulk mode is entered/exited around
+     * each export, but exports can overlap (e.g. two right-click → Export actions in
+     * flight). A boolean/nullable-TTL flag let the FIRST export's exitBulkMode() clear
+     * the extended TTL out from under a still-running SECOND export, silently dropping
+     * it back to the 2-minute default and re-fetching mid-export. A depth counter only
+     * leaves bulk mode once the last nested caller exits.
+     */
+    private val bulkModeDepth = java.util.concurrent.atomic.AtomicInteger(0)
 
-    /** Enter bulk mode: extends cache TTL to prevent expiry during long exports. */
+    /**
+     * Enter bulk mode: extends cache TTL (BULK_TTL_MS) to prevent expiry during long
+     * exports. Reentrant — nested calls increment a depth counter; bulk mode stays
+     * active until the matching number of exitBulkMode() calls. The ttlMinutes
+     * parameter is retained for source compatibility but the extended TTL is now the
+     * fixed BULK_TTL_MS constant (the previous default of 15 minutes).
+     */
+    @Suppress("UNUSED_PARAMETER")
     fun enterBulkMode(ttlMinutes: Int = 15) {
-        bulkModeTtlMs = ttlMinutes * 60 * 1000L
+        bulkModeDepth.incrementAndGet()
     }
 
-    /** Exit bulk mode: restores default cache TTL. */
+    /** Exit bulk mode: decrements the reentrant depth, restoring the default TTL once it reaches 0. */
     fun exitBulkMode() {
-        bulkModeTtlMs = null
+        bulkModeDepth.updateAndGet { (it - 1).coerceAtLeast(0) }
     }
+
+    /** True while at least one bulk-mode scope is active. `internal` so it is unit-testable. */
+    internal fun bulkModeActive(): Boolean = bulkModeDepth.get() > 0
 
     @Suppress("UNCHECKED_CAST")
     private fun <T> getCached(key: String): T? {
         synchronized(queryCache) {
             val entry = queryCache[key] ?: return null
-            val ttl = bulkModeTtlMs ?: queryTtlMs
+            val ttl = if (bulkModeDepth.get() > 0) BULK_TTL_MS else queryTtlMs
             if (System.currentTimeMillis() - entry.timestamp > ttl) {
                 queryCache.remove(key)
                 return null
@@ -363,6 +385,9 @@ class RallyApiClient(
                 bytes.toString(Charsets.UTF_8)
             }
         }
+
+        /** Extended query-cache TTL while bulk mode is active (15 minutes) — see enterBulkMode (MED-7). */
+        private const val BULK_TTL_MS = 15 * 60 * 1000L
 
         private const val API_VERSION = "v2.0"
         private const val DEFAULT_PAGE_SIZE = 200
@@ -546,8 +571,11 @@ class RallyApiClient(
     /**
      * Normalize a ref to full Rally API URL.
      * Accepts: "12345", "/workspace/12345", or full URL.
+     *
+     * `internal` (not private) so the ref-normalization contract is unit-testable
+     * from the same module — behavior is unchanged.
      */
-    private fun normalizeRef(type: String, ref: String): String {
+    internal fun normalizeRef(type: String, ref: String): String {
         val trimmed = ref.trim()
         // Already a full URL
         if (trimmed.startsWith("http")) return trimmed
@@ -640,9 +668,8 @@ class RallyApiClient(
             val response = executeGet(url)
             handleResponse(response)
             val result: RallyQueryResult<T> = gson.fromJson(response.body(), typeToken)
-            if (!result.queryResult.errors.isNullOrEmpty()) {
-                throw RallyApiException("Rally query error: ${result.queryResult.errors.joinToString("; ")}")
-            }
+            result.queryResult.requireNoErrors("paged query ($endpoint)")
+            logWarnings(result.queryResult.warnings, "paged query ($endpoint)")
             allResults.addAll(result.queryResult.safeResults)
             val effectivePageSize = result.queryResult.pageSize.takeIf { it > 0 } ?: pageSize
             start += effectivePageSize
@@ -773,6 +800,8 @@ class RallyApiClient(
             handleResponse(response)
 
             val result: RallyQueryResult<out RallyArtifact> = gson.fromJson(response.body(), type)
+            result.queryResult.requireNoErrors("artifact lookup")
+            logWarnings(result.queryResult.warnings, "artifact lookup")
             val artifact = result.queryResult.safeResults.firstOrNull()
             if (artifact != null) putCache(cacheKey, artifact)
             artifact
@@ -855,6 +884,80 @@ class RallyApiClient(
         return sorted
     }
 
+    /**
+     * Parallel sibling of [queryAllArtifacts] (MED-2): fetches user stories and defects
+     * concurrently and returns an [ArtifactQueryResult] that carries any
+     * partial-failure reasons (MED-8) so the caller can show an "incomplete list"
+     * indicator instead of silently displaying a truncated list.
+     *
+     * MUST be called from a NON-apiExecutor thread. It submits the defect query to
+     * apiExecutor and blocks the calling thread on `defectsFuture.get()` while running
+     * the user-story query inline; calling it from an apiExecutor worker would consume
+     * two of the pool's four threads (one parked on .get(), one running the defect query)
+     * and can deadlock under load. The sequential [queryAllArtifacts] stays the safe
+     * default for callers already running on apiExecutor.
+     *
+     * Same caching/partial-failure policy as [queryAllArtifacts]: a fully successful
+     * result is cached under the shared "artifacts:" key (and a cache hit short-circuits
+     * to a non-partial result); a partial result is NOT cached and still raises the
+     * throttled partial-failure balloon.
+     */
+    fun queryAllArtifactsParallel(query: String? = null, pageSize: Int = DEFAULT_PAGE_SIZE, scope: String? = null, maxResults: Int = MAX_PAGE_SIZE): ArtifactQueryResult {
+        val ws = workspaceRef
+        val pr = projectRef
+        val cacheKey = "artifacts:${query}|${pageSize}|${maxResults}|${scope}|${ws}|${pr}"
+        getCached<List<RallyArtifact>>(cacheKey)?.let { return ArtifactQueryResult(it) }
+
+        val results = mutableListOf<RallyArtifact>()
+        val reasons = mutableListOf<String>()
+
+        val fetchStories = scope != "Defects"
+        val fetchDefects = scope != "User Stories"
+
+        // Kick the defect query onto apiExecutor first so it runs concurrently with the
+        // inline user-story query below. Both sides are wrapped so a failure on one type
+        // records a reason and continues with the other type's results (partial success).
+        val defectsFuture: CompletableFuture<List<RallyDefect>>? =
+            if (fetchDefects) {
+                CompletableFuture.supplyAsync({ queryDefects(query, pageSize, maxResults) }, apiExecutor)
+            } else null
+
+        if (fetchStories) {
+            try {
+                results.addAll(queryUserStories(query, pageSize, maxResults))
+            } catch (e: Exception) {
+                reasons.add("User stories query failed: ${e.message}")
+            }
+        }
+
+        if (defectsFuture != null) {
+            try {
+                results.addAll(defectsFuture.get())
+            } catch (e: Exception) {
+                // CompletableFuture.get() wraps the real cause in ExecutionException;
+                // surface the underlying message when present.
+                reasons.add("Defects query failed: ${(e.cause ?: e).message}")
+            }
+        }
+
+        // If all queries failed, throw so the UI can show the error (matches queryAllArtifacts).
+        if (results.isEmpty() && reasons.isNotEmpty()) {
+            throw RallyApiException("Query failed - ${reasons.joinToString("; ")}")
+        }
+
+        val sorted = results.sortedByDescending { it.lastUpdateDate }
+        // Partial failure: surface via balloon and DO NOT cache (otherwise the truncated
+        // list would be served silently for the full TTL even after Rally recovers).
+        if (reasons.isNotEmpty()) {
+            LOG.warn("queryAllArtifactsParallel partial failure: ${reasons.joinToString("; ")}")
+            notifyPartialFailure(reasons)
+            return ArtifactQueryResult(sorted, reasons)
+        }
+
+        putCache(cacheKey, sorted)
+        return ArtifactQueryResult(sorted)
+    }
+
     /** Last partial-failure balloon, for throttling. */
     @Volatile private var lastPartialFailureNotifyMs = 0L
 
@@ -884,6 +987,8 @@ class RallyApiClient(
     /**
      * Search artifacts server-side using Rally "contains" query.
      * Searches both Name and FormattedID fields across user stories and defects.
+     * Returns an [ArtifactQueryResult] so a partial failure (one type errored) can be
+     * surfaced to the UI instead of being indistinguishable from a complete result (MED-8).
      * @param searchText The text to search for
      * @param scope Optional scope hint: "User Stories" or "Defects" to limit search
      */
@@ -892,11 +997,11 @@ class RallyApiClient(
         scope: String? = null,
         pageSize: Int = 50,
         maxResults: Int = 100
-    ): List<RallyArtifact> {
+    ): ArtifactQueryResult {
         val ws = workspaceRef
         val pr = projectRef
         val cacheKey = "search:${searchText}|${scope}|${pageSize}|${maxResults}|${ws}|${pr}"
-        getCached<List<RallyArtifact>>(cacheKey)?.let { return it }
+        getCached<List<RallyArtifact>>(cacheKey)?.let { return ArtifactQueryResult(it) }
 
         val query = buildSearchQuery(escapeQueryValue(searchText))
 
@@ -904,38 +1009,38 @@ class RallyApiClient(
             val tcResults: List<RallyArtifact> = queryAllTestCases(query, pageSize, maxResults)
             val sorted = tcResults.sortedByDescending { it.lastUpdateDate }
             putCache(cacheKey, sorted)
-            return sorted
+            return ArtifactQueryResult(sorted)
         }
 
         val results = mutableListOf<RallyArtifact>()
-        val errors = mutableListOf<String>()
+        val reasons = mutableListOf<String>()
         val fetchStories = scope != "Defects"
         val fetchDefects = scope != "User Stories"
 
         if (fetchStories) {
             try { results.addAll(queryUserStories(query, pageSize, maxResults)) }
-            catch (e: Exception) { errors.add("UserStories: ${e.message}") }
+            catch (e: Exception) { reasons.add("User stories query failed: ${e.message}") }
         }
         if (fetchDefects) {
             try { results.addAll(queryDefects(query, pageSize, maxResults)) }
-            catch (e: Exception) { errors.add("Defects: ${e.message}") }
+            catch (e: Exception) { reasons.add("Defects query failed: ${e.message}") }
         }
 
-        if (results.isEmpty() && errors.isNotEmpty()) {
-            throw RallyApiException("Search failed - ${errors.joinToString("; ")}")
+        if (results.isEmpty() && reasons.isNotEmpty()) {
+            throw RallyApiException("Search failed - ${reasons.joinToString("; ")}")
         }
 
         val sorted = results.sortedByDescending { it.lastUpdateDate }
         // Same partial-failure policy as queryAllArtifacts: surface the gap and
         // skip the cache, or stories-only results would be served silently for
         // the full TTL (15 minutes in bulk mode) even after Rally recovers.
-        if (errors.isNotEmpty()) {
-            LOG.warn("searchArtifacts partial failure: ${errors.joinToString("; ")}")
-            notifyPartialFailure(errors)
-            return sorted
+        if (reasons.isNotEmpty()) {
+            LOG.warn("searchArtifacts partial failure: ${reasons.joinToString("; ")}")
+            notifyPartialFailure(reasons)
+            return ArtifactQueryResult(sorted, reasons)
         }
         putCache(cacheKey, sorted)
-        return sorted
+        return ArtifactQueryResult(sorted)
     }
 
     /**
@@ -968,10 +1073,10 @@ class RallyApiClient(
         val objectId = artifact.objectID ?: return baseUrl
 
         val detailPage = when (artifact.type) {
-            "HierarchicalRequirement" -> "userstory"
-            "Defect" -> "defect"
-            "Task" -> "task"
-            "TestCase" -> "testcase"
+            RallyType.USER_STORY -> "userstory"
+            RallyType.DEFECT -> "defect"
+            RallyType.TASK -> "task"
+            RallyType.TEST_CASE -> "testcase"
             else -> "detail"
         }
 
@@ -1127,23 +1232,72 @@ class RallyApiClient(
     }
 
     /**
+     * Log any non-empty Rally Warnings array (HIGH-1). Rally returns HTTP 200 with a
+     * populated Warnings array for soft problems (deprecated fields, scoping notes)
+     * that don't fail the query; surfacing them at WARN keeps them out of the silent
+     * void without turning them into errors.
+     */
+    private fun logWarnings(warnings: List<String>?, context: String) {
+        if (!warnings.isNullOrEmpty()) {
+            LOG.warn("Rally query warnings ($context): ${warnings.joinToString("; ")}")
+        }
+    }
+
+    /**
+     * Validate the OperationResult of an update POST (MED-11). Throws RallyApiException
+     * if the wrapper is missing or its Errors array is non-empty. The JSON-parsing core
+     * takes the response body as a String so it is unit-testable without an HTTP round trip.
+     */
+    internal fun checkOperationResult(body: String, action: String) {
+        val json = JsonParser.parseString(body).asJsonObject
+        val result = json.getAsJsonObject("OperationResult")
+            ?: throw RallyApiException("Unexpected response: missing OperationResult")
+        val errors = result.getAsJsonArray("Errors")
+        if (errors != null && errors.size() > 0) {
+            throw RallyApiException("Failed to $action: ${errors.joinToString()}")
+        }
+    }
+
+    /**
+     * Parse the "Object" of a CreateResult into [T] (MED-11). Throws RallyApiException
+     * if the CreateResult wrapper, its Errors array, or the Object is missing/non-empty.
+     * `internal inline reified` so it can deserialize an arbitrary [T] at the call site;
+     * it references the `internal` [gson] instance (inline functions can't see private members).
+     */
+    internal inline fun <reified T> parseCreateResult(body: String, action: String): T {
+        val obj = parseCreateResultObject(body, action)
+        return gson.fromJson(obj, T::class.java)
+    }
+
+    /**
+     * Parse and validate a CreateResult, returning its raw "Object" JsonObject (MED-11).
+     * Used directly when the caller needs to read individual fields off the created object
+     * (e.g. uploadAttachment reading the AttachmentContent _ref). Throws RallyApiException
+     * if the CreateResult wrapper is missing, its Errors array is non-empty, or Object is missing.
+     */
+    internal fun parseCreateResultObject(body: String, action: String): JsonObject {
+        val json = JsonParser.parseString(body).asJsonObject
+        val createResult = json.getAsJsonObject("CreateResult")
+            ?: throw RallyApiException("Unexpected response: missing CreateResult")
+        val errors = createResult.getAsJsonArray("Errors")
+        if (errors != null && errors.size() > 0) {
+            throw RallyApiException("Failed to $action: ${errors.joinToString()}")
+        }
+        return createResult.getAsJsonObject("Object")
+            ?: throw RallyApiException("Unexpected response: missing Object in CreateResult")
+    }
+
+    /**
      * Update the state of an artifact.
      * User Stories/Defects use ScheduleState, Tasks use State.
      */
     fun updateArtifactState(artifactRef: String, artifactType: String, newState: String) {
         requireValidArtifactType(artifactType)
-        val stateField = if (artifactType == "Task") "State" else "ScheduleState"
+        val stateField = if (artifactType == RallyType.TASK) "State" else "ScheduleState"
         val body = gson.toJson(mapOf(artifactType to mapOf(stateField to newState)))
         val response = executePost(artifactRef, body)
         handleResponse(response)
-
-        val json = JsonParser.parseString(response.body()).asJsonObject
-        val result = json.getAsJsonObject("OperationResult")
-            ?: throw RallyApiException("Unexpected response: missing OperationResult")
-        val errors = result.getAsJsonArray("Errors")
-        if (errors != null && errors.size() > 0) {
-            throw RallyApiException("Failed to update state: ${errors.joinToString()}")
-        }
+        checkOperationResult(response.body(), "update state")
     }
 
     /**
@@ -1157,14 +1311,7 @@ class RallyApiClient(
         val body = gson.toJson(mapOf(artifactType to mapOf("Owner" to ownerRef)))
         val response = executePost(artifactRef, body)
         handleResponse(response)
-
-        val json = JsonParser.parseString(response.body()).asJsonObject
-        val result = json.getAsJsonObject("OperationResult")
-            ?: throw RallyApiException("Unexpected response: missing OperationResult")
-        val errors = result.getAsJsonArray("Errors")
-        if (errors != null && errors.size() > 0) {
-            throw RallyApiException("Failed to update owner: ${errors.joinToString()}")
-        }
+        checkOperationResult(response.body(), "update owner")
     }
 
     /**
@@ -1179,14 +1326,7 @@ class RallyApiClient(
         val body = buildFieldUpdateBody(artifactType, field, value)
         val response = executePost(artifactRef, body)
         handleResponse(response)
-
-        val json = JsonParser.parseString(response.body()).asJsonObject
-        val result = json.getAsJsonObject("OperationResult")
-            ?: throw RallyApiException("Unexpected response: missing OperationResult")
-        val errors = result.getAsJsonArray("Errors")
-        if (errors != null && errors.size() > 0) {
-            throw RallyApiException("Failed to update $field: ${errors.joinToString()}")
-        }
+        checkOperationResult(response.body(), "update $field")
     }
 
     /**
@@ -1214,6 +1354,8 @@ class RallyApiClient(
         handleResponse(response)
 
         val result: RallyQueryResult<RallyIteration> = gson.fromJson(response.body(), TYPE_ITERATIONS)
+        result.queryResult.requireNoErrors("current iteration")
+        logWarnings(result.queryResult.warnings, "current iteration")
         val iteration = result.queryResult.safeResults.firstOrNull()
         if (iteration != null) putCache(cacheKey, iteration)
         return iteration
@@ -1250,6 +1392,8 @@ class RallyApiClient(
         handleResponse(response)
 
         val result: RallyQueryResult<RallyProject> = gson.fromJson(response.body(), TYPE_PROJECTS)
+        result.queryResult.requireNoErrors("projects")
+        logWarnings(result.queryResult.warnings, "projects")
         val sorted = result.queryResult.safeResults.sortedBy { it.name?.lowercase() }
         putCache(cacheKey, sorted)
         return sorted
@@ -1287,6 +1431,8 @@ class RallyApiClient(
         handleResponse(response)
 
         val result: RallyQueryResult<RallyIteration> = gson.fromJson(response.body(), TYPE_ITERATIONS)
+        result.queryResult.requireNoErrors("iterations")
+        logWarnings(result.queryResult.warnings, "iterations")
         val iterations = result.queryResult.safeResults
         putCache(cacheKey, iterations)
         return iterations
@@ -1318,6 +1464,8 @@ class RallyApiClient(
         handleResponse(response)
 
         val result: RallyQueryResult<RallyTaskItem> = gson.fromJson(response.body(), TYPE_TASKS)
+        result.queryResult.requireNoErrors("tasks")
+        logWarnings(result.queryResult.warnings, "tasks")
         putCache(cacheKey, result.queryResult.safeResults)
         return result.queryResult.safeResults
     }
@@ -1348,6 +1496,8 @@ class RallyApiClient(
         handleResponse(response)
 
         val result: RallyQueryResult<RallyTestCase> = gson.fromJson(response.body(), TYPE_TEST_CASES)
+        result.queryResult.requireNoErrors("test cases")
+        logWarnings(result.queryResult.warnings, "test cases")
         putCache(cacheKey, result.queryResult.safeResults)
         return result.queryResult.safeResults
     }
@@ -1376,6 +1526,8 @@ class RallyApiClient(
         handleResponse(response)
 
         val result: RallyQueryResult<RallyTestCaseStep> = gson.fromJson(response.body(), TYPE_TEST_STEPS)
+        result.queryResult.requireNoErrors("test steps")
+        logWarnings(result.queryResult.warnings, "test steps")
         putCache(cacheKey, result.queryResult.safeResults)
         return result.queryResult.safeResults
     }
@@ -1404,6 +1556,8 @@ class RallyApiClient(
         handleResponse(response)
 
         val result: RallyQueryResult<RallyAttachment> = gson.fromJson(response.body(), TYPE_ATTACHMENTS)
+        result.queryResult.requireNoErrors("attachments")
+        logWarnings(result.queryResult.warnings, "attachments")
         putCache(cacheKey, result.queryResult.safeResults)
         return result.queryResult.safeResults
     }
@@ -1435,6 +1589,8 @@ class RallyApiClient(
         handleResponse(response)
 
         val result: RallyQueryResult<RallyTestCase> = gson.fromJson(response.body(), TYPE_TEST_CASES)
+        result.queryResult.requireNoErrors("test case lookup")
+        logWarnings(result.queryResult.warnings, "test case lookup")
         val tc = result.queryResult.safeResults.firstOrNull()
         if (tc != null) putCache(cacheKey, tc)
         return tc
@@ -1493,10 +1649,12 @@ class RallyApiClient(
 
             // Evict oldest entries until there's room for the new one. The map is
             // access-ordered, so entries.iterator() yields least-recently-used first.
+            // Create the iterator once and reuse it across removals (LOW-26) — a fresh
+            // iterator per evicted entry was redundant; iter.remove() keeps it valid for
+            // the next iter.next(), so a single iterator walks the LRU order in one pass.
             val incoming = bytes.size.toLong()
-            while (imageCacheBytes.get() + incoming > maxImageCacheBytes && imageCache.isNotEmpty()) {
-                val iter = imageCache.entries.iterator()
-                if (!iter.hasNext()) break
+            val iter = imageCache.entries.iterator()
+            while (imageCacheBytes.get() + incoming > maxImageCacheBytes && iter.hasNext()) {
                 val eldest = iter.next()
                 iter.remove()
                 imageCacheBytes.addAndGet(-eldest.value.size.toLong())
@@ -1528,17 +1686,7 @@ class RallyApiClient(
         val body = gson.toJson(mapOf("HierarchicalRequirement" to fields))
         val response = executePost(url, body, retry = false)
         handleResponse(response)
-
-        val json = JsonParser.parseString(response.body()).asJsonObject
-        val createResult = json.getAsJsonObject("CreateResult")
-            ?: throw RallyApiException("Unexpected response: missing CreateResult")
-        val errors = createResult.getAsJsonArray("Errors")
-        if (errors != null && errors.size() > 0) {
-            throw RallyApiException("Failed to create user story: ${errors.joinToString()}")
-        }
-        val obj = createResult.getAsJsonObject("Object")
-            ?: throw RallyApiException("Unexpected response: missing Object in CreateResult")
-        return gson.fromJson(obj, RallyUserStory::class.java)
+        return parseCreateResult(response.body(), "create user story")
     }
 
     /**
@@ -1566,17 +1714,7 @@ class RallyApiClient(
         val body = gson.toJson(mapOf("Defect" to fields))
         val response = executePost(url, body, retry = false)
         handleResponse(response)
-
-        val json = JsonParser.parseString(response.body()).asJsonObject
-        val createResult = json.getAsJsonObject("CreateResult")
-            ?: throw RallyApiException("Unexpected response: missing CreateResult")
-        val errors = createResult.getAsJsonArray("Errors")
-        if (errors != null && errors.size() > 0) {
-            throw RallyApiException("Failed to create defect: ${errors.joinToString()}")
-        }
-        val obj = createResult.getAsJsonObject("Object")
-            ?: throw RallyApiException("Unexpected response: missing Object in CreateResult")
-        return gson.fromJson(obj, RallyDefect::class.java)
+        return parseCreateResult(response.body(), "create defect")
     }
 
     /**
@@ -1602,17 +1740,7 @@ class RallyApiClient(
         val body = gson.toJson(mapOf("Task" to fields))
         val response = executePost(url, body, retry = false)
         handleResponse(response)
-
-        val json = JsonParser.parseString(response.body()).asJsonObject
-        val createResult = json.getAsJsonObject("CreateResult")
-            ?: throw RallyApiException("Unexpected response: missing CreateResult")
-        val errors = createResult.getAsJsonArray("Errors")
-        if (errors != null && errors.size() > 0) {
-            throw RallyApiException("Failed to create task: ${errors.joinToString()}")
-        }
-        val obj = createResult.getAsJsonObject("Object")
-            ?: throw RallyApiException("Unexpected response: missing Object in CreateResult")
-        return gson.fromJson(obj, RallyTaskItem::class.java)
+        return parseCreateResult(response.body(), "create task")
     }
 
     /**
@@ -1641,14 +1769,8 @@ class RallyApiClient(
         val contentResponse = executePost(contentUrl, contentBody, retry = false)
         handleResponse(contentResponse)
 
-        val contentJson = JsonParser.parseString(contentResponse.body()).asJsonObject
-        val contentResult = contentJson.getAsJsonObject("CreateResult")
-            ?: throw RallyApiException("Unexpected response: missing CreateResult for AttachmentContent")
-        val contentErrors = contentResult.getAsJsonArray("Errors")
-        if (contentErrors != null && contentErrors.size() > 0) {
-            throw RallyApiException("Failed to create attachment content: ${contentErrors.joinToString()}")
-        }
-        val contentRef = contentResult.getAsJsonObject("Object")?.get("_ref")?.asString
+        val contentObj = parseCreateResultObject(contentResponse.body(), "create attachment content")
+        val contentRef = contentObj.get("_ref")?.asString
             ?: throw RallyApiException("No _ref in AttachmentContent create response")
 
         // Step 2: Create Attachment linking content to artifact
@@ -1663,17 +1785,7 @@ class RallyApiClient(
         val attachBody = gson.toJson(mapOf("Attachment" to attachFields))
         val attachResponse = executePost(attachUrl, attachBody, retry = false)
         handleResponse(attachResponse)
-
-        val attachJson = JsonParser.parseString(attachResponse.body()).asJsonObject
-        val attachResult = attachJson.getAsJsonObject("CreateResult")
-            ?: throw RallyApiException("Unexpected response: missing CreateResult for Attachment")
-        val attachErrors = attachResult.getAsJsonArray("Errors")
-        if (attachErrors != null && attachErrors.size() > 0) {
-            throw RallyApiException("Failed to create attachment: ${attachErrors.joinToString()}")
-        }
-        val attachObj = attachResult.getAsJsonObject("Object")
-            ?: throw RallyApiException("Unexpected response: missing Object in Attachment CreateResult")
-        return gson.fromJson(attachObj, RallyAttachment::class.java)
+        return parseCreateResult(attachResponse.body(), "create attachment")
     }
 }
 

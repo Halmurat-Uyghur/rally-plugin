@@ -29,12 +29,28 @@ class StatusBadge : JComponent(), Accessible {
         isOpaque = false
     }
 
-    /** Set text + colors in one call; blank text hides the badge entirely. */
+    /**
+     * Pure setter for text + colors; blank text hides the badge entirely.
+     *
+     * This intentionally does NOT schedule a repaint/revalidate: it is called once per
+     * visible row from inside shared cell renderers (rubber-stamp pattern), where the
+     * CellRendererPane stamps the badge immediately and a self-scheduled repaint would
+     * just churn the EDT queue. When the badge lives in a real container, the caller is
+     * responsible for repaint scheduling — use [refresh] for that.
+     */
     fun update(text: String?, colors: StateColors) {
         this.text = text ?: ""
         this.colors = colors
         isVisible = this.text.isNotBlank()
         getAccessibleContext().accessibleName = this.text
+    }
+
+    /**
+     * Schedule a layout + repaint after [update]. Call this only when this badge lives in
+     * a real component hierarchy (e.g. the detail-panel header), not when used as a
+     * rubber-stamp cell renderer (where the renderer pane paints it directly).
+     */
+    fun refresh() {
         revalidate()
         repaint()
     }

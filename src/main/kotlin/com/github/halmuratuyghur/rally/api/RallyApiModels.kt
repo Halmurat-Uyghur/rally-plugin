@@ -34,6 +34,30 @@ data class QueryResultData<T>(
 }
 
 /**
+ * Rally WSAPI 2.0 returns HTTP 200 with a populated `Errors` array for field/permission/scoping
+ * errors — the request "succeeds" at the transport level but `Results` is empty. Without this guard,
+ * such errors are silently swallowed and callers get empty lists. This turns a non-empty `Errors`
+ * array into a thrown [RallyApiException] (HIGH-1).
+ *
+ * `internal` so it is unit-testable. [RallyApiException] is in the same package (api) — no import needed.
+ */
+internal fun QueryResultData<*>.requireNoErrors(context: String) {
+    if (!errors.isNullOrEmpty()) throw RallyApiException("Rally query error ($context): ${errors!!.joinToString("; ")}")
+}
+
+/**
+ * Result of an artifact query that may have partially failed (e.g. user stories loaded but defects
+ * errored, or vice-versa). Carries the human-readable [partialFailureReasons] so the UI can surface
+ * an "incomplete" indicator instead of silently showing a truncated list (MED-8).
+ */
+data class ArtifactQueryResult(
+    val artifacts: List<RallyArtifact>,
+    val partialFailureReasons: List<String> = emptyList()
+) {
+    val isPartial: Boolean get() = partialFailureReasons.isNotEmpty()
+}
+
+/**
  * Base interface for all Rally artifacts
  */
 interface RallyArtifact {

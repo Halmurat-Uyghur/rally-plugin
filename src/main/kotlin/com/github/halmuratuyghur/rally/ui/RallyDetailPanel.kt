@@ -212,24 +212,48 @@ class RallyDetailPanel(private val project: Project) : com.intellij.openapi.Disp
         val descScrollPane = JBScrollPane(descriptionPane)
         descScrollPane.border = BorderFactory.createTitledBorder("Description")
 
+        // Pin each list's row height from a single prototype render (LOW-64/LOW-65),
+        // mirroring the main artifact list. Without fixedCellHeight, BasicListUI
+        // re-runs the renderer + getPreferredSize() for every element on every model
+        // event to compute uniform row heights. Each prototype exercises a populated
+        // StatusBadge (state/verdict/method) where the renderer paints one, so the
+        // pinned height accounts for the chip and never clips it.
+
         // Test Cases tab
         testCaseList.cellRenderer = TestCaseCellRenderer()
+        testCaseList.fixedCellHeight = pinCellHeight(
+            testCaseList,
+            RallyTestCase(formattedID = "TC0000", name = "Prototype", method = "Automated", lastVerdict = "Pass")
+        )
         testCaseList.selectionMode = ListSelectionModel.MULTIPLE_INTERVAL_SELECTION
         testCaseList.emptyText.text = "No test cases"
         // tcPanel (list + summary footer) is built once as a field; see its declaration.
 
         // Tasks tab
         taskList.cellRenderer = TaskCellRenderer()
+        taskList.fixedCellHeight = pinCellHeight(
+            taskList,
+            RallyTaskItem(formattedID = "TA0000", name = "Prototype", state = "In-Progress",
+                owner = RallyUser(displayName = "Prototype Owner"), toDo = 1.0)
+        )
         taskList.selectionMode = ListSelectionModel.MULTIPLE_INTERVAL_SELECTION
         taskList.emptyText.text = "No tasks"
 
         // Attachments tab
         attachmentList.cellRenderer = AttachmentCellRenderer()
+        attachmentList.fixedCellHeight = pinCellHeight(
+            attachmentList,
+            RallyAttachment(name = "prototype.png", contentType = "image/png", size = 1024)
+        )
         attachmentList.selectionMode = ListSelectionModel.SINGLE_SELECTION
         attachmentList.emptyText.text = "No attachments"
 
         // Test Steps tab
         stepList.cellRenderer = StepCellRenderer()
+        stepList.fixedCellHeight = pinCellHeight(
+            stepList,
+            RallyTestCaseStep(stepIndex = 1, input = "Prototype input", expectedResult = "Prototype result")
+        )
         stepList.selectionMode = ListSelectionModel.SINGLE_SELECTION
         stepList.emptyText.text = "Select a test case to view steps"
 
@@ -253,6 +277,17 @@ class RallyDetailPanel(private val project: Project) : com.intellij.openapi.Disp
         component.add(headerWrapper, BorderLayout.NORTH)
         component.add(splitPane, BorderLayout.CENTER)
     }
+
+    /**
+     * Measure one prototype row's preferred height for [list]'s already-assigned renderer,
+     * for use as [JBList.fixedCellHeight] (LOW-64/LOW-65). The prototype must populate every
+     * field the renderer lays out (including the StatusBadge chip) so the pinned height never
+     * clips. Mirrors the main artifact list's prototype-measurement pattern.
+     */
+    private fun <T> pinCellHeight(list: JBList<T>, prototype: T): Int =
+        list.cellRenderer
+            .getListCellRendererComponent(list, prototype, 0, false, false)
+            .preferredSize.height
 
     private fun setupListeners() {
         // Test case listeners
@@ -332,12 +367,13 @@ class RallyDetailPanel(private val project: Project) : com.intellij.openapi.Disp
         copyButton.isVisible = true
         browserButton.isVisible = true
 
-        val state = if (artifact is RallyTestCase) {
-            artifact.lastVerdict ?: "No Verdict"
-        } else {
-            artifact.scheduleState ?: artifact.state ?: "Unknown"
-        }
+        // effectiveState (api package) is the single source of truth: TestCase → lastVerdict
+        // (fallback "No Verdict"), everything else → ScheduleState ?: State ?: "Unknown".
+        val state = artifact.effectiveState
         stateBadge.update(state, RallyColors.forState(state))
+        // Header badge lives in a real container, so update() (now a pure setter) must be
+        // followed by refresh() to schedule the layout + repaint.
+        stateBadge.refresh()
 
         // Metadata strip
         metadataLabel.text = buildMetadataText(artifact)
@@ -538,7 +574,10 @@ class RallyDetailPanel(private val project: Project) : com.intellij.openapi.Disp
         currentArtifact = null
         currentClient = null
         headerLabel.text = "Select a ticket to view details"
+        // Header badge lives in a real container: update() is a pure setter, so refresh()
+        // schedules the layout + repaint that hides the now-blank chip.
         stateBadge.update(null, RallyColors.NEUTRAL)
+        stateBadge.refresh()
         metadataLabel.text = ""
         metadataLabel.isVisible = false
         copyButton.isVisible = false
@@ -1103,195 +1142,5 @@ class RallyDetailPanel(private val project: Project) : com.intellij.openapi.Disp
         // chokepoint every non-empty descriptionPane.text assignment goes through — so a second
         // multi-MB regex pass here would be pure duplicate work.
         return sb.toString()
-    }
-
-
-
-    // ── Test Case Cell Renderer ─────────────────────────────────
-
-    private class TestCaseCellRenderer : ListCellRenderer<RallyTestCase> {
-        private val panel = JPanel(BorderLayout(8, 0)).apply { border = JBUI.Borders.empty(3, 6) }
-        private val iconLabel = JLabel()
-        private val textLabel = JLabel()
-        private val methodBadge = StatusBadge()
-        private val verdictBadge = StatusBadge()
-        private val rightPanel = JPanel(FlowLayout(FlowLayout.RIGHT, 6, 0)).apply { isOpaque = false }
-
-        init {
-            rightPanel.add(verdictBadge)
-            rightPanel.add(methodBadge)
-            panel.add(iconLabel, BorderLayout.WEST)
-            panel.add(textLabel, BorderLayout.CENTER)
-            panel.add(rightPanel, BorderLayout.EAST)
-        }
-
-        override fun getListCellRendererComponent(
-            list: JList<out RallyTestCase>,
-            value: RallyTestCase,
-            index: Int,
-            isSelected: Boolean,
-            cellHasFocus: Boolean
-        ): Component {
-            panel.background = if (isSelected) list.selectionBackground else list.background
-
-            iconLabel.icon = if (value.method == "Automated") AllIcons.Actions.Checked else AllIcons.Actions.Edit
-
-            textLabel.text = "${value.formattedID ?: "?"}: ${value.name ?: "Untitled"}"
-            textLabel.foreground = if (isSelected) list.selectionForeground else list.foreground
-
-            val method = value.method ?: "Manual"
-            methodBadge.update(method, RallyColors.forMethod(method))
-
-            // update() hides the badge for blank verdicts; non-Pass/Fail verdicts
-            // (e.g. Blocked) get the neutral chip, matching the old gray fallback.
-            verdictBadge.update(value.lastVerdict, RallyColors.forState(value.lastVerdict))
-
-            return panel
-        }
-    }
-
-    // ── Task Cell Renderer ──────────────────────────────────────
-
-    private class TaskCellRenderer : ListCellRenderer<RallyTaskItem> {
-        private val panel = JPanel(BorderLayout(8, 0)).apply { border = JBUI.Borders.empty(3, 6) }
-        private val iconLabel = JLabel(AllIcons.FileTypes.Any_type)
-        private val textLabel = JLabel()
-        private val stateBadge = StatusBadge()
-        private val ownerLabel = JLabel()
-        private val todoLabel = JLabel()
-        private val rightPanel = JPanel(FlowLayout(FlowLayout.RIGHT, 6, 0)).apply { isOpaque = false }
-
-        init {
-            rightPanel.add(stateBadge)
-            rightPanel.add(ownerLabel)
-            rightPanel.add(todoLabel)
-            panel.add(iconLabel, BorderLayout.WEST)
-            panel.add(textLabel, BorderLayout.CENTER)
-            panel.add(rightPanel, BorderLayout.EAST)
-        }
-
-        override fun getListCellRendererComponent(
-            list: JList<out RallyTaskItem>,
-            value: RallyTaskItem,
-            index: Int,
-            isSelected: Boolean,
-            cellHasFocus: Boolean
-        ): Component {
-            panel.background = if (isSelected) list.selectionBackground else list.background
-
-            textLabel.text = "${value.formattedID ?: "?"}: ${value.name ?: "Untitled"}"
-            textLabel.foreground = if (isSelected) list.selectionForeground else list.foreground
-
-            // update() hides the badge when state is blank (same as the old isVisible).
-            stateBadge.update(value.state, RallyColors.forState(value.state))
-
-            val ownerName = value.owner?.refObjectName ?: value.owner?.displayName ?: ""
-            ownerLabel.isVisible = ownerName.isNotBlank()
-            ownerLabel.text = ownerName
-            ownerLabel.foreground = if (isSelected) list.selectionForeground else JBColor.GRAY
-
-            val todo = value.toDo
-            todoLabel.isVisible = todo != null && todo > 0
-            todoLabel.text = if (todo != null && todo > 0) "${todo}h left" else ""
-            todoLabel.foreground = if (isSelected) list.selectionForeground else JBColor.GRAY
-
-            return panel
-        }
-    }
-
-    // ── Test Step Cell Renderer ────────────────────────────────
-
-    private class StepCellRenderer : ListCellRenderer<RallyTestCaseStep> {
-        companion object {
-            private val htmlTagPattern = Pattern.compile("<[^>]+>")
-        }
-        private val panel = JPanel(BorderLayout(8, 0)).apply { border = JBUI.Borders.empty(4, 6) }
-        private val badgeLabel = JLabel().apply {
-            font = font.deriveFont(Font.BOLD)
-            preferredSize = Dimension(32, preferredSize.height)
-        }
-        private val centerPanel = JPanel().apply {
-            layout = BoxLayout(this, BoxLayout.Y_AXIS)
-            isOpaque = false
-        }
-        private val inputLabel = JLabel()
-        private val expectedLabel = JLabel().apply {
-            font = font.deriveFont(font.size2D - 1f)
-        }
-
-        init {
-            centerPanel.add(inputLabel)
-            centerPanel.add(expectedLabel)
-            panel.add(badgeLabel, BorderLayout.WEST)
-            panel.add(centerPanel, BorderLayout.CENTER)
-        }
-
-        override fun getListCellRendererComponent(
-            list: JList<out RallyTestCaseStep>,
-            value: RallyTestCaseStep,
-            index: Int,
-            isSelected: Boolean,
-            cellHasFocus: Boolean
-        ): Component {
-            panel.background = if (isSelected) list.selectionBackground else list.background
-
-            badgeLabel.text = "#${value.stepIndex ?: (index + 1)}"
-            badgeLabel.foreground = if (isSelected) list.selectionForeground else list.foreground
-
-            val inputText = stripHtml(value.input ?: "")
-            inputLabel.text = inputText.ifBlank { "(no input)" }
-            inputLabel.foreground = if (isSelected) list.selectionForeground else list.foreground
-
-            val expectedText = stripHtml(value.expectedResult ?: "")
-            expectedLabel.isVisible = expectedText.isNotBlank()
-            expectedLabel.text = if (expectedText.isNotBlank()) "Expected: $expectedText" else ""
-            expectedLabel.foreground = if (isSelected) list.selectionForeground else JBColor.GRAY
-
-            return panel
-        }
-
-        private fun stripHtml(text: String): String {
-            return htmlTagPattern.matcher(text).replaceAll("").trim()
-        }
-    }
-
-    // ── Attachment Cell Renderer ─────────────────────────────────
-
-    private class AttachmentCellRenderer : ListCellRenderer<RallyAttachment> {
-        private val panel = JPanel(BorderLayout(8, 0)).apply { border = JBUI.Borders.empty(3, 6) }
-        private val iconLabel = JLabel()
-        private val textLabel = JLabel()
-        private val sizeLabel = JLabel()
-        private val rightPanel = JPanel(FlowLayout(FlowLayout.RIGHT, 6, 0)).apply { isOpaque = false }
-
-        init {
-            rightPanel.add(sizeLabel)
-            panel.add(iconLabel, BorderLayout.WEST)
-            panel.add(textLabel, BorderLayout.CENTER)
-            panel.add(rightPanel, BorderLayout.EAST)
-        }
-
-        override fun getListCellRendererComponent(
-            list: JList<out RallyAttachment>,
-            value: RallyAttachment,
-            index: Int,
-            isSelected: Boolean,
-            cellHasFocus: Boolean
-        ): Component {
-            panel.background = if (isSelected) list.selectionBackground else list.background
-
-            val isImage = value.contentType?.startsWith("image/") == true
-            iconLabel.icon = if (isImage) AllIcons.FileTypes.Image else AllIcons.FileTypes.Any_type
-
-            textLabel.text = value.name ?: "Unknown"
-            textLabel.foreground = if (isSelected) list.selectionForeground else list.foreground
-
-            val sizeText = formatFileSize(value.size)
-            sizeLabel.isVisible = sizeText.isNotBlank()
-            sizeLabel.text = sizeText
-            sizeLabel.foreground = if (isSelected) list.selectionForeground else JBColor.GRAY
-
-            return panel
-        }
     }
 }

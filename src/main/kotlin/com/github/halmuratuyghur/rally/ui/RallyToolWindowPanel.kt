@@ -14,8 +14,12 @@ import com.intellij.openapi.ui.Messages
 import com.intellij.openapi.ui.ValidationInfo
 import com.intellij.openapi.ui.popup.Balloon
 import com.intellij.openapi.ui.popup.JBPopupFactory
+import com.github.halmuratuyghur.rally.api.ArtifactQueryResult
 import com.github.halmuratuyghur.rally.api.RallyApiClient
 import com.github.halmuratuyghur.rally.api.RallyArtifact
+import com.github.halmuratuyghur.rally.api.RallyType
+import com.github.halmuratuyghur.rally.api.storyPoints
+import com.github.halmuratuyghur.rally.api.effectiveStateOrEmpty
 import com.github.halmuratuyghur.rally.api.RallyDefect
 import com.github.halmuratuyghur.rally.api.RallyTestCase
 import com.github.halmuratuyghur.rally.api.RallyIteration
@@ -49,24 +53,12 @@ class RallyToolWindowPanel(private val project: Project) : Disposable {
 
     companion object {
         private val LOG = Logger.getInstance(RallyToolWindowPanel::class.java)
-        private val SCOPE_OPTIONS = arrayOf(
-            "All Tickets",
-            "My Tickets",
-            "User Stories",
-            "Defects",
-            "Test Cases",
-            "Recent Activity"
-        )
+        // Combo arrays derive from the Scope/StateFilter enums (RallyFilters.kt) so the
+        // display strings have one source of truth and the filter branches compare against
+        // typed enums instead of bare literals (MED-13).
+        private val SCOPE_OPTIONS = Scope.entries.map { it.displayName }.toTypedArray()
         private const val DIVIDER_THICKNESS = 3
-        private val STATE_OPTIONS = arrayOf(
-            "Any State",
-            "Idea",
-            "Defined",
-            "In-Progress",
-            "Completed",
-            "Accepted",
-            "Active"
-        )
+        private val STATE_OPTIONS = StateFilter.entries.map { it.displayName }.toTypedArray()
     }
 
     private val mainPanel = JPanel(BorderLayout())
@@ -351,7 +343,11 @@ class RallyToolWindowPanel(private val project: Project) : Disposable {
             val newState = stateCombo.selectedItem as? String ?: return@addActionListener
             if (newState == lastState) return@addActionListener
             lastState = newState
-            loadTickets()
+            // State filtering is purely client-side (applyStateFilter over the already-loaded
+            // scope list), so a state change re-filters in memory with NO network round trip
+            // (P6/LOW-9). Scope/project/sprint changes still call loadTickets() because they
+            // can require a different query.
+            applySearchFilter()
         }
 
         // Project change — also reset iteration cache since iterations are project-scoped
@@ -485,7 +481,7 @@ class RallyToolWindowPanel(private val project: Project) : Disposable {
         // Capture all UI state on the EDT before dispatching to background thread
         val scope = scopeCombo.selectedItem as? String ?: "My Tickets"
         val stateFilter = stateCombo.selectedItem as? String ?: "Any State"
-        val pageSize = if (scope == "Recent Activity") 20 else settings.pageSize
+        val pageSize = if (Scope.fromDisplay(scope) == Scope.RECENT_ACTIVITY) 20 else settings.pageSize
 
         ApplicationManager.getApplication().executeOnPooledThread {
             try {
@@ -534,17 +530,11 @@ class RallyToolWindowPanel(private val project: Project) : Disposable {
                 val query = buildQuery(scope, effectiveIter, settings)
                 val hasIterationFilter = effectiveIter.isNotBlank() && effectiveIter != "All Sprints"
 
-                // Load artifacts. The sprint summary only needs the iteration's metadata now
+                // Sprint summary (apiExecutor) — submit FIRST so it runs concurrently with the
+                // artifact fetch below. The summary only needs the iteration's metadata now
                 // (its counts/points are derived from the filtered list in renderSprintSummary),
                 // so the only background work is finding the current iteration when no specific
                 // sprint is selected.
-                val artifactsFuture = java.util.concurrent.CompletableFuture.supplyAsync({
-                    if (scope == "Test Cases") {
-                        client.queryAllTestCases(query, pageSize, maxResults = pageSize)
-                    } else {
-                        client.queryAllArtifacts(query, pageSize, scope = scope, maxResults = pageSize)
-                    }
-                }, client.apiExecutor)
                 val sprintFuture = if (!hasIterationFilter) {
                     // "All Sprints" — resolve the current iteration (by today's date) for metadata.
                     java.util.concurrent.CompletableFuture.runAsync({
@@ -552,27 +542,41 @@ class RallyToolWindowPanel(private val project: Project) : Disposable {
                     }, client.apiExecutor)
                 } else null
 
-                val artifacts = artifactsFuture.get()
+                // Load artifacts. queryAllArtifactsParallel runs user stories + defects
+                // concurrently (defects on apiExecutor, stories inline on THIS unbounded pooled
+                // thread), halving the two serial round trips the old sequential queryAllArtifacts
+                // paid on every cold load (MED-2/P1). It returns an ArtifactQueryResult carrying
+                // any partial-failure reasons (MED-8). Run it directly on this executeOnPooledThread
+                // thread — NOT on apiExecutor — because it blocks on one apiExecutor slot internally.
+                val result: ArtifactQueryResult = if (Scope.fromDisplay(scope) == Scope.TEST_CASES) {
+                    ArtifactQueryResult(client.queryAllTestCases(query, pageSize, maxResults = pageSize))
+                } else {
+                    client.queryAllArtifactsParallel(query, pageSize, scope = scope, maxResults = pageSize)
+                }
+                val artifacts = result.artifacts
 
                 // A specific sprint is selected — resolve its metadata from cache (no API call).
                 if (hasIterationFilter) {
                     resolveSelectedSprint(effectiveIter)
                 }
 
-                // Client-side filtering for state and type
-                val filtered = applyClientFilter(scope, stateFilter, artifacts)
+                // Apply only the scope (type) filter now; the state filter is applied at display
+                // time in applySearchFilter so a state-combo change re-filters in memory with no
+                // re-fetch (P6/LOW-9).
+                val scopeFiltered = applyScopeFilter(scope, artifacts)
+                val shownCount = applyStateFilter(stateFilter, scopeFiltered).size
 
                 invokeLaterIfAlive {
-                    allArtifacts = filtered
+                    allArtifacts = scopeFiltered
                     detailPanel.clear()
                     applySearchFilter()
                     loading = false
-                    statusLabel.text = "${filtered.size} loaded"
-                    if (filtered.isEmpty()) {
-                        val projectName = projectCombo.selectedItem as? String ?: "All Projects"
-                        val filterDesc = if (stateFilter == "Any State") scope else "$scope / $stateFilter"
-                        artifactList.emptyText.text = "No tickets found for $filterDesc in project: $projectName"
-                    }
+                    // A partial result (one of stories/defects failed) is shown but flagged so the
+                    // user knows the list is incomplete rather than legitimately short (MED-8).
+                    statusLabel.text = if (result.isPartial) "$shownCount loaded (incomplete)" else "$shownCount loaded"
+                    statusLabel.icon = if (result.isPartial) AllIcons.General.Warning else null
+                    // applySearchFilter() above already refreshes the empty placeholder when the
+                    // displayed list is empty (updateEmptyText), covering search + state filters.
                     if (pendingReload) {
                         pendingReload = false
                         loadTickets()
@@ -784,7 +788,7 @@ class RallyToolWindowPanel(private val project: Project) : Disposable {
         // State/type filtering is done client-side since ScheduleState vs State differs by type
         val conditions = mutableListOf<String>()
 
-        if (scope == "My Tickets" && settings.username.isNotBlank()) {
+        if (Scope.fromDisplay(scope) == Scope.MY_TICKETS && settings.username.isNotBlank()) {
             val safeUsername = RallyApiClient.escapeQueryValue(settings.username)
             conditions.add("(Owner.UserName = \"$safeUsername\")")
         }
@@ -803,28 +807,28 @@ class RallyToolWindowPanel(private val project: Project) : Disposable {
         return query
     }
 
-    private fun applyClientFilter(scope: String, stateFilter: String, artifacts: List<RallyArtifact>): List<RallyArtifact> {
-        // First apply scope (type) filter
-        val scopeFiltered = when (scope) {
-            "User Stories" -> artifacts.filter { it.type == "HierarchicalRequirement" }
-            "Defects" -> artifacts.filter { it.type == "Defect" }
-            "Test Cases" -> artifacts.filter { it.type == "TestCase" }
+    /** Scope (type) filter only. Split out from state filtering so state changes can be
+     *  applied client-side without re-fetching (P6/LOW-9). */
+    private fun applyScopeFilter(scope: String, artifacts: List<RallyArtifact>): List<RallyArtifact> =
+        when (Scope.fromDisplay(scope)) {
+            Scope.USER_STORIES -> artifacts.filter { it.type == RallyType.USER_STORY }
+            Scope.DEFECTS -> artifacts.filter { it.type == RallyType.DEFECT }
+            Scope.TEST_CASES -> artifacts.filter { it.type == RallyType.TEST_CASE }
             else -> artifacts
         }
 
-        // Then apply state filter
-        return when (stateFilter) {
-            "Active" -> scopeFiltered.filter {
-                val state = it.scheduleState ?: it.state ?: ""
-                state !in setOf("Accepted", "Completed", "Idea")
-            }
-            "Any State" -> scopeFiltered
-            else -> scopeFiltered.filter {
-                val state = it.scheduleState ?: it.state ?: ""
-                state.equals(stateFilter, ignoreCase = true)
-            }
+    /** State filter only (client-side; ScheduleState vs State differs by artifact type). */
+    private fun applyStateFilter(stateFilter: String, artifacts: List<RallyArtifact>): List<RallyArtifact> =
+        when (StateFilter.fromDisplay(stateFilter)) {
+            StateFilter.ACTIVE -> artifacts.filter { it.effectiveStateOrEmpty !in activeExcludedStates }
+            StateFilter.ANY -> artifacts
+            else -> artifacts.filter { it.effectiveStateOrEmpty.equals(stateFilter, ignoreCase = true) }
         }
-    }
+
+    /** Combined scope + state filter — used by the server-search path, which starts from
+     *  raw results and needs both applied at once. */
+    private fun applyClientFilter(scope: String, stateFilter: String, artifacts: List<RallyArtifact>): List<RallyArtifact> =
+        applyStateFilter(stateFilter, applyScopeFilter(scope, artifacts))
 
     /**
      * Thread-safe project ref lookup using cached data + persisted settings.
@@ -899,26 +903,48 @@ class RallyToolWindowPanel(private val project: Project) : Disposable {
 
     // ── Search Filter ────────────────────────────────────────────
 
+    /**
+     * Refresh the ticket list's empty placeholder to reflect the active scope/state/project.
+     * Called whenever the displayed list ends up empty — including a client-side state-filter
+     * change, which no longer goes through loadTickets() (P6/LOW-9), so the placeholder would
+     * otherwise show a stale message from the previous filter.
+     */
+    private fun updateEmptyText() {
+        val scope = scopeCombo.selectedItem as? String ?: Scope.ALL_TICKETS.displayName
+        val stateFilter = stateCombo.selectedItem as? String ?: StateFilter.ANY.displayName
+        val projectName = projectCombo.selectedItem as? String ?: "All Projects"
+        val filterDesc = if (StateFilter.fromDisplay(stateFilter) == StateFilter.ANY) scope else "$scope / $stateFilter"
+        artifactList.emptyText.text = "No tickets found for $filterDesc in project: $projectName"
+    }
+
     private fun applySearchFilter() {
         if (disposed) return
         val query = searchField.text.trim()
 
+        // allArtifacts holds the scope-filtered (but NOT state-filtered) list, so the
+        // active state filter is applied here at display time — this is what lets a
+        // state-combo change re-filter in memory with no network round trip (P6/LOW-9).
+        val stateFilter = stateCombo.selectedItem as? String ?: StateFilter.ANY.displayName
+        val base = applyStateFilter(stateFilter, allArtifacts)
+
         if (query.isBlank()) {
-            // Search cleared — restore full list and cancel any pending server search
+            // Search cleared — restore the state-filtered list and cancel any pending server search
             activeServerSearch = null
-            updateListModel(allArtifacts)
-            updateStats(allArtifacts)
+            updateListModel(base)
+            updateStats(base)
+            if (base.isEmpty()) updateEmptyText()
             return
         }
 
         // Client-side filter first
-        val filtered = allArtifacts.filter {
+        val filtered = base.filter {
             it.formattedID?.contains(query, ignoreCase = true) == true ||
                     it.name?.contains(query, ignoreCase = true) == true
         }
 
         updateListModel(filtered)
         updateStats(filtered)
+        if (filtered.isEmpty()) updateEmptyText()
 
         // Server-side fallback: fire when client-side returns 0 results and query >= 3 chars
         if (filtered.isEmpty() && query.length >= 3) {
@@ -929,12 +955,12 @@ class RallyToolWindowPanel(private val project: Project) : Disposable {
             val serverResultLimit = RallySettings.getInstance().pageSize.coerceIn(25, 100)
 
             val iterFilter = iterationCombo.selectedItem as? String ?: ""
-            val ownerFilter = if (scope == "My Tickets") RallySettings.getInstance().username else ""
+            val ownerFilter = if (Scope.fromDisplay(scope) == Scope.MY_TICKETS) RallySettings.getInstance().username else ""
 
             ApplicationManager.getApplication().executeOnPooledThread {
                 try {
                     val client = getClient()
-                    val serverResults = client.searchArtifacts(query, scope, serverResultLimit, serverResultLimit)
+                    val serverResults = client.searchArtifacts(query, scope, serverResultLimit, serverResultLimit).artifacts
                     // Apply the same client-side filters so server results respect active scope/state/owner/sprint
                     var filteredResults = applyClientFilter(scope, stateFilter, serverResults)
                     if (ownerFilter.isNotBlank()) {
@@ -1034,11 +1060,7 @@ class RallyToolWindowPanel(private val project: Project) : Disposable {
     private fun updateStats(artifacts: List<RallyArtifact>) {
         var totalPoints = 0.0
         for (artifact in artifacts) {
-            val points = when (artifact) {
-                is RallyUserStory -> artifact.planEstimate
-                is RallyDefect -> artifact.planEstimate
-                else -> null
-            }
+            val points = artifact.storyPoints
             if (points != null) totalPoints += points
         }
         statsLabel.text = "${artifacts.size} items, ${Math.round(totalPoints)} pts"
@@ -1052,257 +1074,30 @@ class RallyToolWindowPanel(private val project: Project) : Disposable {
     private fun showCreateDefectDialog() {
         val settings = RallySettings.getInstance()
         if (!settings.isConfiguredOrLoading()) {
-            Messages.showErrorDialog(project, "Configure Rally in Settings \u2192 Tools \u2192 Rally first.", "Rally")
+            Messages.showErrorDialog(project, "Configure Rally in Settings → Tools → Rally first.", "Rally")
             return
         }
 
-        val dialog = CreateDefectDialog()
+        val dialog = CreateDefectDialog(
+            project, cachedProjects, cachedIterations,
+            getSelectedProjectRef(), getSelectedIterationRef()
+        )
         if (!dialog.showAndGet()) return
 
-        val name = dialog.nameField.text.trim()
-        val description = dialog.descriptionArea.text.trim().ifBlank { null }
-        val selectedProjectIndex = dialog.projectCombo.selectedIndex
-        val selectedIterationIndex = dialog.iterationCombo.selectedIndex
-        val assignToMe = dialog.assignToMeCheckbox.isSelected
-        val attachment = dialog.attachmentFile
-        val severity = (dialog.severityCombo.selectedItem as? String)?.ifBlank { null }
-        val priority = (dialog.priorityCombo.selectedItem as? String)?.ifBlank { null }
+        val name = dialog.artifactName
+        val description = dialog.descriptionText
+        // Dialog "All Projects" falls back to the toolbar's current project (original behavior).
+        val projectRef = dialog.selectedProjectRef ?: getSelectedProjectRef()
+        val iterationRef = dialog.selectedIterationRef
+        val severity = dialog.severity
+        val priority = dialog.priority
 
-        statusLabel.text = "Creating..."
-
-        ApplicationManager.getApplication().executeOnPooledThread {
-            try {
-                val client = getClient()
-                // Re-check the attachment just before creating anything: doValidate()
-                // sampled the size at OK-press time on the EDT, but the file can be
-                // appended to or deleted before this task runs — discovering that
-                // AFTER the create would orphan the new artifact.
-                if (attachment != null && (!attachment.exists() || attachment.length() > RallyApiClient.MAX_UPLOAD_BYTES)) {
-                    invokeLaterIfAlive {
-                        statusLabel.text = "Create cancelled"
-                        Messages.showErrorDialog(
-                            project,
-                            "Attachment '${attachment.name}' is missing or exceeds the " +
-                                "${RallyApiClient.MAX_UPLOAD_BYTES / (1024 * 1024)} MB upload limit.",
-                            "Rally"
-                        )
-                    }
-                    return@executeOnPooledThread
-                }
-                // Snapshot the volatile caches so a background reload mid-create
-                // can't replace the list between the size check and the index access.
-                val projectsSnapshot = cachedProjects
-                val iterationsSnapshot = cachedIterations
-                val projectRefForCreate = if (selectedProjectIndex > 0 && selectedProjectIndex - 1 < projectsSnapshot.size) {
-                    projectsSnapshot[selectedProjectIndex - 1].ref
-                } else {
-                    getSelectedProjectRef()
-                }
-                val iterationRefForCreate = if (selectedIterationIndex > 0 && selectedIterationIndex - 1 < iterationsSnapshot.size) {
-                    iterationsSnapshot[selectedIterationIndex - 1].ref
-                } else {
-                    null
-                }
-                var assignWarning: String? = null
-                val ownerRef = if (assignToMe && settings.username.isNotBlank()) {
-                    try {
-                        client.getUserByUsername(settings.username).ref
-                    } catch (e: Exception) {
-                        LOG.warn("Failed to resolve user ${settings.username} for assign-to-me", e)
-                        assignWarning = "couldn't resolve user — created without owner"
-                        null
-                    }
-                } else {
-                    null
-                }
-
-                val created = client.createDefect(name, projectRefForCreate, ownerRef = ownerRef, description = description, iterationRef = iterationRefForCreate, severity = severity, priority = priority)
-                val createdId = created.formattedID ?: "?"
-
-                // Upload attachment if a file was selected
-                if (attachment != null && created.ref != null) {
-                    invokeLaterIfAlive {
-                        statusLabel.text = "Uploading attachment..."
-                    }
-                    client.uploadAttachment(created.ref, attachment.toPath())
-                }
-
-                invokeLaterIfAlive {
-                    val attachMsg = if (attachment != null) " with attachment" else ""
-                    val warningMsg = assignWarning?.let { " ($it)" } ?: ""
-                    val messageType = if (assignWarning != null) MessageType.WARNING else MessageType.INFO
-                    statusLabel.text = "Created $createdId$attachMsg$warningMsg"
-                    val balloon = JBPopupFactory.getInstance()
-                        .createHtmlTextBalloonBuilder("Created $createdId$attachMsg$warningMsg", messageType, null)
-                        .setFadeoutTime(3000)
-                        .createBalloon()
-                    balloon.show(RelativePoint.getSouthWestOf(statusLabel), Balloon.Position.above)
-                    // Optimistic update: prepend new item instead of full reload
-                    allArtifacts = listOf(created as RallyArtifact) + allArtifacts
-                    client.clearArtifactCache()
-                    applySearchFilter()
-                    // Select the newly created item
-                    val index = listModel.indexOf(created)
-                    if (index >= 0) artifactList.selectedIndex = index
-                }
-            } catch (e: Exception) {
-                LOG.error("Failed to create defect", e)
-                invokeLaterIfAlive {
-                    statusLabel.text = "Create failed"
-                    Messages.showErrorDialog(project, "Failed to create defect: ${e.message}", "Rally - Error")
-                }
-            }
+        executeCreate("defect", dialog.assignToMe, dialog.attachment) { client, ownerRef ->
+            client.createDefect(
+                name, projectRef, ownerRef = ownerRef, description = description,
+                iterationRef = iterationRef, severity = severity, priority = priority
+            )
         }
-    }
-
-    private inner class CreateDefectDialog : DialogWrapper(project) {
-        val nameField = JBTextField()
-        val projectCombo = ComboBox<String>()
-        val iterationCombo = ComboBox<String>()
-        val severityCombo = ComboBox(arrayOf("", "Crash/Data Loss", "Major Problem", "Minor Problem", "Cosmetic"))
-        val priorityCombo = ComboBox(arrayOf("", "Resolve Immediately", "High Attention", "Normal", "Low"))
-        val assignToMeCheckbox = javax.swing.JCheckBox("Assign to me")
-        val descriptionArea = JBTextArea(5, 40)
-        val attachmentPathField = JBTextField()
-        var attachmentFile: java.io.File? = null
-
-        init {
-            title = "Create Defect"
-            // Populate project combo from cached projects
-            projectCombo.addItem("All Projects")
-            cachedProjects.forEach { projectCombo.addItem(it.name ?: "Unnamed") }
-
-            // Pre-select current project from toolbar
-            val currentProjectIndex = this@RallyToolWindowPanel.projectCombo.selectedIndex
-            if (currentProjectIndex >= 0 && currentProjectIndex < projectCombo.itemCount) {
-                projectCombo.selectedIndex = currentProjectIndex
-            }
-
-            // Populate iteration combo from cached iterations
-            iterationCombo.addItem("Unscheduled")
-            cachedIterations.forEach { iter ->
-                val name = iter.name ?: "Unnamed"
-                val start = iter.startDate?.take(10) ?: ""
-                val end = iter.endDate?.take(10) ?: ""
-                val label = if (start.isNotBlank() && end.isNotBlank()) "$name ($start \u2192 $end)" else name
-                iterationCombo.addItem(label)
-            }
-
-            // Pre-select current iteration from toolbar
-            val currentIterIndex = this@RallyToolWindowPanel.iterationCombo.selectedIndex
-            if (currentIterIndex > 0 && currentIterIndex < iterationCombo.itemCount) {
-                iterationCombo.selectedIndex = currentIterIndex
-            }
-
-            assignToMeCheckbox.isSelected = true
-
-            init()
-        }
-
-        override fun createCenterPanel(): JComponent {
-            val panel = JPanel(BorderLayout(0, 8))
-            panel.border = JBUI.Borders.empty(8)
-
-            // Form fields at top using GridBagLayout for aligned labels
-            val formPanel = JPanel(java.awt.GridBagLayout())
-            val gbc = java.awt.GridBagConstraints()
-            gbc.insets = java.awt.Insets(0, 0, 6, 8)
-            gbc.anchor = java.awt.GridBagConstraints.WEST
-
-            // Row 0: Name
-            gbc.gridx = 0; gbc.gridy = 0; gbc.fill = java.awt.GridBagConstraints.NONE; gbc.weightx = 0.0
-            formPanel.add(JBLabel("Name:"), gbc)
-            gbc.gridx = 1; gbc.fill = java.awt.GridBagConstraints.HORIZONTAL; gbc.weightx = 1.0
-            formPanel.add(nameField, gbc)
-
-            // Row 1: Project
-            gbc.gridx = 0; gbc.gridy = 1; gbc.fill = java.awt.GridBagConstraints.NONE; gbc.weightx = 0.0
-            formPanel.add(JBLabel("Project:"), gbc)
-            gbc.gridx = 1; gbc.fill = java.awt.GridBagConstraints.HORIZONTAL; gbc.weightx = 1.0
-            formPanel.add(projectCombo, gbc)
-
-            // Row 2: Sprint
-            gbc.gridx = 0; gbc.gridy = 2; gbc.fill = java.awt.GridBagConstraints.NONE; gbc.weightx = 0.0
-            formPanel.add(JBLabel("Sprint:"), gbc)
-            gbc.gridx = 1; gbc.fill = java.awt.GridBagConstraints.HORIZONTAL; gbc.weightx = 1.0
-            formPanel.add(iterationCombo, gbc)
-
-            // Row 3: Severity
-            gbc.gridx = 0; gbc.gridy = 3; gbc.fill = java.awt.GridBagConstraints.NONE; gbc.weightx = 0.0
-            formPanel.add(JBLabel("Severity:"), gbc)
-            gbc.gridx = 1; gbc.fill = java.awt.GridBagConstraints.HORIZONTAL; gbc.weightx = 1.0
-            formPanel.add(severityCombo, gbc)
-
-            // Row 4: Priority
-            gbc.gridx = 0; gbc.gridy = 4; gbc.fill = java.awt.GridBagConstraints.NONE; gbc.weightx = 0.0
-            formPanel.add(JBLabel("Priority:"), gbc)
-            gbc.gridx = 1; gbc.fill = java.awt.GridBagConstraints.HORIZONTAL; gbc.weightx = 1.0
-            formPanel.add(priorityCombo, gbc)
-
-            // Row 5: Assign to me
-            gbc.gridx = 1; gbc.gridy = 5; gbc.fill = java.awt.GridBagConstraints.NONE; gbc.weightx = 0.0
-            formPanel.add(assignToMeCheckbox, gbc)
-
-            // Row 6: Attachment
-            gbc.gridx = 0; gbc.gridy = 6; gbc.fill = java.awt.GridBagConstraints.NONE; gbc.weightx = 0.0
-            formPanel.add(JBLabel("Attachment:"), gbc)
-            gbc.gridx = 1; gbc.fill = java.awt.GridBagConstraints.HORIZONTAL; gbc.weightx = 1.0
-            attachmentPathField.isEditable = false
-            val attachPanel = JPanel(BorderLayout(4, 0))
-            attachPanel.add(attachmentPathField, BorderLayout.CENTER)
-            val browseButton = JButton("Browse...")
-            browseButton.addActionListener {
-                // Use NoJars so a .zip is selectable as a single leaf file rather than
-                // navigable like a jar. createSingleFileDescriptor() (no-arg) is deprecated;
-                // this variant is the supported replacement and exists since 2024.1.
-                val descriptor = com.intellij.openapi.fileChooser.FileChooserDescriptorFactory.createSingleFileNoJarsDescriptor()
-                    .withTitle("Select ZIP file to attach")
-                    .withFileFilter { it.extension.equals("zip", ignoreCase = true) }
-                val chosen = com.intellij.openapi.fileChooser.FileChooser.chooseFile(descriptor, project, null)
-                if (chosen != null) {
-                    attachmentFile = java.io.File(chosen.path)
-                    attachmentPathField.text = chosen.name
-                }
-            }
-            attachPanel.add(browseButton, BorderLayout.EAST)
-            formPanel.add(attachPanel, gbc)
-
-            panel.add(formPanel, BorderLayout.NORTH)
-
-            // Description fills remaining space
-            descriptionArea.lineWrap = true
-            descriptionArea.wrapStyleWord = true
-            val descPanel = JPanel(BorderLayout(0, 4))
-            descPanel.add(JBLabel("Description:"), BorderLayout.NORTH)
-            descPanel.add(JBScrollPane(descriptionArea), BorderLayout.CENTER)
-            panel.add(descPanel, BorderLayout.CENTER)
-
-            panel.preferredSize = java.awt.Dimension(500, 440)
-            return panel
-        }
-
-        override fun doValidate(): ValidationInfo? {
-            if (nameField.text.isNullOrBlank()) {
-                return ValidationInfo("Name is required", nameField)
-            }
-            // Block OK on oversized attachments HERE, before anything is created:
-            // the upload only runs after the artifact create succeeds, so a
-            // client-side size failure at that point leaves a created-but-
-            // unattached artifact behind (and a retry duplicates it).
-            val attachLen = attachmentFile?.length() ?: 0L
-            if (attachLen > RallyApiClient.MAX_UPLOAD_BYTES) {
-                val oneMb = 1024L * 1024
-                return ValidationInfo(
-                    // Round up so a just-over-limit file doesn't display as "50 MB exceeds 50 MB".
-                    "Attachment is ${(attachLen + oneMb - 1) / oneMb} MB — Rally's upload limit is " +
-                        "${RallyApiClient.MAX_UPLOAD_BYTES / oneMb} MB",
-                    attachmentPathField
-                )
-            }
-            return null
-        }
-
-        override fun getPreferredFocusedComponent(): JComponent = nameField
     }
 
     private fun showCreateUserStoryDialog() {
@@ -1312,16 +1107,43 @@ class RallyToolWindowPanel(private val project: Project) : Disposable {
             return
         }
 
-        val dialog = CreateUserStoryDialog()
+        val dialog = CreateUserStoryDialog(
+            project, cachedProjects, cachedIterations,
+            getSelectedProjectRef(), getSelectedIterationRef()
+        )
         if (!dialog.showAndGet()) return
 
-        val name = dialog.nameField.text.trim()
-        val description = dialog.descriptionArea.text.trim().ifBlank { null }
-        val selectedProjectIndex = dialog.projectCombo.selectedIndex
-        val selectedIterationIndex = dialog.iterationCombo.selectedIndex
-        val assignToMe = dialog.assignToMeCheckbox.isSelected
-        val attachment = dialog.attachmentFile
+        val name = dialog.artifactName
+        val description = dialog.descriptionText
+        val projectRef = dialog.selectedProjectRef ?: getSelectedProjectRef()
+        val iterationRef = dialog.selectedIterationRef
 
+        executeCreate("user story", dialog.assignToMe, dialog.attachment) { client, ownerRef ->
+            client.createUserStory(
+                name, projectRef, ownerRef = ownerRef, description = description, iterationRef = iterationRef
+            )
+        }
+    }
+
+    /**
+     * Shared off-EDT create flow for the two Create dialogs (de-duplicates ~250 lines that
+     * were copy-pasted between the defect/user-story handlers — MED-10).
+     *
+     * Phase 1 (create) and Phase 2 (optional attachment upload) are deliberately SPLIT: once
+     * the create call returns, the artifact exists in Rally, so success is shown and the
+     * optimistic list-insert happens IMMEDIATELY — before the attachment upload is attempted.
+     * A post-create upload failure is then reported as a distinct "created, but upload failed"
+     * message instead of the old "Create failed", which hid the created artifact and invited a
+     * duplicate create (HIGH-2). [createFn] performs the type-specific create call (its second
+     * argument is the resolved owner ref); [typeLabel] names the artifact type for messages.
+     */
+    private fun executeCreate(
+        typeLabel: String,
+        assignToMe: Boolean,
+        attachment: java.io.File?,
+        createFn: (RallyApiClient, String?) -> RallyArtifact
+    ) {
+        val settings = RallySettings.getInstance()
         statusLabel.text = "Creating..."
 
         ApplicationManager.getApplication().executeOnPooledThread {
@@ -1343,20 +1165,7 @@ class RallyToolWindowPanel(private val project: Project) : Disposable {
                     }
                     return@executeOnPooledThread
                 }
-                // Snapshot the volatile caches so a background reload mid-create
-                // can't replace the list between the size check and the index access.
-                val projectsSnapshot = cachedProjects
-                val iterationsSnapshot = cachedIterations
-                val projectRefForCreate = if (selectedProjectIndex > 0 && selectedProjectIndex - 1 < projectsSnapshot.size) {
-                    projectsSnapshot[selectedProjectIndex - 1].ref
-                } else {
-                    getSelectedProjectRef()
-                }
-                val iterationRefForCreate = if (selectedIterationIndex > 0 && selectedIterationIndex - 1 < iterationsSnapshot.size) {
-                    iterationsSnapshot[selectedIterationIndex - 1].ref
-                } else {
-                    null
-                }
+
                 var assignWarning: String? = null
                 val ownerRef = if (assignToMe && settings.username.isNotBlank()) {
                     try {
@@ -1370,179 +1179,69 @@ class RallyToolWindowPanel(private val project: Project) : Disposable {
                     null
                 }
 
-                val created = client.createUserStory(name, projectRefForCreate, ownerRef = ownerRef, description = description, iterationRef = iterationRefForCreate)
+                // Phase 1: create. The artifact now exists in Rally — notify + optimistic
+                // insert immediately, BEFORE the separately-failable upload (HIGH-2).
+                val created = createFn(client, ownerRef)
                 val createdId = created.formattedID ?: "?"
-
-                // Upload attachment if a file was selected
-                if (attachment != null && created.ref != null) {
-                    invokeLaterIfAlive {
-                        statusLabel.text = "Uploading attachment..."
-                    }
-                    client.uploadAttachment(created.ref, attachment.toPath())
-                }
-
                 invokeLaterIfAlive {
-                    val attachMsg = if (attachment != null) " with attachment" else ""
                     val warningMsg = assignWarning?.let { " ($it)" } ?: ""
                     val messageType = if (assignWarning != null) MessageType.WARNING else MessageType.INFO
-                    statusLabel.text = "Created $createdId$attachMsg$warningMsg"
+                    statusLabel.text = "Created $createdId$warningMsg"
                     val balloon = JBPopupFactory.getInstance()
-                        .createHtmlTextBalloonBuilder("Created $createdId$attachMsg$warningMsg", messageType, null)
+                        .createHtmlTextBalloonBuilder("Created $createdId$warningMsg", messageType, null)
                         .setFadeoutTime(3000)
                         .createBalloon()
                     balloon.show(RelativePoint.getSouthWestOf(statusLabel), Balloon.Position.above)
                     // Optimistic update: prepend new item instead of full reload
-                    allArtifacts = listOf(created as RallyArtifact) + allArtifacts
+                    allArtifacts = listOf(created) + allArtifacts
                     client.clearArtifactCache()
                     applySearchFilter()
-                    // Select the newly created item
                     val index = listModel.indexOf(created)
                     if (index >= 0) artifactList.selectedIndex = index
                 }
+
+                // Phase 2: optional attachment upload. A failure here is NON-fatal — the
+                // artifact is already created, so never report "Create failed".
+                val createdRef = created.ref
+                if (attachment != null && createdRef != null) {
+                    invokeLaterIfAlive { statusLabel.text = "Uploading attachment..." }
+                    try {
+                        client.uploadAttachment(createdRef, attachment.toPath())
+                        invokeLaterIfAlive { statusLabel.text = "Created $createdId with attachment" }
+                    } catch (e: Exception) {
+                        LOG.warn("Attachment upload failed for $createdId", e)
+                        invokeLaterIfAlive {
+                            statusLabel.text = "Created $createdId — attachment upload failed"
+                            val safeMsg = com.intellij.openapi.util.text.StringUtil.escapeXmlEntities(
+                                e.message ?: e.javaClass.simpleName
+                            )
+                            val balloon = JBPopupFactory.getInstance()
+                                .createHtmlTextBalloonBuilder(
+                                    "Created $createdId, but attachment upload failed: $safeMsg<br>" +
+                                        "Re-attach from the detail panel.",
+                                    MessageType.WARNING, null
+                                )
+                                .setFadeoutTime(6000)
+                                .createBalloon()
+                            balloon.show(RelativePoint.getSouthWestOf(statusLabel), Balloon.Position.above)
+                        }
+                    }
+                }
             } catch (e: Exception) {
-                LOG.error("Failed to create user story", e)
+                LOG.error("Failed to create $typeLabel", e)
                 invokeLaterIfAlive {
                     statusLabel.text = "Create failed"
-                    Messages.showErrorDialog(project, "Failed to create user story: ${e.message}", "Rally - Error")
+                    Messages.showErrorDialog(project, "Failed to create $typeLabel: ${e.message}", "Rally - Error")
                 }
             }
         }
     }
 
-    private inner class CreateUserStoryDialog : DialogWrapper(project) {
-        val nameField = JBTextField()
-        val projectCombo = ComboBox<String>()
-        val iterationCombo = ComboBox<String>()
-        val assignToMeCheckbox = javax.swing.JCheckBox("Assign to me")
-        val descriptionArea = JBTextArea(5, 40)
-        val attachmentPathField = JBTextField()
-        var attachmentFile: java.io.File? = null
-
-        init {
-            title = "Create User Story"
-            // Populate project combo from cached projects
-            projectCombo.addItem("All Projects")
-            cachedProjects.forEach { projectCombo.addItem(it.name ?: "Unnamed") }
-
-            // Pre-select current project from toolbar
-            val currentProjectIndex = this@RallyToolWindowPanel.projectCombo.selectedIndex
-            if (currentProjectIndex >= 0 && currentProjectIndex < projectCombo.itemCount) {
-                projectCombo.selectedIndex = currentProjectIndex
-            }
-
-            // Populate iteration combo from cached iterations
-            iterationCombo.addItem("Unscheduled")
-            cachedIterations.forEach { iter ->
-                val name = iter.name ?: "Unnamed"
-                val start = iter.startDate?.take(10) ?: ""
-                val end = iter.endDate?.take(10) ?: ""
-                val label = if (start.isNotBlank() && end.isNotBlank()) "$name ($start → $end)" else name
-                iterationCombo.addItem(label)
-            }
-
-            // Pre-select current iteration from toolbar
-            val currentIterIndex = this@RallyToolWindowPanel.iterationCombo.selectedIndex
-            if (currentIterIndex > 0 && currentIterIndex < iterationCombo.itemCount) {
-                iterationCombo.selectedIndex = currentIterIndex
-            }
-
-            assignToMeCheckbox.isSelected = true
-
-            init()
-        }
-
-        override fun createCenterPanel(): JComponent {
-            val panel = JPanel(BorderLayout(0, 8))
-            panel.border = JBUI.Borders.empty(8)
-
-            // Form fields at top using GridBagLayout for aligned labels
-            val formPanel = JPanel(java.awt.GridBagLayout())
-            val gbc = java.awt.GridBagConstraints()
-            gbc.insets = java.awt.Insets(0, 0, 6, 8)
-            gbc.anchor = java.awt.GridBagConstraints.WEST
-
-            // Row 0: Name
-            gbc.gridx = 0; gbc.gridy = 0; gbc.fill = java.awt.GridBagConstraints.NONE; gbc.weightx = 0.0
-            formPanel.add(JBLabel("Name:"), gbc)
-            gbc.gridx = 1; gbc.fill = java.awt.GridBagConstraints.HORIZONTAL; gbc.weightx = 1.0
-            formPanel.add(nameField, gbc)
-
-            // Row 1: Project
-            gbc.gridx = 0; gbc.gridy = 1; gbc.fill = java.awt.GridBagConstraints.NONE; gbc.weightx = 0.0
-            formPanel.add(JBLabel("Project:"), gbc)
-            gbc.gridx = 1; gbc.fill = java.awt.GridBagConstraints.HORIZONTAL; gbc.weightx = 1.0
-            formPanel.add(projectCombo, gbc)
-
-            // Row 2: Sprint
-            gbc.gridx = 0; gbc.gridy = 2; gbc.fill = java.awt.GridBagConstraints.NONE; gbc.weightx = 0.0
-            formPanel.add(JBLabel("Sprint:"), gbc)
-            gbc.gridx = 1; gbc.fill = java.awt.GridBagConstraints.HORIZONTAL; gbc.weightx = 1.0
-            formPanel.add(iterationCombo, gbc)
-
-            // Row 3: Assign to me
-            gbc.gridx = 1; gbc.gridy = 3; gbc.fill = java.awt.GridBagConstraints.NONE; gbc.weightx = 0.0
-            formPanel.add(assignToMeCheckbox, gbc)
-
-            // Row 4: Attachment
-            gbc.gridx = 0; gbc.gridy = 4; gbc.fill = java.awt.GridBagConstraints.NONE; gbc.weightx = 0.0
-            formPanel.add(JBLabel("Attachment:"), gbc)
-            gbc.gridx = 1; gbc.fill = java.awt.GridBagConstraints.HORIZONTAL; gbc.weightx = 1.0
-            attachmentPathField.isEditable = false
-            val attachPanel = JPanel(BorderLayout(4, 0))
-            attachPanel.add(attachmentPathField, BorderLayout.CENTER)
-            val browseButton = JButton("Browse...")
-            browseButton.addActionListener {
-                // Use NoJars so a .zip is selectable as a single leaf file rather than
-                // navigable like a jar. createSingleFileDescriptor() (no-arg) is deprecated;
-                // this variant is the supported replacement and exists since 2024.1.
-                val descriptor = com.intellij.openapi.fileChooser.FileChooserDescriptorFactory.createSingleFileNoJarsDescriptor()
-                    .withTitle("Select ZIP file to attach")
-                    .withFileFilter { it.extension.equals("zip", ignoreCase = true) }
-                val chosen = com.intellij.openapi.fileChooser.FileChooser.chooseFile(descriptor, project, null)
-                if (chosen != null) {
-                    attachmentFile = java.io.File(chosen.path)
-                    attachmentPathField.text = chosen.name
-                }
-            }
-            attachPanel.add(browseButton, BorderLayout.EAST)
-            formPanel.add(attachPanel, gbc)
-
-            panel.add(formPanel, BorderLayout.NORTH)
-
-            // Description fills remaining space
-            descriptionArea.lineWrap = true
-            descriptionArea.wrapStyleWord = true
-            val descPanel = JPanel(BorderLayout(0, 4))
-            descPanel.add(JBLabel("Description:"), BorderLayout.NORTH)
-            descPanel.add(JBScrollPane(descriptionArea), BorderLayout.CENTER)
-            panel.add(descPanel, BorderLayout.CENTER)
-
-            panel.preferredSize = java.awt.Dimension(500, 380)
-            return panel
-        }
-
-        override fun doValidate(): ValidationInfo? {
-            if (nameField.text.isNullOrBlank()) {
-                return ValidationInfo("Name is required", nameField)
-            }
-            // Block OK on oversized attachments HERE, before anything is created:
-            // the upload only runs after the artifact create succeeds, so a
-            // client-side size failure at that point leaves a created-but-
-            // unattached artifact behind (and a retry duplicates it).
-            val attachLen = attachmentFile?.length() ?: 0L
-            if (attachLen > RallyApiClient.MAX_UPLOAD_BYTES) {
-                val oneMb = 1024L * 1024
-                return ValidationInfo(
-                    // Round up so a just-over-limit file doesn't display as "50 MB exceeds 50 MB".
-                    "Attachment is ${(attachLen + oneMb - 1) / oneMb} MB — Rally's upload limit is " +
-                        "${RallyApiClient.MAX_UPLOAD_BYTES / oneMb} MB",
-                    attachmentPathField
-                )
-            }
-            return null
-        }
-
-        override fun getPreferredFocusedComponent(): JComponent = nameField
+    /** Selected toolbar iteration's ref (null for "All Sprints"), read off the persisted selection. */
+    private fun getSelectedIterationRef(): String? {
+        val saved = RallySettings.getInstance().selectedIteration
+        if (saved.isBlank() || saved == "All Sprints") return null
+        return cachedIterations.firstOrNull { it.name == saved }?.ref
     }
 
     private fun openInBrowser() {
@@ -1596,8 +1295,10 @@ class RallyToolWindowPanel(private val project: Project) : Disposable {
                 val ref = artifact.ref
                 java.util.concurrent.CompletableFuture.runAsync({
                     try {
-                        exporter.exportArtifactJson(id, outputDir)
-                        exporter.exportArtifactMarkdown(id, outputDir)
+                        // Pass the in-memory artifact so the exporter resolves Description via a
+                        // cheap ref GET instead of re-running a FormattedID search query (MED-3/P4).
+                        exporter.exportArtifactJson(artifact, outputDir)
+                        exporter.exportArtifactMarkdown(artifact, outputDir)
                         artifactSuccess.incrementAndGet()
                     } catch (e: Exception) {
                         LOG.error("Failed to export $id", e)
@@ -1669,11 +1370,7 @@ class RallyToolWindowPanel(private val project: Project) : Disposable {
         val ref = selected.ref ?: return
         val type = selected.type ?: return
 
-        val currentPoints = when (selected) {
-            is RallyUserStory -> selected.planEstimate
-            is RallyDefect -> selected.planEstimate
-            else -> null
-        }
+        val currentPoints = selected.storyPoints
 
         val input = Messages.showInputDialog(
             project,
@@ -1763,6 +1460,9 @@ class RallyToolWindowPanel(private val project: Project) : Disposable {
             val results = java.util.concurrent.atomic.AtomicInteger(0)
             val failures = java.util.concurrent.atomic.AtomicInteger(0)
             val successfulRefs = java.util.concurrent.ConcurrentHashMap.newKeySet<String>()
+            // Track WHICH tickets failed so the user can tell which to revisit, instead of
+            // just a "Failed: N" count with no identifiers (MED-9).
+            val failedIds = java.util.concurrent.ConcurrentLinkedQueue<String>()
 
             // Update all selected artifacts in parallel
             val futures = selected.mapNotNull { artifact ->
@@ -1775,6 +1475,7 @@ class RallyToolWindowPanel(private val project: Project) : Disposable {
                         results.incrementAndGet()
                     } catch (e: Exception) {
                         LOG.error("Failed to update ${artifact.formattedID}", e)
+                        failedIds.add(artifact.formattedID ?: ref)
                         failures.incrementAndGet()
                     }
                 }, client.apiExecutor)
@@ -1785,9 +1486,14 @@ class RallyToolWindowPanel(private val project: Project) : Disposable {
 
             invokeLaterIfAlive {
                 if (failures.get() > 0) {
+                    // List the failed IDs (truncated) so the user knows exactly which tickets
+                    // didn't move and need attention (MED-9).
+                    val ids = failedIds.toList()
+                    val shown = ids.take(10).joinToString(", ")
+                    val suffix = if (ids.size > 10) ", … and ${ids.size - 10} more" else ""
                     Messages.showWarningDialog(
                         project,
-                        "Updated: ${results.get()}, Failed: ${failures.get()}",
+                        "Updated: ${results.get()}, Failed: ${failures.get()}\nFailed to move: $shown$suffix",
                         "Rally - State Change"
                     )
                 }
@@ -1827,12 +1533,17 @@ class RallyToolWindowPanel(private val project: Project) : Disposable {
             return
         }
 
+        // The FormattedID is Rally-controlled; sanitize it before it flows into a git branch
+        // ref so it can't inject ref-unsafe characters (LOW-50). Standard IDs like "US123"
+        // are unaffected.
+        val safeBranchId = ticketId.replace(Regex("[^A-Za-z0-9._-]"), "-")
+
         val settings = RallySettings.getInstance()
         val username = settings.username
 
         val branchPrefixes = arrayOf("feature", "bugfix", "hotfix", "refactor", "chore", "test")
         val defaultPrefix = when (ticketType) {
-            "Defect" -> "bugfix"
+            RallyType.DEFECT -> "bugfix"
             else -> "feature"
         }
 
@@ -1847,9 +1558,9 @@ class RallyToolWindowPanel(private val project: Project) : Disposable {
             }
 
             override fun createCenterPanel(): javax.swing.JComponent {
-                val previewLabel = JBLabel("Branch: ${prefixCombo.selectedItem}/$ticketId")
+                val previewLabel = JBLabel("Branch: ${prefixCombo.selectedItem}/$safeBranchId")
                 prefixCombo.addActionListener {
-                    previewLabel.text = "Branch: ${prefixCombo.selectedItem}/$ticketId"
+                    previewLabel.text = "Branch: ${prefixCombo.selectedItem}/$safeBranchId"
                 }
 
                 return javax.swing.JPanel(java.awt.GridBagLayout()).apply {
@@ -1877,7 +1588,7 @@ class RallyToolWindowPanel(private val project: Project) : Disposable {
 
         if (!dialog.showAndGet()) return
 
-        val branchName = "${dialog.prefixCombo.selectedItem}/$ticketId"
+        val branchName = "${dialog.prefixCombo.selectedItem}/$safeBranchId"
 
         statusLabel.text = "Starting work on $ticketId..."
 
@@ -2057,87 +1768,6 @@ class RallyToolWindowPanel(private val project: Project) : Disposable {
             currentClient!!.workspaceRef = workspaceRef
             // projectRef is managed by the project dropdown (updateClientProjectRef)
             currentClient!!
-        }
-    }
-
-    // ── Cell Renderer ────────────────────────────────────────────
-
-    private class ArtifactCellRenderer : ListCellRenderer<RallyArtifact> {
-
-        private val panel = JPanel(BorderLayout(8, 0)).apply { border = JBUI.Borders.empty(4, 6) }
-        private val iconLabel = JLabel()
-        private val textLabel = JLabel()
-        private val stateBadge = StatusBadge()
-        private val ownerLabel = JLabel()
-        private val rightPanel = JPanel(FlowLayout(FlowLayout.RIGHT, 8, 0)).apply { isOpaque = false }
-
-        init {
-            rightPanel.add(ownerLabel)
-            rightPanel.add(stateBadge)
-            panel.add(iconLabel, BorderLayout.WEST)
-            panel.add(textLabel, BorderLayout.CENTER)
-            panel.add(rightPanel, BorderLayout.EAST)
-        }
-
-        override fun getListCellRendererComponent(
-            list: JList<out RallyArtifact>,
-            value: RallyArtifact,
-            index: Int,
-            isSelected: Boolean,
-            cellHasFocus: Boolean
-        ): Component {
-            panel.background = if (isSelected) list.selectionBackground else list.background
-
-            iconLabel.icon = when (value.type) {
-                "HierarchicalRequirement" -> AllIcons.Nodes.PpLib
-                "Defect" -> AllIcons.General.Error
-                "TestCase" -> AllIcons.RunConfigurations.TestState.Run
-                else -> AllIcons.FileTypes.Any_type
-            }
-
-            textLabel.text = "${value.formattedID ?: "?"}: ${value.name ?: "Untitled"}"
-
-            // Show blocked indicator
-            val isBlocked = when (value) {
-                is RallyUserStory -> value.blocked == true
-                is RallyDefect -> value.blocked == true
-                else -> false
-            }
-            if (isBlocked) {
-                textLabel.text = "\u26D4 ${textLabel.text}"
-            }
-
-            textLabel.foreground = if (isSelected) list.selectionForeground else list.foreground
-
-            val state = if (value is RallyTestCase) {
-                value.lastVerdict ?: "No Verdict"
-            } else {
-                value.scheduleState ?: value.state ?: "Unknown"
-            }
-            // The badge keeps its own colors on selected rows: its opaque pastel fill
-            // is its local background, so contrast is selection-independent.
-            stateBadge.update(state, RallyColors.forState(state))
-
-            ownerLabel.text = value.owner?.displayName ?: value.owner?.refObjectName ?: ""
-            ownerLabel.foreground = if (isSelected) list.selectionForeground else JBColor.GRAY
-
-            panel.toolTipText = "${value.formattedID}: ${value.name}"
-
-            return panel
-        }
-    }
-}
-
-/**
- * Custom SplitPane UI that draws a thin dark line instead of the default thick divider.
- */
-private class ThinDividerSplitPaneUI : javax.swing.plaf.basic.BasicSplitPaneUI() {
-    override fun createDefaultDivider(): javax.swing.plaf.basic.BasicSplitPaneDivider {
-        return object : javax.swing.plaf.basic.BasicSplitPaneDivider(this) {
-            override fun paint(g: java.awt.Graphics) {
-                g.color = RallyColors.DIVIDER
-                g.fillRect(0, 0, width, height)
-            }
         }
     }
 }

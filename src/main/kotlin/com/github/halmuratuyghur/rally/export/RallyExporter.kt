@@ -2,8 +2,12 @@ package com.github.halmuratuyghur.rally.export
 
 import com.intellij.openapi.diagnostic.Logger
 import com.github.halmuratuyghur.rally.api.RallyApiClient
+import com.github.halmuratuyghur.rally.api.RallyArtifact
 import com.github.halmuratuyghur.rally.api.RallyAttachment
 import com.github.halmuratuyghur.rally.api.RallyTestCaseStep
+import com.github.halmuratuyghur.rally.api.RallyType
+import com.github.halmuratuyghur.rally.api.effectiveStateOrEmpty
+import com.github.halmuratuyghur.rally.api.storyPoints
 import com.github.halmuratuyghur.rally.util.RallyFileUtils
 import com.github.halmuratuyghur.rally.util.RallyHtmlUtils
 import com.google.gson.GsonBuilder
@@ -17,6 +21,8 @@ import java.time.Instant
 import java.util.*
 import java.util.concurrent.CompletableFuture
 import java.util.concurrent.ConcurrentHashMap
+import java.util.concurrent.ExecutorService
+import java.util.concurrent.Executors
 import java.util.concurrent.Semaphore
 import java.util.concurrent.atomic.AtomicInteger
 
@@ -46,6 +52,15 @@ class RallyExporter(private val client: RallyApiClient) {
          * whole export.
          */
         private const val MAX_INLINE_IMAGES_PER_DESCRIPTION = 50
+
+        /**
+         * Width of the dedicated download pool used by [downloadInlineImages] and
+         * [attachmentsToJsonArray] (MED-1/P2). These pools are created and shut down
+         * per call — they MUST be separate from [RallyApiClient.apiExecutor] because
+         * export runs each artifact's task ON apiExecutor; submitting inner download
+         * tasks back to that fixed pool and blocking on join() would self-deadlock.
+         */
+        private const val DOWNLOAD_POOL_SIZE = 8
 
         /**
          * Escape Markdown special characters that would otherwise corrupt structure
@@ -109,6 +124,15 @@ class RallyExporter(private val client: RallyApiClient) {
     /** Per-session cache for downloaded inline-image paths — same dedup role as
      *  [downloadedPaths]: the JSON and Markdown passes generate identical image jobs. */
     private val downloadedImagePaths = ConcurrentHashMap<String, String>()
+
+    /**
+     * Guards the filesystem name-allocation + write critical section in
+     * [downloadAttachmentContent] (MED-1/P2). Attachment downloads now run on a
+     * dedicated pool, so two distinct attachments sharing a sanitized name could
+     * otherwise race the `Files.exists` collision counter and pick the same suffix.
+     * The network download stays outside the lock; only the resolve-and-write is serialized.
+     */
+    private val attachmentWriteLock = Any()
 
     // ── Test Case Export ─────────────────────────────────────────
 
@@ -207,7 +231,7 @@ class RallyExporter(private val client: RallyApiClient) {
                     addProperty("type", artifact.type ?: "")
                     addProperty("name", artifact.name ?: "")
                     addProperty("description", stripHtml(desc))
-                    addProperty("state", artifact.scheduleState ?: artifact.state ?: "")
+                    addProperty("state", artifact.effectiveStateOrEmpty)
                     addProperty("owner", artifact.owner?.displayName ?: artifact.owner?.refObjectName ?: "")
                     addProperty("creationDate", artifact.creationDate ?: "")
                     addProperty("lastUpdateDate", artifact.lastUpdateDate ?: "")
@@ -224,7 +248,7 @@ class RallyExporter(private val client: RallyApiClient) {
 
                 // User story specific fields
                 if (artifact is com.github.halmuratuyghur.rally.api.RallyUserStory) {
-                    obj.addProperty("planEstimate", artifact.planEstimate ?: 0.0)
+                    obj.addProperty("planEstimate", artifact.storyPoints ?: 0.0)
                     obj.addProperty("project", artifact.project?.refObjectName ?: artifact.project?.name ?: "")
                     obj.addProperty("iteration", artifact.iteration?.refObjectName ?: artifact.iteration?.name ?: "")
                 }
@@ -280,7 +304,7 @@ class RallyExporter(private val client: RallyApiClient) {
                     val safeOwner = escapeMarkdown(artifact.owner?.displayName ?: artifact.owner?.refObjectName ?: "")
                     writer.write("## $id — $safeName\n\n")
                     writer.write("- **Type:** ${escapeMarkdown(artifact.type ?: "")}\n")
-                    writer.write("- **State:** ${escapeMarkdown(artifact.scheduleState ?: artifact.state ?: "")}\n")
+                    writer.write("- **State:** ${escapeMarkdown(artifact.effectiveStateOrEmpty)}\n")
                     writer.write("- **Owner:** $safeOwner\n")
                     writer.write("- **Created:** ${artifact.creationDate?.take(10) ?: ""}\n")
                     writer.write("- **Updated:** ${artifact.lastUpdateDate?.take(10) ?: ""}\n")
@@ -294,7 +318,7 @@ class RallyExporter(private val client: RallyApiClient) {
                     }
 
                     if (artifact is com.github.halmuratuyghur.rally.api.RallyUserStory) {
-                        writer.write("- **Plan Estimate:** ${artifact.planEstimate ?: ""}\n")
+                        writer.write("- **Plan Estimate:** ${artifact.storyPoints ?: ""}\n")
                         writer.write("- **Project:** ${escapeMarkdown(artifact.project?.refObjectName ?: artifact.project?.name ?: "")}\n")
                         writer.write("- **Iteration:** ${escapeMarkdown(artifact.iteration?.refObjectName ?: artifact.iteration?.name ?: "")}\n")
                     }
@@ -363,11 +387,27 @@ class RallyExporter(private val client: RallyApiClient) {
 
     // ── Artifact Export ──────────────────────────────────────────
 
+    // The String-ID entry points resolve the artifact via a FormattedID search
+    // (getArtifactByFormattedId) and then delegate to the artifact-object overloads.
+    // The test-case export entry points and any caller that only has an ID still use
+    // these.
     fun exportArtifactJson(artifactId: String, outputDir: String) {
-        LOG.info("Generating JSON for artifact: $artifactId")
-
         val artifact = client.getArtifactByFormattedId(artifactId)
             ?: throw RuntimeException("Artifact $artifactId not found")
+        exportArtifactJson(artifact, outputDir)
+    }
+
+    /**
+     * Export an already-in-memory artifact to JSON (MED-3). Avoids the redundant
+     * FormattedID search the String-ID overload pays: the artifact object is already
+     * loaded, and its Description (excluded from list queries) is obtained via the
+     * cheaper direct-ref [RallyApiClient.fetchDescription] GET rather than another
+     * heavy search query. If the object already carries a non-blank Description, no
+     * fetch is issued at all.
+     */
+    fun exportArtifactJson(artifact: RallyArtifact, outputDir: String) {
+        val artifactId = artifact.formattedID ?: ""
+        LOG.info("Generating JSON for artifact: $artifactId")
 
         val output = JsonObject().apply {
             addProperty("id", artifactId)
@@ -377,7 +417,7 @@ class RallyExporter(private val client: RallyApiClient) {
         }
 
         // Process description with inline images
-        val rawDesc = artifact.description ?: ""
+        val rawDesc = resolveDescription(artifact)
         val processedDesc = downloadInlineImages(rawDesc, artifactId, outputDir)
         output.addProperty("description", processedDesc)
 
@@ -412,17 +452,27 @@ class RallyExporter(private val client: RallyApiClient) {
     }
 
     fun exportArtifactMarkdown(artifactId: String, outputDir: String) {
-        LOG.info("Generating Markdown for artifact: $artifactId")
-
         val artifact = client.getArtifactByFormattedId(artifactId)
             ?: throw RuntimeException("Artifact $artifactId not found")
+        exportArtifactMarkdown(artifact, outputDir)
+    }
+
+    /**
+     * Export an already-in-memory artifact to Markdown (MED-3). Same rationale as
+     * [exportArtifactJson]: no redundant FormattedID search, Description resolved via
+     * the cheaper direct-ref [RallyApiClient.fetchDescription] (or skipped entirely
+     * when already populated).
+     */
+    fun exportArtifactMarkdown(artifact: RallyArtifact, outputDir: String) {
+        val artifactId = artifact.formattedID ?: ""
+        LOG.info("Generating Markdown for artifact: $artifactId")
 
         val md = StringBuilder()
         md.appendLine("# $artifactId - ${artifact.name ?: ""}")
         md.appendLine()
 
         // Description with inline images
-        val desc = downloadInlineImages(artifact.description ?: "", artifactId, outputDir)
+        val desc = downloadInlineImages(resolveDescription(artifact), artifactId, outputDir)
         md.appendLine("## Description")
         md.appendLine(desc)
         md.appendLine()
@@ -463,6 +513,19 @@ class RallyExporter(private val client: RallyApiClient) {
         LOG.info("Generated Markdown: $mdPath")
     }
 
+    /**
+     * Description for an in-memory artifact (MED-3). List queries exclude Description
+     * for smaller payloads, so the object's [RallyArtifact.description] is usually null;
+     * we then fetch it via the cheap direct-ref GET ([RallyApiClient.fetchDescription])
+     * instead of re-running a FormattedID search. When the object already carries a
+     * non-blank Description, no fetch is issued.
+     */
+    private fun resolveDescription(artifact: RallyArtifact): String {
+        artifact.description?.takeIf { it.isNotBlank() }?.let { return it }
+        val ref = artifact.ref ?: return ""
+        return client.fetchDescription(ref) ?: ""
+    }
+
     // ── Helpers ──────────────────────────────────────────────────
 
     private fun queryTestCaseByFormattedId(testCaseId: String): com.github.halmuratuyghur.rally.api.RallyTestCase? {
@@ -493,13 +556,35 @@ class RallyExporter(private val client: RallyApiClient) {
         outputDir: String
     ): JsonArray {
         val attachDir = RallyFileUtils.safeResolve(Paths.get(outputDir), "${artifactId}_attachments").toString()
+        if (attachments.isEmpty()) return JsonArray()
 
-        // Download attachments sequentially to avoid apiExecutor self-deadlock
-        // (this method is called from within an apiExecutor task during export)
+        // Download attachments in parallel on a dedicated pool (MED-1/P2). This pool MUST
+        // be separate from client.apiExecutor: export runs each artifact's task ON
+        // apiExecutor (see RallyToolWindowPanel), so submitting inner download tasks back
+        // to that fixed pool and blocking on join() would self-deadlock once the selection
+        // count reaches the pool size. The dedup caches (downloadedPaths) are
+        // ConcurrentHashMap and the filename-allocation+write is serialized via
+        // attachmentWriteLock, so concurrent downloads stay correct. Results are written
+        // into an index-keyed array so the emitted JSON order matches the input order
+        // regardless of completion order.
+        val savedPaths = arrayOfNulls<String>(attachments.size)
+        val pool = Executors.newFixedThreadPool(minOf(DOWNLOAD_POOL_SIZE, attachments.size))
+        try {
+            val futures = attachments.mapIndexed { index, att ->
+                val attName = att.name ?: "unnamed"
+                CompletableFuture.runAsync({
+                    savedPaths[index] = downloadAttachmentContent(att, attachDir, attName)
+                }, pool)
+            }
+            CompletableFuture.allOf(*futures.toTypedArray()).join()
+        } finally {
+            pool.shutdownNow()
+        }
+
         val array = JsonArray()
-        for (att in attachments) {
+        for ((index, att) in attachments.withIndex()) {
             val attName = att.name ?: "unnamed"
-            val savedPath = downloadAttachmentContent(att, attachDir, attName)
+            val savedPath = savedPaths[index]
             val obj = JsonObject().apply {
                 addProperty("name", attName)
                 addProperty("contentType", att.contentType ?: "")
@@ -553,20 +638,25 @@ class RallyExporter(private val client: RallyApiClient) {
             } ?: return null
 
             // safeResolve handles sanitization + containment. Dedup on existing names.
-            var outputPath = RallyFileUtils.safeResolve(attachDirPath, safeFileName)
-            if (Files.exists(outputPath)) {
-                val baseName = safeFileName.substringBeforeLast(".", safeFileName)
-                val ext = if (safeFileName.contains(".")) ".${safeFileName.substringAfterLast(".")}" else ""
-                var counter = 1
-                while (Files.exists(outputPath)) {
-                    outputPath = RallyFileUtils.safeResolve(attachDirPath, "${baseName}_$counter$ext")
-                    counter++
+            // The name-allocation + write is serialized via attachmentWriteLock: with the
+            // dedicated download pool (MED-1/P2), two distinct attachments sharing a name
+            // could otherwise pick the same "_N" suffix and clobber each other.
+            val path = synchronized(attachmentWriteLock) {
+                var outputPath = RallyFileUtils.safeResolve(attachDirPath, safeFileName)
+                if (Files.exists(outputPath)) {
+                    val baseName = safeFileName.substringBeforeLast(".", safeFileName)
+                    val ext = if (safeFileName.contains(".")) ".${safeFileName.substringAfterLast(".")}" else ""
+                    var counter = 1
+                    while (Files.exists(outputPath)) {
+                        outputPath = RallyFileUtils.safeResolve(attachDirPath, "${baseName}_$counter$ext")
+                        counter++
+                    }
                 }
-            }
 
-            Files.write(outputPath, fileBytes)
-            LOG.info("Saved attachment: $outputPath (${fileBytes.size} bytes)")
-            val path = outputPath.toAbsolutePath().toString()
+                Files.write(outputPath, fileBytes)
+                LOG.info("Saved attachment: $outputPath (${fileBytes.size} bytes)")
+                outputPath.toAbsolutePath().toString()
+            }
             // putIfAbsent: harmless today (passes are sequential per artifact), but keeps
             // a same-key race from ever returning two different paths for one attachment.
             downloadedPaths.putIfAbsent(cacheKey, path) ?: path
@@ -597,20 +687,41 @@ class RallyExporter(private val client: RallyApiClient) {
 
         if (jobs.isEmpty()) return html
 
-        // Pass 2: download sequentially. This MUST NOT submit to client.apiExecutor:
-        // export runs each artifact's exportArtifact{Json,Markdown} as a task ON
-        // apiExecutor (see RallyToolWindowPanel), so submitting inner download tasks
-        // back to the same fixed pool and blocking on .join() self-deadlocks once the
-        // selection count reaches the pool size. downloadAttachments() avoids this the
-        // same way. The HttpClient does its own connection multiplexing, so sequential
-        // here still reuses connections; only request issuance is serialized.
+        // Pass 2: download in parallel on a dedicated pool (MED-1/P2). This pool MUST be
+        // separate from client.apiExecutor: export runs each artifact's
+        // exportArtifact{Json,Markdown} as a task ON apiExecutor (see RallyToolWindowPanel),
+        // so submitting inner download tasks back to that fixed pool and blocking on .join()
+        // would self-deadlock once the selection count reaches the pool size —
+        // attachmentsToJsonArray avoids it the same way.
+        //
+        // De-dup the actual downloads by target filename (distinctBy uniqueFileName): the same
+        // OID can appear in more than one <img>, which yields the same output path — writing it
+        // from two threads at once would race (truncate-mid-write). The sequential version was
+        // safe because the second job hit the dedup cache; here we collapse same-file jobs so
+        // each path is written exactly once, then map the result back to EVERY originalSrc so
+        // Pass 3 still rewrites all occurrences. Results consumed in document order by Pass 3,
+        // so completion order does not affect output.
         val imgDir = RallyFileUtils.safeResolve(Paths.get(outputDir), "${artifactId}_images").toString()
+        val byFile = ConcurrentHashMap<String, String>()  // uniqueFileName -> relative local path
+        val uniqueJobs = jobs.distinctBy { it.uniqueFileName }
+        val pool = Executors.newFixedThreadPool(minOf(DOWNLOAD_POOL_SIZE, uniqueJobs.size))
+        try {
+            val futures = uniqueJobs.map { job ->
+                CompletableFuture.runAsync({
+                    val localPath = downloadRallyImage(job.objectId, job.originalFileName, job.uniqueFileName, imgDir)
+                    if (localPath != null) {
+                        byFile[job.uniqueFileName] = "${artifactId}_images/${job.uniqueFileName}"
+                    }
+                }, pool)
+            }
+            CompletableFuture.allOf(*futures.toTypedArray()).join()
+        } finally {
+            pool.shutdownNow()
+        }
+        // Map every original src occurrence to its downloaded path (single-threaded, post-join).
         val downloads = HashMap<String, String>()  // originalSrc -> relative local path
         for (job in jobs) {
-            val localPath = downloadRallyImage(job.objectId, job.originalFileName, job.uniqueFileName, imgDir)
-            if (localPath != null) {
-                downloads[job.originalSrc] = "${artifactId}_images/${job.uniqueFileName}"
-            }
+            byFile[job.uniqueFileName]?.let { downloads[job.originalSrc] = it }
         }
 
         // Pass 3: rewrite the HTML using the downloaded paths. Matches beyond the

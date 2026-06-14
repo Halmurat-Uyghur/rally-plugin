@@ -2,7 +2,7 @@ import org.jetbrains.intellij.platform.gradle.TestFrameworkType
 
 plugins {
     id("java")
-    id("org.jetbrains.kotlin.jvm") version "1.9.25"
+    id("org.jetbrains.kotlin.jvm") version "2.0.21"
     id("org.jetbrains.intellij.platform") version "2.16.0"
 }
 
@@ -31,13 +31,18 @@ dependencies {
 
 intellijPlatform {
     buildSearchableOptions = true
-    instrumentCode = true
+    // This module is all-Kotlin with zero .java and zero .form files, so the form
+    // binding / @NotNull bytecode instrumentation pass has nothing to do — disabling
+    // it removes pure build overhead.
+    instrumentCode = false
     sandboxContainer = layout.projectDirectory.dir(".sandbox")
 
     pluginConfiguration {
         ideaVersion {
             sinceBuild = "241"
-            untilBuild = "261.*"
+            // 263.* extends forward reach through 2026.3 so users aren't locked out of
+            // 2026.2+ (build 262). sinceBuild stays pinned at the 241 floor.
+            untilBuild = "263.*"
         }
 
         changeNotes = """
