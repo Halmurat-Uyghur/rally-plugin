@@ -1,6 +1,8 @@
 package com.github.halmurat.rally.settings
 
+import com.intellij.icons.AllIcons
 import com.intellij.openapi.application.ApplicationManager
+import com.intellij.openapi.application.ModalityState
 import com.intellij.openapi.diagnostic.Logger
 import com.intellij.openapi.fileChooser.FileChooserDescriptorFactory
 import com.intellij.openapi.options.Configurable
@@ -10,10 +12,14 @@ import com.github.halmurat.rally.api.RallyApiClient
 import com.intellij.ui.components.JBLabel
 import com.intellij.ui.components.JBTextField
 import com.intellij.util.ui.FormBuilder
+import com.intellij.util.ui.NamedColorUtil
+import com.intellij.util.ui.UIUtil
 import javax.swing.JButton
 import javax.swing.JComponent
 import javax.swing.JPanel
 import javax.swing.JPasswordField
+import javax.swing.event.DocumentEvent
+import javax.swing.event.DocumentListener
 
 class RallySettingsConfigurable : Configurable {
 
@@ -23,6 +29,7 @@ class RallySettingsConfigurable : Configurable {
     private var usernameField: JBTextField? = null
     private var exportDirField: TextFieldWithBrowseButton? = null
     private var pageSizeField: JBTextField? = null
+    private var apiKeyStatusLabel: JBLabel? = null
     @Volatile private var loadedApiKey: String = ""
     @Volatile private var apiKeyLoaded = false
 
@@ -38,8 +45,17 @@ class RallySettingsConfigurable : Configurable {
             toolTipText = "Rally server URL (e.g., https://rally1.rallydev.com)"
         }
         apiKeyField = JPasswordField().apply {
-            toolTipText = "Rally API Key (get it from Rally Profile → API Keys)"
+            toolTipText = "Rally API Key (generate one on your Rally API Keys page)"
         }
+        apiKeyStatusLabel = JBLabel()
+        // Recompute the status line on every edit. Cheap (a string check) and the only
+        // way the indicator can stay truthful as the user types or clears the field —
+        // which is what apply() persists (it CLEARS the stored key when left empty).
+        apiKeyField!!.document.addDocumentListener(object : DocumentListener {
+            override fun insertUpdate(e: DocumentEvent) = updateApiKeyStatus()
+            override fun removeUpdate(e: DocumentEvent) = updateApiKeyStatus()
+            override fun changedUpdate(e: DocumentEvent) = updateApiKeyStatus()
+        })
         workspaceRefField = JBTextField().apply {
             toolTipText = "Workspace reference (optional — e.g., /workspace/12345). Leave blank to use your default workspace."
         }
@@ -71,19 +87,30 @@ class RallySettingsConfigurable : Configurable {
         exportDirField!!.text = settings.exportDirectory
         pageSizeField!!.text = settings.pageSize.toString()
 
-        // Load API key off-EDT to avoid blocking and to prevent writing blank on early apply
+        // Load API key off-EDT to avoid blocking and to prevent writing blank on early apply.
+        // Capture the modality state on the EDT FIRST: the Settings dialog is modal, so an
+        // invokeLater dispatched from the pooled thread below defaults to NON_MODAL and would be
+        // deferred until the dialog closes — leaving the field empty and the status frozen on
+        // "Checking…" the whole time Settings is open. Passing the captured state runs the
+        // callback under the dialog's own modality instead.
         apiKeyLoaded = false
+        updateApiKeyStatus()   // show "Checking…" until the async read resolves
+        val modality = ModalityState.current()
         ApplicationManager.getApplication().executeOnPooledThread {
             val key = settings.apiKey
             loadedApiKey = key
-            ApplicationManager.getApplication().invokeLater {
+            ApplicationManager.getApplication().invokeLater({
                 val field = apiKeyField ?: return@invokeLater
+                // Flip the flag BEFORE the programmatic setText: setText notifies the
+                // DocumentListener synchronously, so the listener must already see the
+                // loaded state or it would flicker through a stale "Checking…".
+                apiKeyLoaded = true
                 // Only populate if user hasn't started typing
                 if (field.password.isEmpty()) {
                     field.text = key
                 }
-                apiKeyLoaded = true
-            }
+                updateApiKeyStatus()
+            }, modality)
         }
 
         // Each label is linked to its field via labelFor so screen readers can announce
@@ -95,9 +122,23 @@ class RallySettingsConfigurable : Configurable {
         val exportDirLabel = JBLabel("Export Directory:").apply { labelFor = exportDirField!!.textField }
         val pageSizeLabel = JBLabel("Page Size:").apply { labelFor = pageSizeField }
 
+        // Help text uses createCommentComponent (small, gray, auto-wrapping). The class is
+        // deprecated in newer platforms in favor of the Kotlin UI DSL, but that would mean
+        // rewriting this whole FormBuilder page; the factory is present and functional through
+        // 261, so we reference it fully-qualified inside this @Suppress("DEPRECATION") method
+        // (an import would warn outside the method scope). No hard-coded URL: the Rally server
+        // is per-user (incl. on-prem), so a static path/link could be wrong.
+        val apiKeyHelp = com.intellij.openapi.ui.panel.ComponentPanelBuilder.createCommentComponent(
+            "First time? Generate an API key on your Rally API Keys page, then paste it into the API Key field.",
+            true
+        )
+
         return FormBuilder.createFormBuilder()
             .addLabeledComponent(serverUrlLabel, serverUrlField!!)
             .addLabeledComponent(apiKeyLabel, apiKeyField!!)
+            // Right column = aligned under the password field (not the label).
+            .addComponentToRightColumn(apiKeyStatusLabel!!)
+            .addComponentToRightColumn(apiKeyHelp)
             .addLabeledComponent(workspaceLabel, workspaceRefField!!)
             .addLabeledComponent(usernameLabel, usernameField!!)
             .addLabeledComponent(exportDirLabel, exportDirField!!)
@@ -141,16 +182,41 @@ class RallySettingsConfigurable : Configurable {
         usernameField?.text = settings.username
         exportDirField?.text = settings.exportDirectory
         pageSizeField?.text = settings.pageSize.toString()
-        // Load API key off-EDT
+        // Load API key off-EDT. Capture modality on the EDT so the populate/status callback
+        // runs under the modal Settings dialog instead of being deferred (see createComponent).
         apiKeyLoaded = false
+        updateApiKeyStatus()   // show "Checking…" until the async read resolves
+        val modality = ModalityState.current()
         ApplicationManager.getApplication().executeOnPooledThread {
             val key = settings.apiKey
             loadedApiKey = key
-            ApplicationManager.getApplication().invokeLater {
-                apiKeyField?.text = key
+            ApplicationManager.getApplication().invokeLater({
                 apiKeyLoaded = true
-            }
+                apiKeyField?.text = key
+                updateApiKeyStatus()
+            }, modality)
         }
+    }
+
+    /**
+     * Recompute the API-key status line under the field. EDT-only. Reads ONLY the live
+     * field text and the @Volatile [apiKeyLoaded] flag — never the blocking
+     * `settings.apiKey` getter — so it is safe on the EDT and from the async callbacks.
+     * Drives `keyPresent` from the field (what [apply] will persist), not the stored value.
+     */
+    private fun updateApiKeyStatus() {
+        val label = apiKeyStatusLabel ?: return
+        val keyPresent = apiKeyField?.let { String(it.password).isNotBlank() } ?: false
+        val status = apiKeyStatus(keyPresent = keyPresent, loading = !apiKeyLoaded)
+        label.text = status.text
+        label.icon = when (status.kind) {
+            ApiKeyStatusKind.SET -> AllIcons.General.GreenCheckmark
+            ApiKeyStatusKind.NOT_SET -> AllIcons.General.Warning
+            ApiKeyStatusKind.LOADING -> null
+        }
+        label.foreground =
+            if (status.kind == ApiKeyStatusKind.NOT_SET) NamedColorUtil.getErrorForeground()
+            else UIUtil.getLabelForeground()
     }
 
     override fun disposeUIResources() {
@@ -160,6 +226,7 @@ class RallySettingsConfigurable : Configurable {
         usernameField = null
         exportDirField = null
         pageSizeField = null
+        apiKeyStatusLabel = null
     }
 
     private fun testConnection() {
@@ -173,6 +240,10 @@ class RallySettingsConfigurable : Configurable {
             return
         }
 
+        // The result/auto-fill callbacks below open or update UI on top of the modal Settings
+        // dialog; capture its modality on the EDT so they aren't deferred (NON_MODAL) until the
+        // dialog closes — which would make Test Connection appear to do nothing.
+        val modality = ModalityState.current()
         ApplicationManager.getApplication().executeOnPooledThread {
             var client: RallyApiClient? = null
             try {
@@ -184,11 +255,11 @@ class RallySettingsConfigurable : Configurable {
                 val configuredUsername = fieldUsername.ifBlank { apiKeyUserName }
 
                 // Auto-fill username if empty
-                ApplicationManager.getApplication().invokeLater {
+                ApplicationManager.getApplication().invokeLater({
                     if (usernameField?.text.isNullOrBlank()) {
                         usernameField?.text = apiKeyUserName
                     }
-                }
+                }, modality)
 
                 // Check if a username is configured and validate it
                 val usernameInfo = if (configuredUsername.isNotBlank()) {
@@ -206,20 +277,20 @@ class RallySettingsConfigurable : Configurable {
                     "\n\nUsername field is empty. Enter your Rally UserName (email) for 'My Tickets' filter."
                 }
 
-                ApplicationManager.getApplication().invokeLater {
+                ApplicationManager.getApplication().invokeLater({
                     Messages.showInfoMessage(
                         "Connected successfully!\n\nAPI Key Owner: $apiKeyName ($apiKeyUserName)$usernameInfo",
                         "Rally Connection"
                     )
-                }
+                }, modality)
             } catch (e: Exception) {
                 LOG.warn("Rally test connection failed", e)
-                ApplicationManager.getApplication().invokeLater {
+                ApplicationManager.getApplication().invokeLater({
                     Messages.showErrorDialog(
                         "Connection failed: ${e.message}",
                         "Rally Connection"
                     )
-                }
+                }, modality)
             } finally {
                 client?.apiExecutor?.shutdownNow()
             }
