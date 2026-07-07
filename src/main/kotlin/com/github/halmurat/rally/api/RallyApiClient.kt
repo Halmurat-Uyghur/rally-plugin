@@ -630,7 +630,13 @@ class RallyApiClient(
         getCached<RallyUser>(cacheKey)?.let { return it }
 
         val url = buildApiUrl("user") + "?" +
-                buildQuery("(UserName = \"$safeUsername\")", pageSize = 1, workspace = ws)
+                buildQuery(
+                    "(UserName = \"$safeUsername\")", pageSize = 1, workspace = ws,
+                    // /user ignores unknown fetch fields, so the artifact LIST_FIELDS
+                    // default returned a user with only _ref/_refObjectName —
+                    // displayName/userName/emailAddress were always null (L2).
+                    fields = listOf("UserName", "DisplayName", "EmailAddress", "ObjectID", "_ref")
+                )
         val response = executeGet(url)
         handleResponse(response)
 
@@ -1284,8 +1290,14 @@ class RallyApiClient(
         val query = "((StartDate <= \"$today\") AND (EndDate >= \"$today\"))"
         val encodedQuery = URLEncoder.encode(query, StandardCharsets.UTF_8)
 
+        // Order by EndDate so, when several teams' sprints are concurrently active
+        // under "All Projects", the pagesize=1 pick is deterministic (the sprint
+        // ending soonest) rather than server-arbitrary (L3). Known limitation:
+        // `today` is IDE-local while Rally compares in workspace time — near
+        // midnight the resolved sprint can be off by one day.
         var url = buildApiUrl("iteration") +
-                "?query=$encodedQuery&fetch=Name,StartDate,EndDate,PlannedVelocity,ObjectID,_ref&pagesize=1"
+                "?query=$encodedQuery&fetch=Name,StartDate,EndDate,PlannedVelocity,ObjectID,_ref&pagesize=1" +
+                "&order=${URLEncoder.encode("EndDate ASC", StandardCharsets.UTF_8)}"
 
         if (!workspaceRef.isNullOrBlank()) {
             url += "&workspace=${URLEncoder.encode(normalizeRef("workspace", workspaceRef), StandardCharsets.UTF_8)}"
