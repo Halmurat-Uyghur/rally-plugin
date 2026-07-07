@@ -802,26 +802,12 @@ class RallyToolWindowPanel(private val project: Project) : Disposable {
     }
 
     private fun buildQuery(scope: String, selectedIter: String, settings: RallySettings): String? {
-        // workspace/project are passed as URL params by the API client, not as query conditions
-        // State/type filtering is done client-side since ScheduleState vs State differs by type
-        val conditions = mutableListOf<String>()
-
-        if (Scope.fromDisplay(scope) == Scope.MY_TICKETS && settings.username.isNotBlank()) {
-            val safeUsername = RallyApiClient.escapeQueryValue(settings.username)
-            conditions.add("(Owner.UserName = \"$safeUsername\")")
-        }
-
-        if (selectedIter.isNotBlank() && selectedIter != "All Sprints") {
-            val safeIter = RallyApiClient.escapeQueryValue(selectedIter)
-            conditions.add("(Iteration.Name = \"$safeIter\")")
-        }
-
-        val query = when (conditions.size) {
-            0 -> null
-            1 -> conditions[0]
-            else -> conditions.reduce { acc, cond -> "($acc AND $cond)" }
-        }
-        LOG.info("Rally query built (scope=$scope, iteration='$selectedIter', conditions=${conditions.size})")
+        // workspace/project are passed as URL params by the API client, not as query conditions.
+        // State/type filtering is done client-side since ScheduleState vs State differs by type.
+        // Query construction lives in buildTicketQuery (RallyFilters.kt) so the per-scope
+        // iteration-field choice (H1) is unit-tested.
+        val query = buildTicketQuery(scope, selectedIter, settings.username)
+        LOG.info("Rally query built (scope=$scope, iteration='$selectedIter', hasQuery=${query != null})")
         return query
     }
 

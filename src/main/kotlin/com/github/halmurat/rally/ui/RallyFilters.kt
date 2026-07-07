@@ -1,5 +1,7 @@
 package com.github.halmurat.rally.ui
 
+import com.github.halmurat.rally.api.RallyApiClient
+
 /**
  * Single source of truth for the tool-window filter display strings (MED-13).
  *
@@ -44,3 +46,37 @@ enum class StateFilter(val displayName: String) {
 
 /** States the "Active" filter excludes (everything else counts as active work). */
 val activeExcludedStates: Set<String> = setOf("Accepted", "Completed", "Idea")
+
+/**
+ * Server-side query for the ticket list. Owner filter applies to "My Tickets" only;
+ * the sprint filter is expressed per scope (H1): Rally's TestCase type has NO
+ * Iteration attribute, so `(Iteration.Name = …)` sent to /testcase comes back as
+ * HTTP 200 with a populated Errors array — which requireNoErrors correctly turns
+ * into a failed load. Test cases are filtered through their linked work product
+ * instead (`WorkProduct.Iteration.Name` is a valid dotted traversal on TestCase);
+ * test cases with no WorkProduct won't match, which is the correct reading of
+ * "test cases in this sprint". Pure and top-level so it is unit-testable.
+ */
+internal fun buildTicketQuery(scope: String?, selectedIter: String, username: String): String? {
+    val conditions = mutableListOf<String>()
+
+    if (Scope.fromDisplay(scope) == Scope.MY_TICKETS && username.isNotBlank()) {
+        val safeUsername = RallyApiClient.escapeQueryValue(username)
+        conditions.add("(Owner.UserName = \"$safeUsername\")")
+    }
+
+    if (selectedIter.isNotBlank() && selectedIter != "All Sprints") {
+        val safeIter = RallyApiClient.escapeQueryValue(selectedIter)
+        val iterationField =
+            if (Scope.fromDisplay(scope) == Scope.TEST_CASES) "WorkProduct.Iteration.Name"
+            else "Iteration.Name"
+        conditions.add("($iterationField = \"$safeIter\")")
+    }
+
+    // Rally requires binary nesting for AND: ((a) AND (b))
+    return when (conditions.size) {
+        0 -> null
+        1 -> conditions[0]
+        else -> conditions.reduce { acc, cond -> "($acc AND $cond)" }
+    }
+}
