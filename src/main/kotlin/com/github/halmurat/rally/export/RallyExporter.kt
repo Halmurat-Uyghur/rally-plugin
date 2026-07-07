@@ -55,9 +55,12 @@ class RallyExporter(private val client: RallyApiClient) {
         /**
          * Width of the dedicated download pool used by [downloadInlineImages] and
          * [attachmentsToJsonArray] (MED-1/P2). These pools are created and shut down
-         * per call — they MUST be separate from [RallyApiClient.apiExecutor] because
-         * export runs each artifact's task ON apiExecutor; submitting inner download
-         * tasks back to that fixed pool and blocking on join() would self-deadlock.
+         * per call — they MUST be separate from the pool the export task itself runs on
+         * (the per-export "rally-export-orchestrator" pool — see exportSelectedArtifact
+         * in RallyToolWindowPanel): the export task blocks on join(), so submitting its
+         * inner download tasks to its own fixed pool would self-deadlock. They also stay
+         * off [RallyApiClient.apiExecutor] so long downloads never occupy the
+         * interactive-query threads.
          */
         private const val DOWNLOAD_POOL_SIZE = 8
 
@@ -137,8 +140,11 @@ class RallyExporter(private val client: RallyApiClient) {
      * Create a dedicated, DAEMON-threaded download pool. Daemon so an in-flight export can never
      * stall IDE/tool-window shutdown: CompletableFuture.join() is not interruptible, so a worker
      * parked on it ignores apiExecutor.shutdownNow(); daemon threads let the JVM/IDE proceed
-     * regardless. Separate from client.apiExecutor to avoid the self-deadlock the export path
-     * runs ON apiExecutor would otherwise hit (see the call sites).
+     * regardless. Separate from the pool the export task itself runs on (the per-export
+     * "rally-export-orchestrator" pool — see exportSelectedArtifact in RallyToolWindowPanel)
+     * so the task's blocking join() never waits on downloads queued behind it on its own
+     * pool, and from client.apiExecutor so downloads never starve interactive queries
+     * (see the call sites).
      */
     private fun newDownloadPool(size: Int) =
         Executors.newFixedThreadPool(size) { r ->
@@ -593,10 +599,12 @@ class RallyExporter(private val client: RallyApiClient) {
         if (attachments.isEmpty()) return JsonArray()
 
         // Download attachments in parallel on a dedicated pool (MED-1/P2). This pool MUST
-        // be separate from client.apiExecutor: export runs each artifact's task ON
-        // apiExecutor (see RallyToolWindowPanel), so submitting inner download tasks back
-        // to that fixed pool and blocking on join() would self-deadlock once the selection
-        // count reaches the pool size. The dedup caches (downloadedPaths) are
+        // be separate from the pool the export task runs on (the per-export orchestration
+        // pool — see exportSelectedArtifact in RallyToolWindowPanel): the export task
+        // blocks on join(), so submitting inner download tasks back to its own fixed pool
+        // would self-deadlock once the selection count reaches the pool size. It also
+        // stays off client.apiExecutor so downloads never occupy the interactive-query
+        // threads. The dedup caches (downloadedPaths) are
         // ConcurrentHashMap and the filename-allocation+write is serialized via
         // attachmentWriteLock, so concurrent downloads stay correct. Results are written
         // into an index-keyed array so the emitted JSON order matches the input order
@@ -695,11 +703,13 @@ class RallyExporter(private val client: RallyApiClient) {
         if (jobs.isEmpty()) return html
 
         // Pass 2: download in parallel on a dedicated pool (MED-1/P2). This pool MUST be
-        // separate from client.apiExecutor: export runs each artifact's
-        // exportArtifact{Json,Markdown} as a task ON apiExecutor (see RallyToolWindowPanel),
-        // so submitting inner download tasks back to that fixed pool and blocking on .join()
-        // would self-deadlock once the selection count reaches the pool size —
-        // attachmentsToJsonArray avoids it the same way.
+        // separate from the pool the export task runs on: each artifact's
+        // exportArtifact{Json,Markdown} runs as a task on the per-export orchestration pool
+        // (see exportSelectedArtifact in RallyToolWindowPanel), so submitting inner download
+        // tasks back to that fixed pool and blocking on .join() would self-deadlock once the
+        // selection count reaches the pool size — attachmentsToJsonArray avoids it the same
+        // way. It also stays off client.apiExecutor so downloads never starve interactive
+        // queries.
         //
         // De-dup the actual downloads by target filename (distinctBy uniqueFileName): the same
         // OID can appear in more than one <img>, which yields the same output path — writing it
