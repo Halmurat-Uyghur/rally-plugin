@@ -160,6 +160,22 @@ class RallyToolWindowPanel(private val project: Project) : Disposable {
         iterationsLoaded = false
         iterationLoadGeneration.incrementAndGet()
     }
+
+    /**
+     * Monotonic ticket for project loads — the twin of [iterationLoadGeneration],
+     * guarding the same hazard: loadTickets() releases `loading` while the async
+     * project fetch (M6) may still be in flight, so a settings change can start a
+     * new load while the old one is unfinished. Without the generation check, the
+     * stale load's commit would overwrite cachedProjects/the dropdown/projectsLoaded
+     * with old-server data — and the settings-snapshot check would then suppress
+     * any retry. Bumped at submit time and at the client-rebuild invalidation
+     * point in [getClient].
+     */
+    private val projectLoadGeneration = java.util.concurrent.atomic.AtomicLong()
+
+    /** Guards the generation-check + cachedProjects write so a stale load can't
+     *  interleave its commit between a newer load's check and write. */
+    private val projectCommitLock = Any()
     @Volatile private var lastSettingsSnapshot: String = ""
     private var lastScope: String = ""
     private var lastState: String = ""
@@ -534,17 +550,21 @@ class RallyToolWindowPanel(private val project: Project) : Disposable {
                 var projectsFuture: java.util.concurrent.CompletableFuture<Void>? = null
                 if (!projectsLoaded || snapshot != lastSettingsSnapshot) {
                     lastSettingsSnapshot = snapshot
+                    // invalidateIterations() moved before the load safely: it only flips
+                    // a flag and bumps a generation, so its order relative to loadProjects
+                    // is immaterial.
                     invalidateIterations()
                     // The serial project load is only needed when a saved project NAME must
                     // be resolved to a ref before the artifact query can be scoped to it. In
                     // the default "All Projects" case the list feeds nothing but the dropdown,
                     // so it loads concurrently with the artifact fetch (M6) — the same pattern
                     // the iterations list uses. Saves a full RTT on cold open.
+                    val generation = projectLoadGeneration.incrementAndGet()
                     if (projectScoped) {
-                        loadProjects(client)
+                        loadProjects(client, generation)
                     } else {
                         projectsFuture = java.util.concurrent.CompletableFuture.runAsync({
-                            loadProjects(client)
+                            loadProjects(client, generation)
                         }, client.apiExecutor)
                     }
                 }
@@ -708,12 +728,19 @@ class RallyToolWindowPanel(private val project: Project) : Disposable {
         }
     }
 
-    private fun loadProjects(client: RallyApiClient) {
+    private fun loadProjects(client: RallyApiClient, generation: Long) {
         try {
             val projects = client.queryProjects()
-            cachedProjects = projects
+            // Check-and-commit atomically: without the lock, a stale load could pass
+            // the check, get descheduled, and overwrite a newer load's list after it
+            // committed — leaving cachedProjects out of sync with the dropdown.
+            synchronized(projectCommitLock) {
+                if (generation != projectLoadGeneration.get()) return  // stale — a newer load owns the dropdown
+                cachedProjects = projects
+            }
 
             invokeLaterIfAlive {
+                if (generation != projectLoadGeneration.get()) return@invokeLaterIfAlive
                 // Temporarily remove listener to avoid triggering loadTickets during population
                 val listeners = projectCombo.actionListeners
                 listeners.forEach { projectCombo.removeActionListener(it) }
@@ -744,6 +771,8 @@ class RallyToolWindowPanel(private val project: Project) : Disposable {
         } catch (e: Exception) {
             LOG.warn("Failed to load projects", e)
             invokeLaterIfAlive {
+                // A stale failure must not clobber a newer load's dropdown either.
+                if (generation != projectLoadGeneration.get()) return@invokeLaterIfAlive
                 projectCombo.removeAllItems()
                 projectCombo.addItem("All Projects")
                 projectCombo.isEnabled = false
@@ -1883,8 +1912,11 @@ class RallyToolWindowPanel(private val project: Project) : Disposable {
                 // Shut down the old client's thread pool to prevent thread leaks
                 currentClient?.apiExecutor?.shutdown()
                 currentClient = RallyApiClient(serverUrl, apiKey)
-                // Reset caches when client changes
+                // Reset caches when client changes. Bumping the project generation
+                // also invalidates any in-flight async project load against the OLD
+                // client (see projectLoadGeneration) — mirrors invalidateIterations.
                 projectsLoaded = false
+                projectLoadGeneration.incrementAndGet()
                 invalidateIterations()
             }
             // Workspace always comes from settings
