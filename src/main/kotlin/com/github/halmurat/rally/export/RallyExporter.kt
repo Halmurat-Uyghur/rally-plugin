@@ -115,6 +115,20 @@ class RallyExporter(private val client: RallyApiClient) {
             val ext = originalFileName.substringAfterLast('.', "png").lowercase()
             return RallyFileUtils.sanitizeFileName("${artifactId}_${objectId}.$ext")
         }
+
+        /**
+         * Local file name for an exported attachment (M5). Keyed on the attachment
+         * ObjectID (unique in Rally) so re-exports overwrite deterministically instead
+         * of accumulating name_1, name_2, … copies: the old collision counter deduped
+         * within one exporter instance, but every export click creates a fresh exporter
+         * while the files persist on disk. Falls back to the Content ref's trailing OID
+         * when ObjectID is absent. Mirrors inlineImageLocalName.
+         */
+        internal fun attachmentLocalName(objectId: String?, contentRef: String?, originalFileName: String): String {
+            val key = objectId ?: contentRef?.trimEnd('/')?.substringAfterLast('/') ?: "0"
+            val baseName = originalFileName.substringAfterLast('/')
+            return RallyFileUtils.sanitizeFileName("${key}_$baseName")
+        }
     }
 
     /**
@@ -624,7 +638,7 @@ class RallyExporter(private val client: RallyApiClient) {
         val objectId = attachment.objectID
         val contentRef = attachment.content?.ref
         if (objectId == null && contentRef == null) return null
-        val safeFileName = RallyFileUtils.sanitizeFileName(fileName)
+        val safeFileName = attachmentLocalName(objectId, contentRef, fileName)
         val cacheKey = "${objectId ?: contentRef}:$attachDir:$safeFileName"
 
         // Check per-session dedup cache (avoids re-downloading for JSON+Markdown exports)
@@ -638,22 +652,12 @@ class RallyExporter(private val client: RallyApiClient) {
             // Save to Disk (M4) — see RallyApiClient.downloadAttachmentBytes.
             val fileBytes = client.downloadAttachmentBytes(attachment) ?: return null
 
-            // safeResolve handles sanitization + containment. Dedup on existing names.
-            // The name-allocation + write is serialized via attachmentWriteLock: with the
-            // dedicated download pool (MED-1/P2), two distinct attachments sharing a name
-            // could otherwise pick the same "_N" suffix and clobber each other.
+            // OID-keyed names are unique per attachment (M5), so same-name collisions
+            // are impossible and re-exports idempotently overwrite. The lock now only
+            // serializes two threads racing the SAME attachment past a dedup-cache
+            // miss — a concurrent truncate-mid-write would corrupt the file.
             val path = synchronized(attachmentWriteLock) {
-                var outputPath = RallyFileUtils.safeResolve(attachDirPath, safeFileName)
-                if (Files.exists(outputPath)) {
-                    val baseName = safeFileName.substringBeforeLast(".", safeFileName)
-                    val ext = if (safeFileName.contains(".")) ".${safeFileName.substringAfterLast(".")}" else ""
-                    var counter = 1
-                    while (Files.exists(outputPath)) {
-                        outputPath = RallyFileUtils.safeResolve(attachDirPath, "${baseName}_$counter$ext")
-                        counter++
-                    }
-                }
-
+                val outputPath = RallyFileUtils.safeResolve(attachDirPath, safeFileName)
                 Files.write(outputPath, fileBytes)
                 LOG.info("Saved attachment: $outputPath (${fileBytes.size} bytes)")
                 outputPath.toAbsolutePath().toString()

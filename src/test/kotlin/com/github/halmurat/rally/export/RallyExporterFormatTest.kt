@@ -175,4 +175,30 @@ class RallyExporterFormatTest {
         assertFalse("img tag should be removed", "<img" in result)
         assertTrue("surrounding text preserved", "Description with" in result)
     }
+
+    // ── attachmentLocalName ──────────────────────────────────────
+
+    @Test
+    fun `attachmentLocalName keys on the attachment ObjectID`() {
+        assertEquals("123_shot.png", RallyExporter.attachmentLocalName("123", null, "shot.png"))
+    }
+
+    @Test
+    fun `attachmentLocalName falls back to the content ref trailing OID`() {
+        assertEquals(
+            "456_shot.png",
+            RallyExporter.attachmentLocalName(
+                null,
+                "https://rally1.rallydev.com/slm/webservice/v2.0/attachmentcontent/456",
+                "shot.png"
+            )
+        )
+    }
+
+    @Test
+    fun `attachmentLocalName sanitizes hostile names`() {
+        val name = RallyExporter.attachmentLocalName("123", null, "../../evil.png")
+        assertFalse(name.contains("/"))
+        assertFalse(name.contains(".."))
+    }
 }
