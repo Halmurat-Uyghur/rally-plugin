@@ -30,7 +30,10 @@ dependencies {
 }
 
 intellijPlatform {
-    buildSearchableOptions = true
+    // Building searchable options boots a headless IDE per buildPlugin run to index one
+    // small settings page (L10) — needed for release artifacts, pure overhead during
+    // development. CI keeps the index; local builds skip it.
+    buildSearchableOptions = providers.environmentVariable("CI").isPresent
     // This module is all-Kotlin with zero .java and zero .form files, so the form
     // binding / @NotNull bytecode instrumentation pass has nothing to do — disabling
     // it removes pure build overhead.

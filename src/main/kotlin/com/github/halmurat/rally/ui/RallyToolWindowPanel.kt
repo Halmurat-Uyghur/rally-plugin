@@ -29,6 +29,7 @@ import com.github.halmurat.rally.api.RallyUser
 import com.github.halmurat.rally.api.RallyUserStory
 import com.github.halmurat.rally.export.RallyExporter
 import com.github.halmurat.rally.settings.RallySettings
+import com.github.halmurat.rally.settings.RallySettingsListener
 import com.github.halmurat.rally.util.RallyGitOps
 
 import com.intellij.ui.awt.RelativePoint
@@ -188,6 +189,14 @@ class RallyToolWindowPanel(private val project: Project) : Disposable {
     init {
         setupUI()
         setupListeners()
+        // Reload when Settings → Tools → Rally is applied (L9). connect(this) ties the
+        // subscription to this panel's Disposable, so it detaches on dispose.
+        ApplicationManager.getApplication().messageBus.connect(this)
+            .subscribe(RallySettingsListener.TOPIC, object : RallySettingsListener {
+                override fun settingsApplied() {
+                    invokeLaterIfAlive { loadTickets() }
+                }
+            })
         checkInitialConfiguration()
     }
 

@@ -173,6 +173,11 @@ class RallySettingsConfigurable : Configurable {
             loadedApiKey = fieldKey
             settings.apiKey = fieldKey
         }
+
+        // Nudge open tool windows to reload with the new settings (L9).
+        ApplicationManager.getApplication().messageBus
+            .syncPublisher(RallySettingsListener.TOPIC)
+            .settingsApplied()
     }
 
     override fun reset() {
