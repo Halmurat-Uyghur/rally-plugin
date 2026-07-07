@@ -201,4 +201,16 @@ class RallyExporterFormatTest {
         assertFalse(name.contains("/"))
         assertFalse(name.contains(".."))
     }
+
+    @Test
+    fun `stripHtml decodes amp last so double-encoded entities do not double-decode`() {
+        // A description whose literal text is "&lt;b&gt;" arrives as &amp;lt;b&amp;gt;
+        // and must export as the text "&lt;b&gt;", not the tag "<b>".
+        assertEquals("&lt;b&gt;", RallyExporter.stripHtml("&amp;lt;b&amp;gt;"))
+    }
+
+    @Test
+    fun `stripHtml still decodes simple entities`() {
+        assertEquals("a & b < c", RallyExporter.stripHtml("a &amp; b &lt; c"))
+    }
 }

@@ -1188,7 +1188,7 @@ class RallyApiClient(
 
     private fun backoffMs(attempt: Int): Long {
         val base = (1000L shl attempt).coerceAtMost(8000)
-        val jitter = (Math.random() * base * 0.3).toLong()  // ±30% jitter
+        val jitter = (Math.random() * base * 0.3).toLong()  // 0..+30% positive jitter — still de-synchronizes concurrent retries
         return base + jitter
     }
 

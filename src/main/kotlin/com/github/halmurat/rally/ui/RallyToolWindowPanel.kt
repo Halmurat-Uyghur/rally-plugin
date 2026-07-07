@@ -1301,7 +1301,7 @@ class RallyToolWindowPanel(private val project: Project) : Disposable {
                             val balloon = JBPopupFactory.getInstance()
                                 .createHtmlTextBalloonBuilder(
                                     "Created $createdId, but attachment upload failed: $safeMsg<br>" +
-                                        "Re-attach from the detail panel.",
+                                        "You can re-attach the file in the Rally web UI.",
                                     MessageType.WARNING, null
                                 )
                                 .setFadeoutTime(6000)

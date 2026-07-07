@@ -96,10 +96,12 @@ class RallyExporter(private val client: RallyApiClient) {
                 .replace(RE_LI, "- ")
                 .replace(RE_TAG, "")
                 .replace("&nbsp;", " ")
-                .replace("&amp;", "&")
                 .replace("&lt;", "<")
                 .replace("&gt;", ">")
                 .replace("&quot;", "\"")
+                // &amp; must decode LAST: decoding it first turns &amp;lt; into &lt;
+                // which the later passes then double-decode into a real '<' (L1).
+                .replace("&amp;", "&")
                 .replace(RE_MULTI_NEWLINE, "\n\n")
                 .trim()
         }
@@ -210,7 +212,7 @@ class RallyExporter(private val client: RallyApiClient) {
         }
 
         val md = StringBuilder()
-        md.appendLine("# $testCaseId - ${tc.name ?: ""}")
+        md.appendLine("# $testCaseId - ${escapeMarkdown(tc.name ?: "")}")
         md.appendLine()
         md.appendLine("## Description")
         md.appendLine(downloadInlineImages(tc.description ?: "", testCaseId, outputDir))
@@ -500,7 +502,7 @@ class RallyExporter(private val client: RallyApiClient) {
         LOG.info("Generating Markdown for artifact: $artifactId")
 
         val md = StringBuilder()
-        md.appendLine("# $artifactId - ${artifact.name ?: ""}")
+        md.appendLine("# $artifactId - ${escapeMarkdown(artifact.name ?: "")}")
         md.appendLine()
 
         // Description with inline images
