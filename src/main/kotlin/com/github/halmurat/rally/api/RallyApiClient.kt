@@ -876,7 +876,7 @@ class RallyApiClient(
             }
         }
 
-        // If all queries failed, throw so the UI can show the error (matches queryAllArtifacts).
+        // If all queries failed, throw so the UI can show the error.
         if (results.isEmpty() && reasons.isNotEmpty()) {
             throw RallyApiException("Query failed - ${reasons.joinToString("; ")}")
         }
@@ -967,7 +967,7 @@ class RallyApiClient(
         }
 
         val sorted = results.sortedByDescending { it.lastUpdateDate }
-        // Same partial-failure policy as queryAllArtifacts: surface the gap and
+        // Same partial-failure policy as queryAllArtifactsParallel: surface the gap and
         // skip the cache, or stories-only results would be served silently for
         // the full TTL (15 minutes in bulk mode) even after Rally recovers.
         if (reasons.isNotEmpty()) {

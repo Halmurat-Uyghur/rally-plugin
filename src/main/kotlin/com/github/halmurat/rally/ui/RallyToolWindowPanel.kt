@@ -577,8 +577,8 @@ class RallyToolWindowPanel(private val project: Project) : Disposable {
 
                 // Load artifacts. queryAllArtifactsParallel runs user stories + defects
                 // concurrently (defects on apiExecutor, stories inline on THIS unbounded pooled
-                // thread), halving the two serial round trips the old sequential queryAllArtifacts
-                // paid on every cold load (MED-2/P1). It returns an ArtifactQueryResult carrying
+                // thread), halving the two serial round trips the old sequential story-then-defect
+                // path paid on every cold load (MED-2/P1). It returns an ArtifactQueryResult carrying
                 // any partial-failure reasons (MED-8). Run it directly on this executeOnPooledThread
                 // thread — NOT on apiExecutor — because it blocks on one apiExecutor slot internally.
                 val result: ArtifactQueryResult = if (Scope.fromDisplay(scope) == Scope.TEST_CASES) {
