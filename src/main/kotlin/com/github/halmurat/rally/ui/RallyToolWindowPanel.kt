@@ -79,6 +79,16 @@ class RallyToolWindowPanel(private val project: Project) : Disposable {
     private val iterationCombo = ComboBox<String>().apply { isEnabled = false }
     private val searchField = SearchTextField()
     private val searchDebounceTimer = javax.swing.Timer(300) { applySearchFilter() }.apply { isRepeats = false }
+    /**
+     * Debounces selection → network-backed detail loads (M2). Header/badge update
+     * instantly on selection (cheap, local data); the 3 API queries + description
+     * fetch fire only after the selection has settled for 200 ms, so holding ↓
+     * through the list costs zero API calls for skipped rows. Mirrors the search
+     * field's 300 ms debounce.
+     */
+    private val selectionDebounceTimer = javax.swing.Timer(200) {
+        if (!disposed) detailPanel.loadDetails()
+    }.apply { isRepeats = false }
     private val statsLabel = JBLabel("0 items")
     private val sprintLabel = JBLabel("")
     private val statusLabel = JBLabel("Ready")
@@ -403,7 +413,15 @@ class RallyToolWindowPanel(private val project: Project) : Disposable {
         artifactList.addListSelectionListener {
             if (!it.valueIsAdjusting) {
                 val selected = artifactList.selectedValue
-                detailPanel.showArtifact(selected, currentClient)
+                if (selected != null && detailPanel.isShowing(selected)) {
+                    // Same object re-selected (e.g. selection restored after a model
+                    // rebuild) — the panel is already rendering it; skip the reload
+                    // to avoid tab flicker and duplicate loads.
+                } else {
+                    selectionDebounceTimer.stop()
+                    detailPanel.showArtifactHeader(selected, currentClient)
+                    if (selected != null) selectionDebounceTimer.restart()
+                }
                 val sp = mainSplitPane ?: return@addListSelectionListener
                 if (selected != null) {
                     // Auto-expand detail panel if collapsed
@@ -1784,6 +1802,7 @@ class RallyToolWindowPanel(private val project: Project) : Disposable {
             currentClient = null
         }
         searchDebounceTimer.stop()
+        selectionDebounceTimer.stop()
         activeServerSearch = null
         detailPanel.dispose()
     }

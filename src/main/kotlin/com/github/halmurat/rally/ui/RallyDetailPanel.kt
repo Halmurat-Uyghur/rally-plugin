@@ -330,35 +330,33 @@ class RallyDetailPanel(private val project: Project) : com.intellij.openapi.Disp
         })
     }
 
-    fun showArtifact(artifact: RallyArtifact?, client: RallyApiClient?) {
+    /**
+     * Cheap, synchronous part of showing an artifact (M2): header, badge, metadata,
+     * tab reset, and the already-loaded-description fast path. Bumps the generation so
+     * in-flight loads for the previous selection cancel. Network-backed loads are NOT
+     * started — call [loadDetails] for that; the tool window debounces it behind a
+     * short Timer so arrow-key scrolling costs zero API calls for skipped rows.
+     */
+    fun showArtifactHeader(artifact: RallyArtifact?, client: RallyApiClient?) {
         if (disposed) return
         if (artifact == null || client == null) {
             clear()
             return
         }
         // Bail if the caller passed a client whose thread pool has already been
-        // shut down by a settings change or parent disposal — submitting tasks
-        // to a dead executor would throw RejectedExecutionException from inside
-        // every supplyAsync block below.
+        // shut down by a settings change or parent disposal — loadDetails() would
+        // otherwise submit tasks to a dead executor.
         if (!client.isAlive) {
-            LOG.warn("showArtifact called with a disposed client; skipping")
+            LOG.warn("showArtifactHeader called with a disposed client; skipping")
             clear()
             return
         }
 
         val artifactRef = artifact.ref ?: return
-        val gen = generation.incrementAndGet()
+        generation.incrementAndGet()
         currentArtifactRef = artifactRef
         currentArtifact = artifact
         currentClient = client
-
-        // Restore standard tabs if previously showing a test case
-        if (tabbedPane.tabCount != 3 || (tabbedPane.tabCount > 0 && tabbedPane.getTitleAt(0).startsWith("Test Steps"))) {
-            tabbedPane.removeAll()
-            tabbedPane.addTab("Test Cases", tcPanel)
-            tabbedPane.addTab("Tasks", taskScrollPane)
-            tabbedPane.addTab("Attachments", attachmentScrollPane)
-        }
 
         // Update header
         val id = artifact.formattedID ?: "?"
@@ -371,7 +369,7 @@ class RallyDetailPanel(private val project: Project) : com.intellij.openapi.Disp
         // (fallback "No Verdict"), everything else → ScheduleState ?: State ?: "Unknown".
         val state = artifact.effectiveState
         stateBadge.update(state, RallyColors.forState(state))
-        // Header badge lives in a real container, so update() (now a pure setter) must be
+        // Header badge lives in a real container, so update() (a pure setter) must be
         // followed by refresh() to schedule the layout + repaint.
         stateBadge.refresh()
 
@@ -389,11 +387,49 @@ class RallyDetailPanel(private val project: Project) : com.intellij.openapi.Disp
         }
 
         if (artifact is RallyTestCase) {
-            // For test cases: show description + test steps only
+            // For test cases: description + test steps only
             tabbedPane.removeAll()
-            tabbedPane.addTab("Test Steps", stepScrollPane)
+            tabbedPane.addTab("Test Steps (...)", stepScrollPane)
             stepListModel.clear()
+            return
+        }
 
+        // Restore standard tabs if previously showing a test case
+        if (tabbedPane.tabCount != 3 || (tabbedPane.tabCount > 0 && tabbedPane.getTitleAt(0).startsWith("Test Steps"))) {
+            tabbedPane.removeAll()
+            tabbedPane.addTab("Test Cases", tcPanel)
+            tabbedPane.addTab("Tasks", taskScrollPane)
+            tabbedPane.addTab("Attachments", attachmentScrollPane)
+        }
+        // Reset to first tab and clear all lists
+        tabbedPane.selectedIndex = TAB_TEST_CASES
+        testCaseListModel.clear()
+        testCaseSummaryLabel.text = "Loading..."
+        taskListModel.clear()
+        attachmentListModel.clear()
+        stepListModel.clear()
+        tabbedPane.setTitleAt(TAB_TEST_CASES, "Test Cases (...)")
+        tabbedPane.setTitleAt(TAB_TASKS, "Tasks (...)")
+        tabbedPane.setTitleAt(TAB_ATTACHMENTS, "Attachments (...)")
+    }
+
+    /**
+     * Start the network-backed detail loads (test cases / tasks / attachments /
+     * description) for the artifact last passed to [showArtifactHeader]. Debounced
+     * by the tool window's selection Timer (M2); also called synchronously via
+     * [showArtifact] by the state-change/edit paths.
+     */
+    fun loadDetails() {
+        if (disposed) return
+        val artifact = currentArtifact ?: return
+        val client = currentClient ?: return
+        val artifactRef = currentArtifactRef ?: return
+        if (!client.isAlive) return
+        val gen = generation.get()
+        val id = artifact.formattedID ?: "?"
+        val desc = artifact.description
+
+        if (artifact is RallyTestCase) {
             ApplicationManager.getApplication().executeOnPooledThread {
                 // Submit the steps query to apiExecutor FIRST so it runs in parallel
                 // with the description work below.
@@ -420,19 +456,8 @@ class RallyDetailPanel(private val project: Project) : com.intellij.openapi.Disp
 
                 loadAndRenderDescription(desc, id, artifactRef, client, gen)
             }
-            return  // Skip the normal story/defect detail loading
+            return
         }
-
-        // Reset to first tab and clear all lists
-        tabbedPane.selectedIndex = TAB_TEST_CASES
-        testCaseListModel.clear()
-        testCaseSummaryLabel.text = "Loading..."
-        taskListModel.clear()
-        attachmentListModel.clear()
-        stepListModel.clear()
-        tabbedPane.setTitleAt(TAB_TEST_CASES, "Test Cases (...)")
-        tabbedPane.setTitleAt(TAB_TASKS, "Tasks (...)")
-        tabbedPane.setTitleAt(TAB_ATTACHMENTS, "Attachments (...)")
 
         // Load description, test cases, tasks, and attachments in parallel
         ApplicationManager.getApplication().executeOnPooledThread {
@@ -515,6 +540,14 @@ class RallyDetailPanel(private val project: Project) : com.intellij.openapi.Disp
             loadAndRenderDescription(desc, id, artifactRef, client, gen)
         }
     }
+
+    fun showArtifact(artifact: RallyArtifact?, client: RallyApiClient?) {
+        showArtifactHeader(artifact, client)
+        loadDetails()
+    }
+
+    /** True when [artifact] is the exact object the panel is already showing (identity, not ref). */
+    fun isShowing(artifact: RallyArtifact): Boolean = artifact === currentArtifact
 
     /**
      * Fetch (if needed), image-resolve, wrap, and render an artifact description.
