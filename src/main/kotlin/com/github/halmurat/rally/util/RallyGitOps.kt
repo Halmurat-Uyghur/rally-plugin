@@ -89,7 +89,7 @@ object RallyGitOps {
                 })
             }
         } catch (e: Exception) {
-            LOG.error("Branch operation failed for $branchName", e)
+            LOG.warn("Branch operation failed for $branchName", e)
             latch.countDown()
             return "Branch operation failed: ${e.message}"
         }

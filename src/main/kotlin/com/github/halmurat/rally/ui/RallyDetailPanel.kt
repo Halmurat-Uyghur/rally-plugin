@@ -715,7 +715,7 @@ class RallyDetailPanel(private val project: Project) : com.intellij.openapi.Disp
                     if (markdown) exporter.exportTestCaseMarkdown(tcId, outputDir)
                     success++
                 } catch (e: Exception) {
-                    LOG.error("Failed to export $tcId", e)
+                    LOG.warn("Failed to export $tcId", e)
                 }
             }
 
@@ -982,7 +982,7 @@ class RallyDetailPanel(private val project: Project) : com.intellij.openapi.Disp
                     )
                 }
             } catch (e: Exception) {
-                LOG.error("Failed to download attachment ${selected.name}", e)
+                LOG.warn("Failed to download attachment ${selected.name}", e)
                 ApplicationManager.getApplication().invokeLater {
                     if (disposed || project.isDisposed) return@invokeLater
                     Messages.showErrorDialog(

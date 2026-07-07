@@ -618,7 +618,7 @@ class RallyToolWindowPanel(private val project: Project) : Disposable {
                 }
 
             } catch (e: Exception) {
-                LOG.error("Failed to load Rally tickets", e)
+                LOG.warn("Failed to load Rally tickets", e)
                 invokeLaterIfAlive {
                     loading = false
                     if (pendingReload) {
@@ -1286,7 +1286,7 @@ class RallyToolWindowPanel(private val project: Project) : Disposable {
                     }
                 }
             } catch (e: Exception) {
-                LOG.error("Failed to create $typeLabel", e)
+                LOG.warn("Failed to create $typeLabel", e)
                 invokeLaterIfAlive {
                     statusLabel.text = "Create failed"
                     Messages.showErrorDialog(project, "Failed to create $typeLabel: ${e.message}", "Rally - Error")
@@ -1359,7 +1359,7 @@ class RallyToolWindowPanel(private val project: Project) : Disposable {
                         exporter.exportArtifactMarkdown(artifact, outputDir)
                         artifactSuccess.incrementAndGet()
                     } catch (e: Exception) {
-                        LOG.error("Failed to export $id", e)
+                        LOG.warn("Failed to export $id", e)
                         artifactFailed.incrementAndGet()
                     }
 
@@ -1472,7 +1472,7 @@ class RallyToolWindowPanel(private val project: Project) : Disposable {
                     }
                 }
             } catch (e: Exception) {
-                LOG.error("Failed to update points", e)
+                LOG.warn("Failed to update points", e)
                 invokeLaterIfAlive {
                     statusLabel.text = "Update failed"
                     Messages.showErrorDialog(project, "Failed to update points: ${e.message}", "Rally")
@@ -1532,7 +1532,7 @@ class RallyToolWindowPanel(private val project: Project) : Disposable {
                         successfulRefs.add(ref)
                         results.incrementAndGet()
                     } catch (e: Exception) {
-                        LOG.error("Failed to update ${artifact.formattedID}", e)
+                        LOG.warn("Failed to update ${artifact.formattedID}", e)
                         failedIds.add(artifact.formattedID ?: ref)
                         failures.incrementAndGet()
                     }
@@ -1668,7 +1668,7 @@ class RallyToolWindowPanel(private val project: Project) : Disposable {
                         branchSucceeded = true
                     }
                 } catch (e: Exception) {
-                    LOG.error("Failed to create branch $branchName", e)
+                    LOG.warn("Failed to create branch $branchName", e)
                     errors.add("Branch creation failed: ${e.message}")
                 }
             }
@@ -1692,7 +1692,7 @@ class RallyToolWindowPanel(private val project: Project) : Disposable {
                 client.updateArtifactState(ticketRef, ticketType, "In-Progress")
                 stateChangeSucceeded = true
             } catch (e: Exception) {
-                LOG.error("Failed to move $ticketId to In-Progress", e)
+                LOG.warn("Failed to move $ticketId to In-Progress", e)
                 errors.add("State change failed: ${e.message}")
             }
 
@@ -1705,7 +1705,7 @@ class RallyToolWindowPanel(private val project: Project) : Disposable {
                         client.updateArtifactOwner(ticketRef, ticketType, userRef)
                     }
                 } catch (e: Exception) {
-                    LOG.error("Failed to assign owner for $ticketId", e)
+                    LOG.warn("Failed to assign owner for $ticketId", e)
                     errors.add("Owner assignment failed: ${e.message}")
                 }
             }
@@ -1781,7 +1781,7 @@ class RallyToolWindowPanel(private val project: Project) : Disposable {
                     statusLabel.text = "Finished $ticketId"
                 }
             } catch (e: Exception) {
-                LOG.error("Failed to finish working on $ticketId", e)
+                LOG.warn("Failed to finish working on $ticketId", e)
                 invokeLaterIfAlive {
                     statusLabel.text = "Finish failed"
                     Messages.showErrorDialog(project, "Failed to finish working: ${e.message}", "Rally")
