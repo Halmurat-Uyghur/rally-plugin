@@ -1430,7 +1430,6 @@ class RallyToolWindowPanel(private val project: Project) : Disposable {
         ApplicationManager.getApplication().executeOnPooledThread {
             try {
             val client = getClient()
-            client.enterBulkMode()
             // Per-export orchestration pool (M1). Each per-artifact task is long-lived
             // (description + inline images + attachments + linked test cases, parked on
             // the exporter's download-pool joins throughout), so running them on the
@@ -1441,6 +1440,7 @@ class RallyToolWindowPanel(private val project: Project) : Disposable {
                 minOf(4, selected.size)
             ) { r -> Thread(r, "rally-export-orchestrator").apply { isDaemon = true } }
             val exporter = RallyExporter(client)
+            client.enterBulkMode()
             try {
             val artifactSuccess = java.util.concurrent.atomic.AtomicInteger(0)
             val artifactFailed = java.util.concurrent.atomic.AtomicInteger(0)
