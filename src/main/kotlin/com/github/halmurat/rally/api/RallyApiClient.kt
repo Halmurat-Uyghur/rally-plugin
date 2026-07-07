@@ -658,9 +658,10 @@ class RallyApiClient(
         fields: List<String> = LIST_FIELDS,
         workspace: String?,
         project: String?
-    ): List<T> {
+    ): PagedResult<T> {
         val allResults = mutableListOf<T>()
         var start = 1
+        var total = 0
 
         do {
             val url = buildApiUrl(endpoint) + "?" +
@@ -671,27 +672,28 @@ class RallyApiClient(
             result.queryResult.requireNoErrors("paged query ($endpoint)")
             logWarnings(result.queryResult.warnings, "paged query ($endpoint)")
             allResults.addAll(result.queryResult.safeResults)
+            total = result.queryResult.totalResultCount
             val effectivePageSize = result.queryResult.pageSize.takeIf { it > 0 } ?: pageSize
             start += effectivePageSize
         } while (allResults.size < result.queryResult.totalResultCount
             && result.queryResult.safeResults.isNotEmpty()
             && allResults.size < maxResults)
 
-        return allResults
+        return PagedResult(allResults, total)
     }
 
     /**
      * Query User Stories (HierarchicalRequirement)
      */
-    fun queryUserStories(query: String? = null, pageSize: Int = DEFAULT_PAGE_SIZE, maxResults: Int = MAX_PAGE_SIZE): List<RallyUserStory> {
+    fun queryUserStories(query: String? = null, pageSize: Int = DEFAULT_PAGE_SIZE, maxResults: Int = MAX_PAGE_SIZE): PagedResult<RallyUserStory> {
         // Snapshot scope once so a concurrent project-dropdown change can't split the
         // cache key and the actual query URL across different workspace/project values.
         val ws = workspaceRef
         val pr = projectRef
         val cacheKey = "stories:${query}|${pageSize}|${maxResults}|${ws}|${pr}"
-        getCached<List<RallyUserStory>>(cacheKey)?.let { return it }
+        getCached<PagedResult<RallyUserStory>>(cacheKey)?.let { return it }
 
-        val results: List<RallyUserStory> = queryAllPages(
+        val results: PagedResult<RallyUserStory> = queryAllPages(
             "hierarchicalrequirement", TYPE_USER_STORIES, query, pageSize, maxResults,
             workspace = ws, project = pr
         )
@@ -702,13 +704,13 @@ class RallyApiClient(
     /**
      * Query Defects
      */
-    fun queryDefects(query: String? = null, pageSize: Int = DEFAULT_PAGE_SIZE, maxResults: Int = MAX_PAGE_SIZE): List<RallyDefect> {
+    fun queryDefects(query: String? = null, pageSize: Int = DEFAULT_PAGE_SIZE, maxResults: Int = MAX_PAGE_SIZE): PagedResult<RallyDefect> {
         val ws = workspaceRef
         val pr = projectRef
         val cacheKey = "defects:${query}|${pageSize}|${maxResults}|${ws}|${pr}"
-        getCached<List<RallyDefect>>(cacheKey)?.let { return it }
+        getCached<PagedResult<RallyDefect>>(cacheKey)?.let { return it }
 
-        val results: List<RallyDefect> = queryAllPages(
+        val results: PagedResult<RallyDefect> = queryAllPages(
             "defect", TYPE_DEFECTS, query, pageSize, maxResults,
             workspace = ws, project = pr
         )
@@ -842,10 +844,11 @@ class RallyApiClient(
         val ws = workspaceRef
         val pr = projectRef
         val cacheKey = "artifacts:${query}|${pageSize}|${maxResults}|${scope}|${ws}|${pr}"
-        getCached<List<RallyArtifact>>(cacheKey)?.let { return ArtifactQueryResult(it) }
+        getCached<ArtifactQueryResult>(cacheKey)?.let { return it }
 
         val results = mutableListOf<RallyArtifact>()
         val reasons = mutableListOf<String>()
+        var totalAvailable = 0
 
         val fetchStories = scope != "Defects"
         val fetchDefects = scope != "User Stories"
@@ -853,14 +856,16 @@ class RallyApiClient(
         // Kick the defect query onto apiExecutor first so it runs concurrently with the
         // inline user-story query below. Both sides are wrapped so a failure on one type
         // records a reason and continues with the other type's results (partial success).
-        val defectsFuture: CompletableFuture<List<RallyDefect>>? =
+        val defectsFuture: CompletableFuture<PagedResult<RallyDefect>>? =
             if (fetchDefects) {
                 CompletableFuture.supplyAsync({ queryDefects(query, pageSize, maxResults) }, apiExecutor)
             } else null
 
         if (fetchStories) {
             try {
-                results.addAll(queryUserStories(query, pageSize, maxResults))
+                val page = queryUserStories(query, pageSize, maxResults)
+                results.addAll(page.items)
+                totalAvailable += page.totalResultCount
             } catch (e: Exception) {
                 reasons.add("User stories query failed: ${e.message}")
             }
@@ -868,7 +873,9 @@ class RallyApiClient(
 
         if (defectsFuture != null) {
             try {
-                results.addAll(defectsFuture.get())
+                val page = defectsFuture.get()
+                results.addAll(page.items)
+                totalAvailable += page.totalResultCount
             } catch (e: Exception) {
                 // CompletableFuture.get() wraps the real cause in ExecutionException;
                 // surface the underlying message when present.
@@ -887,11 +894,12 @@ class RallyApiClient(
         if (reasons.isNotEmpty()) {
             LOG.warn("queryAllArtifactsParallel partial failure: ${reasons.joinToString("; ")}")
             notifyPartialFailure(reasons)
-            return ArtifactQueryResult(sorted, reasons)
+            return ArtifactQueryResult(sorted, reasons, totalAvailable)
         }
 
-        putCache(cacheKey, sorted)
-        return ArtifactQueryResult(sorted)
+        val complete = ArtifactQueryResult(sorted, totalAvailable = totalAvailable)
+        putCache(cacheKey, complete)
+        return complete
     }
 
     /** Last partial-failure balloon, for throttling. */
@@ -942,7 +950,7 @@ class RallyApiClient(
         val query = buildSearchQuery(escapeQueryValue(searchText))
 
         if (scope == "Test Cases") {
-            val tcResults: List<RallyArtifact> = queryAllTestCases(query, pageSize, maxResults)
+            val tcResults: List<RallyArtifact> = queryAllTestCases(query, pageSize, maxResults).items
             val sorted = tcResults.sortedByDescending { it.lastUpdateDate }
             putCache(cacheKey, sorted)
             return ArtifactQueryResult(sorted)
@@ -954,11 +962,11 @@ class RallyApiClient(
         val fetchDefects = scope != "User Stories"
 
         if (fetchStories) {
-            try { results.addAll(queryUserStories(query, pageSize, maxResults)) }
+            try { results.addAll(queryUserStories(query, pageSize, maxResults).items) }
             catch (e: Exception) { reasons.add("User stories query failed: ${e.message}") }
         }
         if (fetchDefects) {
-            try { results.addAll(queryDefects(query, pageSize, maxResults)) }
+            try { results.addAll(queryDefects(query, pageSize, maxResults).items) }
             catch (e: Exception) { reasons.add("Defects query failed: ${e.message}") }
         }
 
@@ -983,13 +991,13 @@ class RallyApiClient(
      * Query all test cases in the current workspace/project.
      * Used when scope is "Test Cases".
      */
-    fun queryAllTestCases(query: String? = null, pageSize: Int = DEFAULT_PAGE_SIZE, maxResults: Int = MAX_PAGE_SIZE): List<RallyTestCase> {
+    fun queryAllTestCases(query: String? = null, pageSize: Int = DEFAULT_PAGE_SIZE, maxResults: Int = MAX_PAGE_SIZE): PagedResult<RallyTestCase> {
         val ws = workspaceRef
         val pr = projectRef
         val cacheKey = "alltestcases:${query}|${pageSize}|${maxResults}|${ws}|${pr}"
-        getCached<List<RallyTestCase>>(cacheKey)?.let { return it }
+        getCached<PagedResult<RallyTestCase>>(cacheKey)?.let { return it }
 
-        val results: List<RallyTestCase> = queryAllPages(
+        val results: PagedResult<RallyTestCase> = queryAllPages(
             "testcase", TYPE_TEST_CASES, query, pageSize, maxResults,
             order = "LastUpdateDate DESC",
             fields = TC_LIST_FIELDS,

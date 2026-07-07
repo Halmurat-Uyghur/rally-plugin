@@ -52,10 +52,15 @@ internal fun QueryResultData<*>.requireNoErrors(context: String) {
  */
 data class ArtifactQueryResult(
     val artifacts: List<RallyArtifact>,
-    val partialFailureReasons: List<String> = emptyList()
+    val partialFailureReasons: List<String> = emptyList(),
+    /** Server-side TotalResultCount summed across the queried types; -1 when unknown (M3). */
+    val totalAvailable: Int = -1
 ) {
     val isPartial: Boolean get() = partialFailureReasons.isNotEmpty()
 }
+
+/** Items plus Rally's server-reported TotalResultCount for one paged query (M3). */
+data class PagedResult<T>(val items: List<T>, val totalResultCount: Int)
 
 /**
  * Base interface for all Rally artifacts

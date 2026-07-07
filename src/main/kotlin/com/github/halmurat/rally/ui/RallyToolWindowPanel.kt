@@ -119,6 +119,11 @@ class RallyToolWindowPanel(private val project: Project) : Disposable {
     // Remembered so a later client-side state-filter change can re-render the "N loaded" status
     // with the right count AND keep the "(incomplete)" + warning marker (LOW-9 follow-up).
     private var lastLoadIncomplete = false
+    /** How many rows the last loadTickets() actually fetched, and Rally's server-side
+     *  total (-1 unknown) — kept so refreshLoadedStatus can re-render "X of Y loaded"
+     *  after a client-side state-filter change (M3). */
+    private var lastLoadFetched = 0
+    private var lastLoadTotal = -1
     @Volatile private var currentClient: RallyApiClient? = null
     @Volatile private var loading = false
     @Volatile private var pendingReload = false
@@ -582,7 +587,8 @@ class RallyToolWindowPanel(private val project: Project) : Disposable {
                 // any partial-failure reasons (MED-8). Run it directly on this executeOnPooledThread
                 // thread — NOT on apiExecutor — because it blocks on one apiExecutor slot internally.
                 val result: ArtifactQueryResult = if (Scope.fromDisplay(scope) == Scope.TEST_CASES) {
-                    ArtifactQueryResult(client.queryAllTestCases(query, pageSize, maxResults = pageSize))
+                    val page = client.queryAllTestCases(query, pageSize, maxResults = pageSize)
+                    ArtifactQueryResult(page.items, totalAvailable = page.totalResultCount)
                 } else {
                     client.queryAllArtifactsParallel(query, pageSize, scope = scope, maxResults = pageSize)
                 }
@@ -602,12 +608,14 @@ class RallyToolWindowPanel(private val project: Project) : Disposable {
                 invokeLaterIfAlive {
                     allArtifacts = scopeFiltered
                     lastLoadIncomplete = result.isPartial
+                    lastLoadFetched = artifacts.size
+                    lastLoadTotal = result.totalAvailable
                     detailPanel.clear()
                     applySearchFilter()
                     loading = false
                     // A partial result (one of stories/defects failed) is shown but flagged so the
                     // user knows the list is incomplete rather than legitimately short (MED-8).
-                    statusLabel.text = if (result.isPartial) "$shownCount loaded (incomplete)" else "$shownCount loaded"
+                    statusLabel.text = buildLoadedStatusText(shownCount, artifacts.size, result.totalAvailable, result.isPartial)
                     statusLabel.icon = if (result.isPartial) AllIcons.General.Warning else null
                     // applySearchFilter() above already refreshes the empty placeholder when the
                     // displayed list is empty (updateEmptyText), covering search + state filters.
@@ -944,8 +952,9 @@ class RallyToolWindowPanel(private val project: Project) : Disposable {
      * The partial-failure marker is preserved via [lastLoadIncomplete].
      */
     private fun refreshLoadedStatus() {
-        val count = displayedArtifacts.size
-        statusLabel.text = if (lastLoadIncomplete) "$count loaded (incomplete)" else "$count loaded"
+        statusLabel.text = buildLoadedStatusText(
+            displayedArtifacts.size, lastLoadFetched, lastLoadTotal, lastLoadIncomplete
+        )
         statusLabel.icon = if (lastLoadIncomplete) AllIcons.General.Warning else null
     }
 
