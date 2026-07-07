@@ -1667,6 +1667,36 @@ class RallyApiClient(
     }
 
     /**
+     * Fetch an attachment's bytes, preferring the raw-bytes endpoint over the base64
+     * Content ref (M4). The raw endpoint (`/slm/attachment/<OID>/<name>` — the same
+     * one inline images use) avoids the JSON DOM + base64 decode of
+     * [getAttachmentContent]: ~25% less transfer and ~1x peak heap instead of 4-5x
+     * (a 50 MB attachment spikes ~250 MB through the base64-JSON path). Falls back
+     * to the Content ref when the raw download fails or there is no ObjectID.
+     * Returns null when the attachment carries neither an ObjectID nor a Content ref.
+     * Uncached — callers are one-shot saves/exports with their own dedup.
+     */
+    fun downloadAttachmentBytes(attachment: RallyAttachment): ByteArray? {
+        val objectId = attachment.objectID
+        val contentRef = attachment.content?.ref
+        if (objectId != null) {
+            try {
+                // inlineImageUrl percent-encodes URI-illegal filenames (spaces, quotes)
+                // without double-encoding names that are already encoded.
+                val url = com.github.halmurat.rally.util.RallyHtmlUtils
+                    .inlineImageUrl(webBaseUrl, objectId, attachment.name ?: "attachment")
+                return downloadAttachment(url, cache = false)
+            } catch (e: Exception) {
+                LOG.warn("Raw attachment download failed for '${attachment.name}'; falling back to base64 content", e)
+            }
+        }
+        val ref = contentRef ?: return null
+        // Rally returns MIME base64 with line breaks every 76 chars; the strict
+        // decoder throws IllegalArgumentException on real attachments.
+        return Base64.getMimeDecoder().decode(getAttachmentContent(ref))
+    }
+
+    /**
      * Create a new User Story.
      */
     fun createUserStory(

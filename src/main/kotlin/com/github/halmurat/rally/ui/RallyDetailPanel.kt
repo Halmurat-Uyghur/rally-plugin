@@ -979,7 +979,7 @@ class RallyDetailPanel(private val project: Project) : com.intellij.openapi.Disp
     private fun saveAttachmentToDisk() {
         val selected = attachmentList.selectedValue ?: return
         val client = currentClient ?: return
-        val contentRef = selected.content?.ref ?: run {
+        if (selected.objectID == null && selected.content?.ref == null) {
             Messages.showErrorDialog(project, "No content reference for this attachment.", "Rally - Download Error")
             return
         }
@@ -999,10 +999,10 @@ class RallyDetailPanel(private val project: Project) : com.intellij.openapi.Disp
 
         ApplicationManager.getApplication().executeOnPooledThread {
             try {
-                val base64Content = client.getAttachmentContent(contentRef)
-                // Rally returns MIME base64 with embedded line breaks — the strict
-                // decoder throws IllegalArgumentException on real attachments.
-                val bytes = Base64.getMimeDecoder().decode(base64Content)
+                // Raw-bytes endpoint first, base64 Content ref fallback (M4) —
+                // see RallyApiClient.downloadAttachmentBytes.
+                val bytes = client.downloadAttachmentBytes(selected)
+                    ?: throw RallyApiException("No content available for this attachment")
                 targetFile.writeBytes(bytes)
 
                 ApplicationManager.getApplication().invokeLater {

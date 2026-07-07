@@ -634,26 +634,9 @@ class RallyExporter(private val client: RallyApiClient) {
             val attachDirPath = Paths.get(attachDir)
             Files.createDirectories(attachDirPath)
 
-            // Prefer the raw-bytes endpoint (the same one inline images use): no JSON
-            // DOM, no base64 decode, ~25% less transfer, ~1x peak heap instead of 3-4x.
-            // Fall back to the base64 Content ref if the raw download fails or there
-            // is no ObjectID.
-            val fileBytes = (if (objectId != null) {
-                try {
-                    val encodedName = java.net.URLEncoder
-                        .encode(attachment.name ?: safeFileName, StandardCharsets.UTF_8)
-                        .replace("+", "%20")
-                    client.downloadAttachment("${client.webBaseUrl}/slm/attachment/$objectId/$encodedName", cache = false)
-                } catch (e: Exception) {
-                    LOG.warn("Raw download failed for '$fileName'; falling back to base64 content", e)
-                    null
-                }
-            } else null) ?: contentRef?.let { ref ->
-                val base64Content = client.getAttachmentContent(ref)
-                // Rally returns MIME-encoded base64 with line breaks every 76 chars; the strict
-                // decoder throws IllegalArgumentException on real attachments, so use MIME decoder.
-                Base64.getMimeDecoder().decode(base64Content)
-            } ?: return null
+            // Raw-first with base64 fallback, shared with the detail panel's
+            // Save to Disk (M4) — see RallyApiClient.downloadAttachmentBytes.
+            val fileBytes = client.downloadAttachmentBytes(attachment) ?: return null
 
             // safeResolve handles sanitization + containment. Dedup on existing names.
             // The name-allocation + write is serialized via attachmentWriteLock: with the
