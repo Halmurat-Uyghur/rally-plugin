@@ -4,8 +4,6 @@ import com.google.gson.Gson
 import com.google.gson.JsonObject
 import com.google.gson.JsonParser
 import com.google.gson.reflect.TypeToken
-import java.net.InetSocketAddress
-import java.net.ProxySelector
 import java.net.URI
 import java.net.URLEncoder
 import java.net.http.HttpClient
@@ -62,14 +60,32 @@ class RallyApiClient(
         .connectTimeout(Duration.ofSeconds(15))
         .version(HttpClient.Version.HTTP_2)
         .apply {
-            // Respect IDE proxy settings (Settings → Appearance & Behavior → System Settings → HTTP Proxy)
+            // Respect IDE proxy settings (Settings → Appearance & Behavior → System
+            // Settings → HTTP Proxy). CommonProxy is the IDE-wide ProxySelector and
+            // covers all three modes — static host/port, PAC scripts, and the
+            // exceptions list — where the previous static-only ProxySelector.of(...)
+            // silently went direct on PAC-based corporate networks (L8). Proxy
+            // credentials are wired via java.net.Authenticator from HttpConfigurable.
+            // Note: the JDK disables Basic auth for tunneled HTTPS by default
+            // (jdk.http.auth.tunneling.disabledSchemes) — best-effort, like the IDE's
+            // own HTTP stack.
             try {
+                proxy(com.intellij.util.proxy.CommonProxy.getInstance())
                 val httpConfigurable = com.intellij.util.net.HttpConfigurable.getInstance()
-                if (httpConfigurable.USE_HTTP_PROXY && !httpConfigurable.PROXY_HOST.isNullOrBlank()) {
-                    proxy(ProxySelector.of(InetSocketAddress(httpConfigurable.PROXY_HOST, httpConfigurable.PROXY_PORT)))
+                if (httpConfigurable.PROXY_AUTHENTICATION) {
+                    val login = httpConfigurable.proxyLogin
+                    val password = httpConfigurable.plainProxyPassword
+                    if (!login.isNullOrBlank() && !password.isNullOrEmpty()) {
+                        authenticator(object : java.net.Authenticator() {
+                            override fun getPasswordAuthentication(): java.net.PasswordAuthentication? =
+                                if (requestorType == RequestorType.PROXY)
+                                    java.net.PasswordAuthentication(login, password.toCharArray())
+                                else null
+                        })
+                    }
                 }
-            } catch (_: Exception) {
-                // IDE proxy API not available — use direct connection
+            } catch (_: Throwable) {
+                // IDE proxy API not available (unit tests / non-IDE environment) — direct connection
             }
         }
         .build()
