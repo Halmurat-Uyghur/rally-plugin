@@ -1365,6 +1365,15 @@ class RallyToolWindowPanel(private val project: Project) : Disposable {
             try {
             val client = getClient()
             client.enterBulkMode()
+            // Per-export orchestration pool (M1). Each per-artifact task is long-lived
+            // (description + inline images + attachments + linked test cases, parked on
+            // the exporter's download-pool joins throughout), so running them on the
+            // shared 4-thread apiExecutor starved everything interactive — detail tabs,
+            // Refresh, state changes — for the duration of a 4+ ticket export. With a
+            // dedicated pool, apiExecutor only ever serves short HTTP calls.
+            val exportExecutor = java.util.concurrent.Executors.newFixedThreadPool(
+                minOf(4, selected.size)
+            ) { r -> Thread(r, "rally-export-orchestrator").apply { isDaemon = true } }
             try {
             val exporter = RallyExporter(client)
             val artifactSuccess = java.util.concurrent.atomic.AtomicInteger(0)
@@ -1407,7 +1416,7 @@ class RallyToolWindowPanel(private val project: Project) : Disposable {
                             LOG.warn("Failed to query test cases for $id", e)
                         }
                     }
-                }, client.apiExecutor)
+                }, exportExecutor)
             }
 
             // Wait for all exports to complete
@@ -1433,6 +1442,7 @@ class RallyToolWindowPanel(private val project: Project) : Disposable {
                 balloon.show(RelativePoint.getSouthWestOf(statusLabel), Balloon.Position.above)
             }
             } finally {
+                exportExecutor.shutdown()
                 client.exitBulkMode()
             }
             } catch (e: Exception) {
