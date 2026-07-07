@@ -1038,12 +1038,33 @@ class RallyToolWindowPanel(private val project: Project) : Disposable {
         }
     }
 
+    /**
+     * Rebuild the visible list model. The previous selection is re-selected by ref
+     * when still present (M7) — re-selecting fires the (reattached) listener, which
+     * re-populates the detail panel or, for identical objects, hits the isShowing
+     * short-circuit. When the selection is gone, the detail split is collapsed
+     * explicitly: the listener never fires for the implicit deselection of a model
+     * clear, so the auto-collapse otherwise never runs and a blank pane stays open.
+     */
     private fun updateListModel(artifacts: List<RallyArtifact>) {
+        val selectedRefs = artifactList.selectedValuesList.mapNotNull { it.ref }.toSet()
         val selectionListeners = artifactList.listSelectionListeners
         selectionListeners.forEach { artifactList.removeListSelectionListener(it) }
         listModel.clear()
         listModel.addAll(artifacts)
         selectionListeners.forEach { artifactList.addListSelectionListener(it) }
+
+        val indices = selectionIndicesByRef(artifacts, selectedRefs)
+        if (indices.isNotEmpty()) {
+            artifactList.selectedIndices = indices
+        } else if (selectedRefs.isNotEmpty()) {
+            // Previous selection no longer in the list — mirror the listener's auto-collapse.
+            detailPanel.clear()
+            mainSplitPane?.let { sp ->
+                sp.dividerSize = 0
+                sp.dividerLocation = sp.width
+            }
+        }
     }
 
     /**

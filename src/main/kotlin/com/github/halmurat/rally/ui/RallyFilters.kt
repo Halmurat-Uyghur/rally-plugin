@@ -1,6 +1,7 @@
 package com.github.halmurat.rally.ui
 
 import com.github.halmurat.rally.api.RallyApiClient
+import com.github.halmurat.rally.api.RallyArtifact
 
 /**
  * Single source of truth for the tool-window filter display strings (MED-13).
@@ -79,4 +80,17 @@ internal fun buildTicketQuery(scope: String?, selectedIter: String, username: St
         1 -> conditions[0]
         else -> conditions.reduce { acc, cond -> "($acc AND $cond)" }
     }
+}
+
+/**
+ * Indices of [artifacts] whose ref is in [refs] — used to restore the JList
+ * selection after a model rebuild (M7). Pure and top-level so it is testable
+ * without Swing.
+ */
+internal fun selectionIndicesByRef(artifacts: List<RallyArtifact>, refs: Set<String>): IntArray {
+    if (refs.isEmpty()) return IntArray(0)
+    return artifacts.withIndex()
+        .filter { (_, artifact) -> artifact.ref != null && artifact.ref in refs }
+        .map { it.index }
+        .toIntArray()
 }
