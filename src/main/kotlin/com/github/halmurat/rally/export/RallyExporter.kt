@@ -263,6 +263,9 @@ class RallyExporter(private val client: RallyApiClient) : AutoCloseable {
     /**
      * Export all artifacts to a single consolidated JSON file suitable for AI analysis.
      * Returns the number of artifacts exported.
+     *
+     * NOTE: no UI entry point yet — deliberately kept for the planned Bulk Export UI
+     * (see CLAUDE.md "Not Yet Implemented"). Do not delete as dead code.
      */
     fun bulkExportJson(artifacts: List<com.github.halmurat.rally.api.RallyArtifact>, outputDir: String, fileName: String = "bulk_export", onProgress: ((Int) -> Unit)? = null): Int {
         LOG.info("Bulk exporting ${artifacts.size} artifacts to JSON")
@@ -330,6 +333,9 @@ class RallyExporter(private val client: RallyApiClient) : AutoCloseable {
     /**
      * Export all artifacts to a single consolidated Markdown file suitable for AI analysis.
      * Returns the number of artifacts exported.
+     *
+     * NOTE: no UI entry point yet — deliberately kept for the planned Bulk Export UI
+     * (see CLAUDE.md "Not Yet Implemented"). Do not delete as dead code.
      */
     fun bulkExportMarkdown(artifacts: List<com.github.halmurat.rally.api.RallyArtifact>, outputDir: String, fileName: String = "bulk_export", onProgress: ((Int) -> Unit)? = null): Int {
         LOG.info("Bulk exporting ${artifacts.size} artifacts to Markdown")
@@ -406,6 +412,9 @@ class RallyExporter(private val client: RallyApiClient) : AutoCloseable {
      * starving the pool (the same hazard `queryAllArtifactsParallel` and the dedicated export
      * download pools are designed around). Its callers (`bulkExport*`) run on
      * `executeOnPooledThread`, never on apiExecutor.
+     *
+     * NOTE: no UI entry point yet — deliberately kept for the planned Bulk Export UI
+     * (see CLAUDE.md "Not Yet Implemented"). Do not delete as dead code.
      */
     private fun prefetchDescriptions(
         artifacts: List<com.github.halmurat.rally.api.RallyArtifact>,

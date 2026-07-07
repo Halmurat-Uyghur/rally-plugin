@@ -822,85 +822,21 @@ class RallyApiClient(
         }
     }
 
-    /**
-     * Query all artifacts (User Stories and Defects combined)
-     * This is useful for the main task browser
-     */
-    /**
-     * Query all artifacts (User Stories and Defects combined).
-     * @param scope Optional scope hint: "User Stories" fetches only stories, "Defects" fetches only defects,
-     *              anything else (null, "All Tickets", "My Tickets", etc.) fetches both.
-     * @param maxResults Maximum total items to return per type. Defaults to MAX_PAGE_SIZE (2000).
-     */
-    fun queryAllArtifacts(query: String? = null, pageSize: Int = DEFAULT_PAGE_SIZE, scope: String? = null, maxResults: Int = MAX_PAGE_SIZE): List<RallyArtifact> {
-        val ws = workspaceRef
-        val pr = projectRef
-        val cacheKey = "artifacts:${query}|${pageSize}|${maxResults}|${scope}|${ws}|${pr}"
-        getCached<List<RallyArtifact>>(cacheKey)?.let { return it }
-
-        val results = mutableListOf<RallyArtifact>()
-        val errors = mutableListOf<String>()
-
-        val fetchStories = scope != "Defects"
-        val fetchDefects = scope != "User Stories"
-
-        // Query user stories and defects sequentially to avoid apiExecutor self-deadlock
-        // (this method is often called from an apiExecutor thread; submitting inner tasks
-        // to the same pool and blocking on .get() can exhaust the fixed 4-thread pool)
-        if (fetchStories) {
-            try {
-                results.addAll(queryUserStories(query, pageSize, maxResults))
-            } catch (e: Exception) {
-                errors.add("UserStories: ${e.message}")
-            }
-        }
-
-        if (fetchDefects) {
-            try {
-                results.addAll(queryDefects(query, pageSize, maxResults))
-            } catch (e: Exception) {
-                errors.add("Defects: ${e.message}")
-            }
-        }
-
-        // If all queries failed, throw so the UI can show the error
-        if (results.isEmpty() && errors.isNotEmpty()) {
-            throw RallyApiException("Query failed - ${errors.joinToString("; ")}")
-        }
-
-        // Partial failure: at least one type returned but at least one failed.
-        // Surface via IDE notification so the user knows the list is incomplete,
-        // and DO NOT cache the partial result — otherwise the truncated list would
-        // be served silently (with no further warning) for the full TTL, even after
-        // Rally recovers. The next call retries the failed type from scratch.
-        val sorted = results.sortedByDescending { it.lastUpdateDate }
-        if (errors.isNotEmpty()) {
-            LOG.warn("queryAllArtifacts partial failure: ${errors.joinToString("; ")}")
-            notifyPartialFailure(errors)
-            return sorted
-        }
-
-        putCache(cacheKey, sorted)
-        return sorted
-    }
 
     /**
-     * Parallel sibling of [queryAllArtifacts] (MED-2): fetches user stories and defects
-     * concurrently and returns an [ArtifactQueryResult] that carries any
-     * partial-failure reasons (MED-8) so the caller can show an "incomplete list"
+     * Fetches user stories and defects concurrently and returns an [ArtifactQueryResult]
+     * that carries any partial-failure reasons (MED-8) so the caller can show an "incomplete list"
      * indicator instead of silently displaying a truncated list.
      *
      * MUST be called from a NON-apiExecutor thread. It submits the defect query to
      * apiExecutor and blocks the calling thread on `defectsFuture.get()` while running
      * the user-story query inline; calling it from an apiExecutor worker would consume
      * two of the pool's four threads (one parked on .get(), one running the defect query)
-     * and can deadlock under load. The sequential [queryAllArtifacts] stays the safe
-     * default for callers already running on apiExecutor.
+     * and can deadlock under load.
      *
-     * Same caching/partial-failure policy as [queryAllArtifacts]: a fully successful
-     * result is cached under the shared "artifacts:" key (and a cache hit short-circuits
-     * to a non-partial result); a partial result is NOT cached and still raises the
-     * throttled partial-failure balloon.
+     * Caching/partial-failure policy: a fully successful result is cached under the shared
+     * "artifacts:" key (and a cache hit short-circuits to a non-partial result); a partial
+     * result is NOT cached and still raises the throttled partial-failure balloon.
      */
     fun queryAllArtifactsParallel(query: String? = null, pageSize: Int = DEFAULT_PAGE_SIZE, scope: String? = null, maxResults: Int = MAX_PAGE_SIZE): ArtifactQueryResult {
         val ws = workspaceRef
@@ -1361,13 +1297,6 @@ class RallyApiClient(
         return iteration
     }
 
-    /**
-     * Get all artifacts in a specific iteration by name.
-     */
-    fun queryIterationArtifacts(iterationName: String, pageSize: Int = DEFAULT_PAGE_SIZE): List<RallyArtifact> {
-        val query = "(Iteration.Name = \"${escapeQueryValue(iterationName)}\")"
-        return queryAllArtifacts(query, pageSize)
-    }
 
     /**
      * Query projects in the configured workspace.

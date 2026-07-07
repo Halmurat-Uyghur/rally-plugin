@@ -78,7 +78,7 @@ src/main/kotlin/com/github/halmurat/rally/
 | **Caching** | LRU query cache (200 entries, 2-min TTL), bounded image cache (10 MB cap) | Eliminates redundant API calls without unbounded heap growth |
 | **List queries** | `LIST_FIELDS` excludes Description field | Smaller payloads for 200+ items |
 | **Lazy description** | `fetchDescription()` on demand when detail panel opens | Faster initial list load |
-| **Parallel list** | `queryAllArtifactsParallel` runs user stories + defects concurrently (defects on `apiExecutor`, stories inline) — called from the **outer pooled thread** (not `apiExecutor`) so it only ever blocks on one sub-task slot, staying deadlock-free. `queryAllArtifacts` keeps its sequential path for `apiExecutor` callers | ~½ the cold-load latency (`max` instead of `stories+defects` RTT) |
+| **Parallel list** | `queryAllArtifactsParallel` runs user stories + defects concurrently (defects on `apiExecutor`, stories inline) — called from the **outer pooled thread** (not `apiExecutor`) so it only ever blocks on one sub-task slot, staying deadlock-free | ~½ the cold-load latency (`max` instead of `stories+defects` RTT) |
 | **Client-side state filter** | State-combo changes re-filter `allArtifacts` in memory (`applyStateFilter` at display time) instead of re-querying Rally | Instant state switches, zero network |
 | **Parallel detail** | Description + test cases + tasks + attachments via CompletableFuture | ~3-4x faster detail load |
 | **Parallel sprint** | Sprint summary loads alongside artifact list | Removes serial bottleneck |
@@ -191,7 +191,6 @@ Any State, Idea, Defined, In-Progress, Completed, Accepted, Active (excludes Acc
 |--------|---------|
 | `queryUserStories()` | Query user stories with filters |
 | `queryDefects()` | Query defects with filters |
-| `queryAllArtifacts()` | Combined user stories + defects (sequential, cached) |
 | `queryAllTestCases()` | Query all test cases in workspace/project |
 | `queryTestCases(workProductRef)` | Test cases linked to a user story/defect (cached) |
 | `queryTasksForWorkProduct(ref)` | Tasks linked to a user story/defect (cached) |
@@ -217,7 +216,6 @@ Any State, Idea, Defined, In-Progress, Completed, Accepted, Active (excludes Acc
 | `enterBulkMode()` / `exitBulkMode()` | Extended cache TTL for exports |
 | `getCurrentUser()` | Get authenticated user info |
 | `buildWebUrl(artifact)` | Construct Rally web UI URL |
-| `queryIterationArtifacts(name)` | Artifacts in a named iteration |
 
 ## Git Commit Rules
 

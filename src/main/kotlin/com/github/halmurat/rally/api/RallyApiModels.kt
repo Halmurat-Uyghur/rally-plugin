@@ -292,20 +292,6 @@ data class RallyRef(
 )
 
 /**
- * Rally Workspace
- */
-data class RallyWorkspace(
-    @SerializedName("_ref")
-    val ref: String? = null,
-
-    @SerializedName("ObjectID")
-    val objectID: String? = null,
-
-    @SerializedName("Name")
-    val name: String? = null
-)
-
-/**
  * Rally Project
  */
 data class RallyProject(
