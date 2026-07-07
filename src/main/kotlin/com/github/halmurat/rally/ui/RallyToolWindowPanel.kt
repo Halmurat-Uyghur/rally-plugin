@@ -1374,8 +1374,8 @@ class RallyToolWindowPanel(private val project: Project) : Disposable {
             val exportExecutor = java.util.concurrent.Executors.newFixedThreadPool(
                 minOf(4, selected.size)
             ) { r -> Thread(r, "rally-export-orchestrator").apply { isDaemon = true } }
-            try {
             val exporter = RallyExporter(client)
+            try {
             val artifactSuccess = java.util.concurrent.atomic.AtomicInteger(0)
             val artifactFailed = java.util.concurrent.atomic.AtomicInteger(0)
             val tcExported = java.util.concurrent.atomic.AtomicInteger(0)
@@ -1442,6 +1442,7 @@ class RallyToolWindowPanel(private val project: Project) : Disposable {
                 balloon.show(RelativePoint.getSouthWestOf(statusLabel), Balloon.Position.above)
             }
             } finally {
+                exporter.close()
                 exportExecutor.shutdown()
                 client.exitBulkMode()
             }

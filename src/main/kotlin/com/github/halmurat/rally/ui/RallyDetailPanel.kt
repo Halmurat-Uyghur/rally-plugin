@@ -739,16 +739,17 @@ class RallyDetailPanel(private val project: Project) : com.intellij.openapi.Disp
         }
 
         ApplicationManager.getApplication().executeOnPooledThread {
-            val exporter = RallyExporter(client)
             var success = 0
-            for (tc in selected) {
-                val tcId = tc.formattedID ?: continue
-                try {
-                    if (json) exporter.exportTestCaseJson(tcId, outputDir)
-                    if (markdown) exporter.exportTestCaseMarkdown(tcId, outputDir)
-                    success++
-                } catch (e: Exception) {
-                    LOG.warn("Failed to export $tcId", e)
+            RallyExporter(client).use { exporter ->
+                for (tc in selected) {
+                    val tcId = tc.formattedID ?: continue
+                    try {
+                        if (json) exporter.exportTestCaseJson(tcId, outputDir)
+                        if (markdown) exporter.exportTestCaseMarkdown(tcId, outputDir)
+                        success++
+                    } catch (e: Exception) {
+                        LOG.warn("Failed to export $tcId", e)
+                    }
                 }
             }
 

@@ -25,7 +25,7 @@ import java.util.concurrent.Executors
 import java.util.concurrent.Semaphore
 import java.util.concurrent.atomic.AtomicInteger
 
-class RallyExporter(private val client: RallyApiClient) {
+class RallyExporter(private val client: RallyApiClient) : AutoCloseable {
 
     companion object {
         private val LOG = Logger.getInstance(RallyExporter::class.java)
@@ -53,13 +53,13 @@ class RallyExporter(private val client: RallyApiClient) {
         private const val MAX_INLINE_IMAGES_PER_DESCRIPTION = 50
 
         /**
-         * Width of the dedicated download pool used by [downloadInlineImages] and
-         * [attachmentsToJsonArray] (MED-1/P2). These pools are created and shut down
-         * per call — they MUST be separate from the pool the export task itself runs on
-         * (the per-export "rally-export-orchestrator" pool — see exportSelectedArtifact
-         * in RallyToolWindowPanel): the export task blocks on join(), so submitting its
-         * inner download tasks to its own fixed pool would self-deadlock. They also stay
-         * off [RallyApiClient.apiExecutor] so long downloads never occupy the
+         * Width of the shared download pool ([downloadPool]) used by [downloadInlineImages]
+         * and [attachmentsToJsonArray] (L6). One pool is lazily created per [RallyExporter]
+         * instance and released via [close] — it MUST stay separate from the pool the export
+         * task itself runs on (the per-export "rally-export-orchestrator" pool — see
+         * exportSelectedArtifact in RallyToolWindowPanel): the export task blocks on join(),
+         * so submitting its inner download tasks to its own fixed pool would self-deadlock.
+         * It also stays off [RallyApiClient.apiExecutor] so long downloads never occupy the
          * interactive-query threads.
          */
         private const val DOWNLOAD_POOL_SIZE = 8
@@ -139,17 +139,35 @@ class RallyExporter(private val client: RallyApiClient) {
     /**
      * Create a dedicated, DAEMON-threaded download pool. Daemon so an in-flight export can never
      * stall IDE/tool-window shutdown: CompletableFuture.join() is not interruptible, so a worker
-     * parked on it ignores apiExecutor.shutdownNow(); daemon threads let the JVM/IDE proceed
+     * parked on it ignores any shutdown/interrupt signal — daemon threads let the JVM/IDE proceed
      * regardless. Separate from the pool the export task itself runs on (the per-export
      * "rally-export-orchestrator" pool — see exportSelectedArtifact in RallyToolWindowPanel)
      * so the task's blocking join() never waits on downloads queued behind it on its own
      * pool, and from client.apiExecutor so downloads never starve interactive queries
-     * (see the call sites).
+     * (see the call sites). Called once, from [downloadPoolLazy]'s initializer (L6) — not
+     * per download call.
      */
     private fun newDownloadPool(size: Int) =
         Executors.newFixedThreadPool(size) { r ->
             Thread(r, "rally-export-download").apply { isDaemon = true }
         }
+
+    /**
+     * Shared download pool for inline images + attachments (L6). Previously each
+     * downloadInlineImages / attachmentsToJsonArray call created and destroyed its
+     * own pool — appendStepsTable calls downloadInlineImages twice per test step, so
+     * an image-heavy 20-step test case churned ~40 pools. Lazily created on first
+     * use; released via [close] (call sites use `use {}` / a finally). Threads are
+     * daemon, so a leaked exporter can never stall IDE shutdown. INVARIANT: tasks on
+     * this pool never submit-and-join back into it — joins happen only on the export
+     * orchestration threads (see the M1 pool in RallyToolWindowPanel).
+     */
+    private val downloadPoolLazy = lazy { newDownloadPool(DOWNLOAD_POOL_SIZE) }
+    private val downloadPool by downloadPoolLazy
+
+    override fun close() {
+        if (downloadPoolLazy.isInitialized()) downloadPool.shutdownNow()
+    }
 
     /** Per-session cache for downloaded attachment paths (deduplicates across JSON+Markdown export). */
     private val downloadedPaths = ConcurrentHashMap<String, String>()
@@ -598,30 +616,25 @@ class RallyExporter(private val client: RallyApiClient) {
         val attachDir = RallyFileUtils.safeResolve(Paths.get(outputDir), "${artifactId}_attachments").toString()
         if (attachments.isEmpty()) return JsonArray()
 
-        // Download attachments in parallel on a dedicated pool (MED-1/P2). This pool MUST
-        // be separate from the pool the export task runs on (the per-export orchestration
-        // pool — see exportSelectedArtifact in RallyToolWindowPanel): the export task
-        // blocks on join(), so submitting inner download tasks back to its own fixed pool
-        // would self-deadlock once the selection count reaches the pool size. It also
-        // stays off client.apiExecutor so downloads never occupy the interactive-query
-        // threads. The dedup caches (downloadedPaths) are
+        // Download attachments in parallel on the shared download pool (L6, was MED-1/P2's
+        // per-call pool). This pool MUST be separate from the pool the export task runs on
+        // (the per-export orchestration pool — see exportSelectedArtifact in
+        // RallyToolWindowPanel): the export task blocks on join(), so submitting inner
+        // download tasks back to its own fixed pool would self-deadlock once the selection
+        // count reaches the pool size. It also stays off client.apiExecutor so downloads
+        // never occupy the interactive-query threads. The dedup caches (downloadedPaths) are
         // ConcurrentHashMap and the filename-allocation+write is serialized via
         // attachmentWriteLock, so concurrent downloads stay correct. Results are written
         // into an index-keyed array so the emitted JSON order matches the input order
         // regardless of completion order.
         val savedPaths = arrayOfNulls<String>(attachments.size)
-        val pool = newDownloadPool(minOf(DOWNLOAD_POOL_SIZE, attachments.size))
-        try {
-            val futures = attachments.mapIndexed { index, att ->
-                val attName = att.name ?: "unnamed"
-                CompletableFuture.runAsync({
-                    savedPaths[index] = downloadAttachmentContent(att, attachDir, attName)
-                }, pool)
-            }
-            CompletableFuture.allOf(*futures.toTypedArray()).join()
-        } finally {
-            pool.shutdownNow()
+        val futures = attachments.mapIndexed { index, att ->
+            val attName = att.name ?: "unnamed"
+            CompletableFuture.runAsync({
+                savedPaths[index] = downloadAttachmentContent(att, attachDir, attName)
+            }, downloadPool)
         }
+        CompletableFuture.allOf(*futures.toTypedArray()).join()
 
         val array = JsonArray()
         for ((index, att) in attachments.withIndex()) {
@@ -702,14 +715,14 @@ class RallyExporter(private val client: RallyApiClient) {
 
         if (jobs.isEmpty()) return html
 
-        // Pass 2: download in parallel on a dedicated pool (MED-1/P2). This pool MUST be
-        // separate from the pool the export task runs on: each artifact's
-        // exportArtifact{Json,Markdown} runs as a task on the per-export orchestration pool
-        // (see exportSelectedArtifact in RallyToolWindowPanel), so submitting inner download
-        // tasks back to that fixed pool and blocking on .join() would self-deadlock once the
-        // selection count reaches the pool size — attachmentsToJsonArray avoids it the same
-        // way. It also stays off client.apiExecutor so downloads never starve interactive
-        // queries.
+        // Pass 2: download in parallel on the shared download pool (L6, was MED-1/P2's
+        // per-call pool). This pool MUST be separate from the pool the export task runs
+        // on: each artifact's exportArtifact{Json,Markdown} runs as a task on the per-export
+        // orchestration pool (see exportSelectedArtifact in RallyToolWindowPanel), so
+        // submitting inner download tasks back to that fixed pool and blocking on .join()
+        // would self-deadlock once the selection count reaches the pool size —
+        // attachmentsToJsonArray avoids it the same way. It also stays off client.apiExecutor
+        // so downloads never starve interactive queries.
         //
         // De-dup the actual downloads by target filename (distinctBy uniqueFileName): the same
         // OID can appear in more than one <img>, which yields the same output path — writing it
@@ -721,20 +734,15 @@ class RallyExporter(private val client: RallyApiClient) {
         val imgDir = RallyFileUtils.safeResolve(Paths.get(outputDir), "${artifactId}_images").toString()
         val byFile = ConcurrentHashMap<String, String>()  // uniqueFileName -> relative local path
         val uniqueJobs = jobs.distinctBy { it.uniqueFileName }
-        val pool = newDownloadPool(minOf(DOWNLOAD_POOL_SIZE, uniqueJobs.size))
-        try {
-            val futures = uniqueJobs.map { job ->
-                CompletableFuture.runAsync({
-                    val localPath = downloadRallyImage(job.objectId, job.originalFileName, job.uniqueFileName, imgDir)
-                    if (localPath != null) {
-                        byFile[job.uniqueFileName] = "${artifactId}_images/${job.uniqueFileName}"
-                    }
-                }, pool)
-            }
-            CompletableFuture.allOf(*futures.toTypedArray()).join()
-        } finally {
-            pool.shutdownNow()
+        val futures = uniqueJobs.map { job ->
+            CompletableFuture.runAsync({
+                val localPath = downloadRallyImage(job.objectId, job.originalFileName, job.uniqueFileName, imgDir)
+                if (localPath != null) {
+                    byFile[job.uniqueFileName] = "${artifactId}_images/${job.uniqueFileName}"
+                }
+            }, downloadPool)
         }
+        CompletableFuture.allOf(*futures.toTypedArray()).join()
         // Map every original src occurrence to its downloaded path (single-threaded, post-join).
         val downloads = HashMap<String, String>()  // originalSrc -> relative local path
         for (job in jobs) {
