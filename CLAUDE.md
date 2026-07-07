@@ -55,7 +55,7 @@ src/main/kotlin/com/github/halmurat/rally/
 - **Caching** — LRU query cache (access-ordered `LinkedHashMap`, max 200 entries) with 2-minute TTL. Downloaded images use a bounded in-memory cache (10 MB cap, 1 MB per-image cap). Bulk export mode extends TTL to 15 minutes via a **reentrant `bulkModeDepth` AtomicInteger** (`enterBulkMode`/`exitBulkMode` increment/decrement; floor at 0) so overlapping exports/browse don't stomp each other's extended-TTL window. `getUserByUsername` is cached; `clearArtifactCache` no longer evicts `currentIteration` (date-derived, mutation-independent)
 - **Threading**: `executeOnPooledThread` for API calls, `invokeLater` for UI updates, `CompletableFuture.supplyAsync` for parallel operations. Dedicated `apiExecutor` thread pool in RallyApiClient (4 daemon threads)
 - **Disposal safety** — `RallyToolWindowPanel` implements `Disposable` with a `disposed` flag. `dispose()` and `getClient()` are synchronized on `clientLock` so no client can be created after disposal begins. All `getClient()` call sites are guarded with try/catch to prevent late background tasks from crashing
-- **HTTP/2** — Enabled for connection multiplexing on parallel requests. Respects IDE proxy settings
+- **HTTP/2** — Enabled for connection multiplexing on parallel requests. Respects IDE proxy settings including PAC and proxy authentication via `CommonProxy`
 - **No external Rally SDK** — uses Java's built-in `HttpClient` with `zsessionid` header for API key auth
 - **State field logic**: User Stories use `ScheduleState`; Defects carry both `ScheduleState` and `State`; Tasks use `State`
 - **Client-side state filtering** — because ScheduleState vs State differs by artifact type, the state filter is applied **client-side at display time** (`applyStateFilter` inside `applySearchFilter`) over the scope-filtered `allArtifacts`. A state-combo change therefore re-filters in memory with **no network round trip**; only scope/project/sprint changes call `loadTickets()`. `applyScopeFilter`/`applyStateFilter`/`applyClientFilter` and the `Scope`/`StateFilter` enums (`RallyFilters.kt`) are the single source of truth
@@ -70,6 +70,10 @@ src/main/kotlin/com/github/halmurat/rally/
 - **invokeLaterIfAlive helper** — private inline function replaces 19 disposed-guard boilerplate instances
 - **Balloon notifications** — non-modal success feedback via JBPopupFactory
 - **Generic plugin design** — No workflow-specific or company-specific custom fields hardcoded. Only standard Rally fields (Method, ScheduleState, etc.) are used
+- **Log policy** — expected environmental failures (network, auth, declined transitions) log at WARN; `LOG.error` is reserved for programming errors because the platform turns it into an IDE fatal-error report
+- **Selection preserved across refresh** — `updateListModel` re-selects surviving rows by ref and collapses the detail split when the selection is gone
+- **Settings-apply refresh** — `RallySettingsListener.TOPIC` (application message bus) triggers `loadTickets()` when Settings are applied
+- **Export filenames** — attachments are `${objectId}_name` (OID-keyed, like inline images) so re-exports overwrite instead of accumulating copies
 
 ## Performance Optimizations
 
@@ -100,10 +104,16 @@ src/main/kotlin/com/github/halmurat/rally/
 | **StatusBadge pure setter** | `update()` no longer calls `revalidate()`/`repaint()` (rubber-stamp renderers don't need it); real-container badges call `refresh()` | Removes per-cell repaint-queue churn on 200-row lists |
 | **Off-EDT description pipeline** | Description fetch + image resolution + `wrapHtml` run on the unbounded pooled thread, not apiExecutor/EDT | apiExecutor never parks on image joins; EDT stays responsive on multi-MB descriptions |
 | **Export download dedup** | Inline images + attachments deduplicated across JSON+Markdown passes (thread-safe `ConcurrentHashMap`); raw-bytes attachment endpoint with base64 fallback; exporter bypasses the UI image cache | Halves export downloads, ~1x peak heap, no UI-cache eviction |
-| **Parallel export downloads** | Per-artifact inline images and attachments download on a **dedicated** `Executors` pool (separate from `apiExecutor` to avoid self-deadlock), `allOf().join()` + `shutdownNow()` in `finally`; output order preserved via index/key maps | Image/attachment-heavy exports no longer serialize each download |
+| **Parallel export downloads** | Per-artifact inline images and attachments download on a **dedicated** daemon `Executors` pool (separate from `apiExecutor` and from the export-orchestrator pool to avoid self-deadlock), `allOf().join()`; output order preserved via index/key maps | Image/attachment-heavy exports no longer serialize each download |
 | **Export skips redundant lookup** | `exportArtifact{Json,Markdown}(artifact, dir)` overloads reuse the in-memory artifact + `fetchDescription` (ref GET) instead of re-running a FormattedID search per artifact | One fewer search query per exported artifact |
 | **Reentrant bulk mode** | `enterBulkMode`/`exitBulkMode` use an `AtomicInteger` depth counter (floor 0) | Overlapping exports/browse keep a consistent extended-TTL window |
 | **Streamed JSON export** | `gson.toJson(output, bufferedWriter)` instead of full-string materialization | Halves peak memory of export write phase |
+| **Selection debounce** | 200 ms single-shot Timer between list selection and detail loads (header/badge update instantly) | Arrow-scrolling costs zero API calls for skipped rows |
+| **Dedicated export executor** | Per-export daemon pool for export orchestration; apiExecutor only serves short HTTP calls | Tool window stays responsive during multi-ticket exports |
+| **Truncation-aware status** | TotalResultCount plumbed through PagedResult/ArtifactQueryResult → "200 of 934 loaded" | Removes silent page-size truncation |
+| **Raw-first attachment fetch** | downloadAttachmentBytes: raw endpoint, base64 fallback (save + export) | ~25% less transfer, ~1x peak heap on large attachments |
+| **Parallel project load** | Project list loads concurrently with artifacts when scoped to "All Projects" | One RTT off cold open |
+| **Shared exporter download pool** | One lazy pool per RallyExporter (AutoCloseable) instead of a pool per call | No pool churn on step-heavy test cases |
 
 ## Rally WSAPI Gotchas
 
@@ -119,6 +129,8 @@ src/main/kotlin/com/github/halmurat/rally/
 - Query values escape `"` as `\"` and `\` as `\\` (Broadcom-documented); other documented escapes (`\q` for `'`, `\l`/`\g` for `<`/`>`) are deliberately not applied — those characters round-trip fine unescaped in practice
 - Rally's attachment upload limit is 50 MB; the create dialogs validate size in `doValidate()` and re-check on the pooled thread BEFORE the artifact is created (a post-create upload failure would orphan the new artifact)
 - `requireSameHost` pins host, scheme, AND effective port — the configured Server URL must match the host/port Rally uses in its `_ref` URLs (relevant behind reverse proxies with port rewriting)
+- `TestCase` has no `Iteration` attribute — sprint-filter test cases via `WorkProduct.Iteration.Name` (dotted traversal); `(Iteration.Name = …)` on `/testcase` returns 200-with-Errors
+- The `/user` endpoint ignores unknown fetch fields and silently returns a ref-only user — always pass user fields explicitly
 
 ## Data Model (Tier 1 Fields)
 
@@ -126,7 +138,7 @@ Core artifact models (`RallyUserStory`, `RallyDefect`, `RallyTaskItem`) include:
 
 ## Testing
 
-176 unit tests across 14 classes: Rally API JSON parsing, query-value escaping, Retry-After parsing, host/scheme/port validation, field-update bodies, exporter formatting, file/HTML utils (incl. inline-color/embedded-stylesheet stripping), sprint summary, gzip body decoding, status color mapping, StatusBadge behavior, plus the audit additions: `RallyArtifactExt` (effectiveState/storyPoints), `Scope`/`StateFilter` enums, `requireNoErrors` + `ArtifactQueryResult` (the 200-with-Errors / partial-failure paths), and the `RallyApiClient` instance helpers (`normalizeRef`, reentrant bulk-mode depth, `checkOperationResult`/`parseCreateResult`). Run via `./gradlew test`.
+203 unit tests across 18 classes: Rally API JSON parsing, query-value escaping, Retry-After parsing, host/scheme/port validation, field-update bodies, exporter formatting, file/HTML utils (incl. inline-color/embedded-stylesheet stripping), sprint summary, gzip body decoding, status color mapping, StatusBadge behavior, plus the audit additions: `RallyArtifactExt` (effectiveState/storyPoints), `Scope`/`StateFilter` enums, `requireNoErrors` + `ArtifactQueryResult` (the 200-with-Errors / partial-failure paths), the `RallyApiClient` instance helpers (`normalizeRef`, reentrant bulk-mode depth, `checkOperationResult`/`parseCreateResult`), and the query-per-scope builder (H1), selection-index restore, load-status text (M3), exporter attachment naming (M5), and entity decode order (L1). Run via `./gradlew test`.
 
 ## Build & Run
 
@@ -139,6 +151,8 @@ Core artifact models (`RallyUserStory`, `RallyDefect`, `RallyTaskItem`) include:
 Warnings during `runIde` about GradleJvmSupportMatrix, Maven, or memory leaks on UI switch are IntelliJ 2024.1 internal issues — not from this plugin.
 
 The build uses Gradle's **configuration cache** (enabled in `gradle.properties`, unblocked by the Kotlin 2.0 upgrade) — `compileKotlin`/`test`/`buildPlugin` all store/reuse a config-cache entry. If a future change reintroduces a config-cache incompatibility, the line in `gradle.properties` can be removed without losing the Kotlin upgrade. `verifyPlugin` downloads several full IDE distributions and needs multiple GB of free disk.
+
+`buildSearchableOptions` is gated to the `CI` env var (L10) — it boots a headless IDE to index the one small Settings page, which is needed for release artifacts but pure overhead locally, so local `./gradlew clean build` skips it and only CI runs generate the index.
 
 `verifyPlugin` uses a pinned IDE list (`pluginVerification.ides`, one release per major across 241–261) instead of the default dynamic `recommended()` feed: that feed serves 2025.3.x distributions whose layout (no `modules/module-descriptors.jar`) the newest Plugin Verifier (1.405) cannot read, which kills the whole task with `InvalidIdeException`. Re-add 2025.3 or return to `recommended()` once the verifier supports the new layout. Verifier-reported deprecated/scheduled-for-removal API usages (7 on newer IDEs) are the deliberate 241-floor keeps.
 
@@ -204,6 +218,7 @@ Any State, Idea, Defined, In-Progress, Completed, Accepted, Active (excludes Acc
 | `updateArtifactOwner(ref, type, ownerRef)` | Change Owner |
 | `getAttachmentContent(contentRef)` | Get base64 attachment content |
 | `downloadAttachment(url, cache)` | Download attachment bytes via HTTP (bounded image cache unless cache=false, 10 MB cap) |
+| `downloadAttachmentBytes(attachment)` | Attachment bytes, raw endpoint first, base64 fallback |
 | `queryProjects()` / `queryIterations()` | Project and sprint lists |
 | `queryCurrentIteration()` | Find active sprint by today's date |
 | `createUserStory()` | Create a new user story |
