@@ -529,16 +529,29 @@ class RallyToolWindowPanel(private val project: Project) : Disposable {
                 // Use a non-sensitive SHA-256 fingerprint of the API key instead of String.hashCode()
                 // so two distinct keys can't collide and mask a credential change.
                 val snapshot = "${settings.serverUrl}|${apiKeyFingerprint(settings.apiKey)}|${settings.workspaceRef}"
+                val savedProject = RallySettings.getInstance().selectedProject
+                val projectScoped = savedProject.isNotBlank() && savedProject != "All Projects"
+                var projectsFuture: java.util.concurrent.CompletableFuture<Void>? = null
                 if (!projectsLoaded || snapshot != lastSettingsSnapshot) {
                     lastSettingsSnapshot = snapshot
-                    loadProjects(client)
                     invalidateIterations()
+                    // The serial project load is only needed when a saved project NAME must
+                    // be resolved to a ref before the artifact query can be scoped to it. In
+                    // the default "All Projects" case the list feeds nothing but the dropdown,
+                    // so it loads concurrently with the artifact fetch (M6) — the same pattern
+                    // the iterations list uses. Saves a full RTT on cold open.
+                    if (projectScoped) {
+                        loadProjects(client)
+                    } else {
+                        projectsFuture = java.util.concurrent.CompletableFuture.runAsync({
+                            loadProjects(client)
+                        }, client.apiExecutor)
+                    }
                 }
 
                 // Determine effective project selection from saved settings + cached data
                 // (avoids reading Swing state off-EDT)
-                val savedProject = RallySettings.getInstance().selectedProject
-                val effectiveProjectIndex = if (savedProject.isNotBlank() && savedProject != "All Projects") {
+                val effectiveProjectIndex = if (projectScoped) {
                     val idx = cachedProjects.indexOfFirst { it.name == savedProject }
                     if (idx >= 0) idx + 1 else 0  // +1 for "All Projects" offset
                 } else 0
@@ -638,6 +651,14 @@ class RallyToolWindowPanel(private val project: Project) : Disposable {
                 if (iterationsFuture != null) {
                     try { iterationsFuture.get() } catch (e: Exception) {
                         LOG.warn("Failed to load iterations", e)
+                    }
+                }
+
+                // loadProjects handles its own errors and UI updates; join so this
+                // background task's lifetime covers all the work it spawned.
+                if (projectsFuture != null) {
+                    try { projectsFuture.get() } catch (e: Exception) {
+                        LOG.warn("Failed to load projects", e)
                     }
                 }
 
