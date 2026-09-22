@@ -4,6 +4,12 @@ import com.google.gson.Gson
 import com.google.gson.JsonObject
 import com.google.gson.JsonParser
 import com.google.gson.reflect.TypeToken
+import java.io.IOException
+import java.net.Authenticator
+import java.net.PasswordAuthentication
+import java.net.Proxy
+import java.net.ProxySelector
+import java.net.SocketAddress
 import java.net.URI
 import java.net.URLEncoder
 import java.net.http.HttpClient
@@ -51,43 +57,17 @@ class RallyApiClient(
      */
     val isAlive: Boolean get() = !apiExecutor.isShutdown
 
-    // HttpConfigurable is deprecated in 2025.x+ in favor of JdkProxyProvider, but that
-    // class does not exist in 2024.1/2024.2. Since the plugin still supports sinceBuild=241,
-    // we keep HttpConfigurable (present and functional through 261) and suppress the warning.
-    // Migrate to JdkProxyProvider.getInstance().proxySelector once the floor is raised to 243+.
-    @Suppress("DEPRECATION")
+    // Respect IDE proxy settings (Settings → Appearance & Behavior → System Settings →
+    // HTTP Proxy): static host/port, PAC scripts, the exceptions list, and proxy
+    // credentials. The IDE installs its own ProxySelector and Authenticator as the JVM
+    // defaults (CommonProxy on 241; JdkProxyProvider on 242+), so following those defaults
+    // covers every mode on every supported build without the deprecated
+    // CommonProxy/HttpConfigurable APIs. See FollowDefaultProxySelector / IdeProxyAuthenticator.
     private val httpClient: HttpClient = HttpClient.newBuilder()
         .connectTimeout(Duration.ofSeconds(15))
         .version(HttpClient.Version.HTTP_2)
-        .apply {
-            // Respect IDE proxy settings (Settings → Appearance & Behavior → System
-            // Settings → HTTP Proxy). CommonProxy is the IDE-wide ProxySelector and
-            // covers all three modes — static host/port, PAC scripts, and the
-            // exceptions list — where the previous static-only ProxySelector.of(...)
-            // silently went direct on PAC-based corporate networks (L8). Proxy
-            // credentials are wired via java.net.Authenticator from HttpConfigurable.
-            // Note: the JDK disables Basic auth for tunneled HTTPS by default
-            // (jdk.http.auth.tunneling.disabledSchemes) — best-effort, like the IDE's
-            // own HTTP stack.
-            try {
-                proxy(com.intellij.util.proxy.CommonProxy.getInstance())
-                val httpConfigurable = com.intellij.util.net.HttpConfigurable.getInstance()
-                if (httpConfigurable.PROXY_AUTHENTICATION) {
-                    val login = httpConfigurable.proxyLogin
-                    val password = httpConfigurable.plainProxyPassword
-                    if (!login.isNullOrBlank() && !password.isNullOrEmpty()) {
-                        authenticator(object : java.net.Authenticator() {
-                            override fun getPasswordAuthentication(): java.net.PasswordAuthentication? =
-                                if (requestorType == RequestorType.PROXY)
-                                    java.net.PasswordAuthentication(login, password.toCharArray())
-                                else null
-                        })
-                    }
-                }
-            } catch (_: Throwable) {
-                // IDE proxy API not available (unit tests / non-IDE environment) — direct connection
-            }
-        }
+        .proxy(FollowDefaultProxySelector)
+        .authenticator(IdeProxyAuthenticator)
         .build()
 
     // `internal` (not private) so the `internal inline reified` parseCreateResult helper
@@ -1157,6 +1137,8 @@ class RallyApiClient(
                 throw RallyConnectionException("Interrupted while sending request to Rally", ie)
             } catch (e: Exception) {
                 lastException = e
+                // Auth failures are final: a retry repeats the same rejected login.
+                authFailureOf(e)?.let { throw it }
                 if (retryOnConnectError && attempt < MAX_RETRIES) {
                     sleepForRetry(backoffMs(attempt))
                     continue
@@ -1183,6 +1165,33 @@ class RallyApiClient(
         // cause when we never captured a real one — leave cause null instead.
         throw lastException?.let { RallyConnectionException("Failed after $MAX_RETRIES retries", it) }
             ?: RallyConnectionException("Failed after $MAX_RETRIES retries")
+    }
+
+    /**
+     * With an Authenticator attached (see [IdeProxyAuthenticator]) the JDK HttpClient never
+     * returns a 401/407 it cannot answer — its AuthenticationFilter throws IOException instead
+     * (messages identical in JDK 17 and 21): "WWW-Authenticate header missing for response
+     * code 401", "No credentials provided", or "too many authentication attempts. Limit: 3".
+     * Map those to typed, non-retried failures so a bad API key still reads as an auth error
+     * and a stale proxy password isn't replayed by the retry loop (account-lockout risk).
+     * "too many authentication attempts" can only be a proxy: server challenges never get
+     * credentials. "No credentials provided" can be either, so its message names both.
+     */
+    private fun authFailureOf(e: Exception): RallyApiException? {
+        val msg = (e as? IOException)?.message ?: return null
+        return when {
+            msg.contains("WWW-Authenticate header missing") ->
+                RallyAuthenticationException("Authentication failed. Please check your API key.")
+            msg.contains("Proxy-Authenticate header missing") || msg.contains("too many authentication attempts") ->
+                RallyConnectionException(
+                    "Proxy authentication failed. Check the proxy credentials in the IDE's HTTP Proxy settings.", e
+                )
+            msg.contains("No credentials provided") ->
+                RallyAuthenticationException(
+                    "Authentication failed. Please check your API key (and the IDE's HTTP Proxy credentials if you use an authenticating proxy)."
+                )
+            else -> null
+        }
     }
 
     private fun backoffMs(attempt: Int): Long {
@@ -1835,4 +1844,39 @@ private class DecodedResponse(
     override fun sslSession(): java.util.Optional<javax.net.ssl.SSLSession> = delegate.sslSession()
     override fun uri(): URI = delegate.uri()
     override fun version(): HttpClient.Version = delegate.version()
+}
+
+/**
+ * ProxySelector that defers to the JVM default on every request. The IDE installs its own
+ * selector as that default (CommonProxy on 241; JdkProxyProvider's selector on 242+), which
+ * covers static host/port, PAC scripts and the exceptions list. Resolving per request rather
+ * than capturing the default at client-build time keeps us on whatever selector the IDE has
+ * installed now.
+ */
+private object FollowDefaultProxySelector : ProxySelector() {
+    override fun select(uri: URI): List<Proxy> =
+        ProxySelector.getDefault()?.takeIf { it !== this }?.select(uri) ?: listOf(Proxy.NO_PROXY)
+
+    override fun connectFailed(uri: URI, sa: SocketAddress, ioe: IOException) {
+        ProxySelector.getDefault()?.takeIf { it !== this }?.connectFailed(uri, sa, ioe)
+    }
+}
+
+/**
+ * Answers proxy challenges with the IDE's own authenticator (the JVM default the IDE
+ * installs), which holds static and PAC proxy credentials per proxy host:port and can prompt.
+ * Server challenges get null: Rally authenticates by zsessionid, and forwarding a server
+ * challenge could send proxy credentials to Rally or pop an IDE login prompt for it.
+ * The JDK serializes calls per Authenticator instance, so the inherited requesting* fields
+ * are stable for the duration of one call.
+ */
+private object IdeProxyAuthenticator : Authenticator() {
+    override fun getPasswordAuthentication(): PasswordAuthentication? {
+        if (requestorType != RequestorType.PROXY) return null
+        val ide = Authenticator.getDefault()?.takeIf { it !== this } ?: return null
+        return ide.requestPasswordAuthenticationInstance(
+            requestingHost, requestingSite, requestingPort, requestingProtocol,
+            requestingPrompt, requestingScheme, requestingURL, requestorType
+        )
+    }
 }

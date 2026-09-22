@@ -12,8 +12,8 @@ import org.junit.Test
  * - the reentrant bulk-mode depth counter (MED-7)
  * - the consolidated OperationResult/CreateResult JSON parsers (MED-11)
  *
- * Constructing the client is safe headlessly (see [RallyApiClientHostTest] — the constructor
- * swallows the HttpConfigurable NPE and the Logger returns a DefaultLogger).
+ * Constructing the client is safe headlessly (see [RallyApiClientHostTest] — no IDE services
+ * are needed and the Logger returns a DefaultLogger).
  */
 class RallyApiClientResultParsingTest {
 

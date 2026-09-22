@@ -8,9 +8,9 @@ import org.junit.Test
  * `_ref`/attachment URL from leaking the zsessionid API key to another host or
  * downgrading https → http.
  *
- * Constructing the client touches IntelliJ's Logger (returns a DefaultLogger headlessly)
- * and HttpConfigurable (NPEs without an Application, but the constructor swallows that and
- * falls back to a direct connection), so the client builds fine in a plain JUnit JVM.
+ * Constructing the client touches only IntelliJ's Logger (returns a DefaultLogger headlessly);
+ * proxy selection and proxy auth follow the JVM defaults, so the client builds fine in a
+ * plain JUnit JVM.
  */
 class RallyApiClientHostTest {
 
