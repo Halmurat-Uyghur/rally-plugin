@@ -152,7 +152,7 @@ Warnings during `runIde` about GradleJvmSupportMatrix, Maven, or memory leaks on
 
 The build uses Gradle's **configuration cache** (enabled in `gradle.properties`, unblocked by the Kotlin 2.0 upgrade) — `compileKotlin`/`test`/`buildPlugin` all store/reuse a config-cache entry. If a future change reintroduces a config-cache incompatibility, the line in `gradle.properties` can be removed without losing the Kotlin upgrade. `verifyPlugin` downloads several full IDE distributions and needs multiple GB of free disk.
 
-`buildSearchableOptions` is gated to the `CI` env var (L10) — it boots a headless IDE to index the one small Settings page, which is needed for release artifacts but pure overhead locally, so local `./gradlew clean build` skips it and only CI runs generate the index.
+`buildSearchableOptions` is ON by default — every shipped ZIP is built locally (no CI), and the index is what lets Settings search find the Rally page by "API key", "workspace", etc. It boots a headless IDE per `buildPlugin`, so pass `-PskipSearchableOptions=true` (or set it in `~/.gradle/gradle.properties`) to skip it while iterating (L10).
 
 `verifyPlugin` uses a pinned IDE list (`pluginVerification.ides`, one release per major across 241–262) instead of the default dynamic `recommended()` feed: that feed serves 2025.3.x distributions whose layout (no `modules/module-descriptors.jar`) the newest Plugin Verifier (1.405) cannot read, which kills the whole task with `InvalidIdeException`. Re-add 2025.3 or return to `recommended()` once the verifier supports the new layout. Verifier-reported deprecated/scheduled-for-removal API usages (7 on newer IDEs) are the deliberate 241-floor keeps.
 

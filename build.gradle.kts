@@ -30,10 +30,14 @@ dependencies {
 }
 
 intellijPlatform {
-    // Building searchable options boots a headless IDE per buildPlugin run to index one
-    // small settings page (L10) — needed for release artifacts, pure overhead during
-    // development. CI keeps the index; local builds skip it.
-    buildSearchableOptions = providers.environmentVariable("CI").isPresent
+    // Building searchable options boots a headless IDE per buildPlugin run to index the
+    // Settings page, so Settings search finds "API key", "workspace", etc. Every shipped ZIP
+    // is built locally (there is no CI), so the index is ON by default; pass
+    // -PskipSearchableOptions=true (or set it in ~/.gradle/gradle.properties) to skip it
+    // while iterating (L10).
+    buildSearchableOptions = providers.gradleProperty("skipSearchableOptions")
+        .map { !it.toBoolean() }
+        .orElse(true)
     // This module is all-Kotlin with zero .java and zero .form files, so the form
     // binding / @NotNull bytecode instrumentation pass has nothing to do — disabling
     // it removes pure build overhead.
