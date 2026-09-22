@@ -8,7 +8,7 @@ IntelliJ IDEA plugin that provides a **Tool Window** for browsing and managing R
 
 - **Language**: Kotlin 2.0.21 (JVM 17) — upgraded from 1.9.25 to unblock Gradle's configuration cache (enabled in `gradle.properties`) and clear a Gradle-10 deprecation. Kotlin 2.0 creates a `.kotlin/` build-cache dir (gitignored)
 - **Build**: Gradle with Kotlin DSL, `org.jetbrains.intellij.platform` plugin 2.16.0 (IntelliJ Platform Gradle Plugin 2.x). `instrumentCode = false` (all-Kotlin module, zero `.java`/`.form` files, so the form/@NotNull instrumentation pass is pure overhead)
-- **Target IDE**: IntelliJ IDEA Community 2024.1 (builds 241–263.*)
+- **Target IDE**: IntelliJ IDEA Community 2024.1 (builds 241–262.*)
 - **Dependencies**: Gson 2.10.1 (JSON), JUnit 4.13.2 (tests)
 - **Plugin ID**: `com.github.halmurat.rally` (NOT `com.intellij.*` — that prefix is reserved by JetBrains)
 
@@ -154,7 +154,7 @@ The build uses Gradle's **configuration cache** (enabled in `gradle.properties`,
 
 `buildSearchableOptions` is gated to the `CI` env var (L10) — it boots a headless IDE to index the one small Settings page, which is needed for release artifacts but pure overhead locally, so local `./gradlew clean build` skips it and only CI runs generate the index.
 
-`verifyPlugin` uses a pinned IDE list (`pluginVerification.ides`, one release per major across 241–261) instead of the default dynamic `recommended()` feed: that feed serves 2025.3.x distributions whose layout (no `modules/module-descriptors.jar`) the newest Plugin Verifier (1.405) cannot read, which kills the whole task with `InvalidIdeException`. Re-add 2025.3 or return to `recommended()` once the verifier supports the new layout. Verifier-reported deprecated/scheduled-for-removal API usages (7 on newer IDEs) are the deliberate 241-floor keeps.
+`verifyPlugin` uses a pinned IDE list (`pluginVerification.ides`, one release per major across 241–262) instead of the default dynamic `recommended()` feed: that feed serves 2025.3.x distributions whose layout (no `modules/module-descriptors.jar`) the newest Plugin Verifier (1.405) cannot read, which kills the whole task with `InvalidIdeException`. Re-add 2025.3 or return to `recommended()` once the verifier supports the new layout. Verifier-reported deprecated/scheduled-for-removal API usages (7 on newer IDEs) are the deliberate 241-floor keeps.
 
 ## Current Filter Options (in Tool Window)
 
