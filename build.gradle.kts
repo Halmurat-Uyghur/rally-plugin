@@ -33,8 +33,8 @@ intellijPlatform {
     // Building searchable options boots a headless IDE per buildPlugin run to index the
     // Settings page, so Settings search finds "API key", "workspace", etc. Every shipped ZIP
     // is built locally (there is no CI), so the index is ON by default; pass
-    // -PskipSearchableOptions=true (or set it in ~/.gradle/gradle.properties) to skip it
-    // while iterating (L10).
+    // -PskipSearchableOptions=true on the command line to skip it while iterating (L10).
+    // Don't put it in ~/.gradle/gradle.properties: release ZIPs would silently lose the index.
     buildSearchableOptions = providers.gradleProperty("skipSearchableOptions")
         .map { !it.toBoolean() }
         .orElse(true)

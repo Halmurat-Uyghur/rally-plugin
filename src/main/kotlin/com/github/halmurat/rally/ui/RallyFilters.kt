@@ -54,9 +54,11 @@ val activeExcludedStates: Set<String> = setOf("Accepted", "Completed", "Idea")
  * Iteration attribute, so `(Iteration.Name = …)` sent to /testcase comes back as
  * HTTP 200 with a populated Errors array — which requireNoErrors correctly turns
  * into a failed load. Test cases are filtered through their linked work product
- * instead (`WorkProduct.Iteration.Name` is a valid dotted traversal on TestCase);
- * test cases with no WorkProduct won't match, which is the correct reading of
- * "test cases in this sprint". Pure and top-level so it is unit-testable.
+ * instead (`WorkProduct.Iteration.Name`); test cases with no WorkProduct won't match,
+ * which is the correct reading of "test cases in this sprint". UNVERIFIED against a
+ * live workspace: Broadcom KB 57618 says WorkProduct points to the abstract Artifact
+ * type, which has no Iteration, so Rally may reject this traversal too.
+ * Pure and top-level so it is unit-testable.
  */
 internal fun buildTicketQuery(scope: String?, selectedIter: String, username: String): String? {
     val conditions = mutableListOf<String>()

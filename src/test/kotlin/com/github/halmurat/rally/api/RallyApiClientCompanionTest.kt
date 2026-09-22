@@ -6,8 +6,7 @@ import org.junit.Test
 
 /**
  * Tests for [RallyApiClient]'s companion-object helpers — pure functions that
- * don't require constructing a client (which would touch IntelliJ's Logger and
- * HttpConfigurable services and fail outside a platform-test fixture).
+ * don't require constructing a client.
  */
 class RallyApiClientCompanionTest {
 
