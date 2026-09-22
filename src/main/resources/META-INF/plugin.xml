@@ -1,5 +1,5 @@
 <idea-plugin>
-    <id>com.github.halmurat.rally</id>
+    <id>com.github.halmuratuyghur.rally</id>
     <name>Rally Integration</name>
     <vendor url="https://github.com/Halmurat-Uyghur">Halmurat</vendor>
 
@@ -41,7 +41,7 @@
 
         <applicationConfigurable
             parentId="tools"
-            id="com.github.halmurat.rally.settings"
+            id="com.github.halmuratuyghur.rally.settings"
             displayName="Rally"
             instance="com.github.halmurat.rally.settings.RallySettingsConfigurable"/>
 

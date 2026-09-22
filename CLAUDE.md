@@ -10,7 +10,7 @@ IntelliJ IDEA plugin that provides a **Tool Window** for browsing and managing R
 - **Build**: Gradle with Kotlin DSL, `org.jetbrains.intellij.platform` plugin 2.16.0 (IntelliJ Platform Gradle Plugin 2.x). `instrumentCode = false` (all-Kotlin module, zero `.java`/`.form` files, so the form/@NotNull instrumentation pass is pure overhead)
 - **Target IDE**: IntelliJ IDEA Community 2024.1 (builds 241–262.*)
 - **Dependencies**: Gson 2.10.1 (JSON), JUnit 4.13.2 (tests)
-- **Plugin ID**: `com.github.halmurat.rally` (NOT `com.intellij.*` — that prefix is reserved by JetBrains)
+- **Plugin ID**: `com.github.halmuratuyghur.rally` (NOT `com.intellij.*` — that prefix is reserved by JetBrains). FROZEN, like the settings persistence keys: the Kotlin package is `com.github.halmurat.rally`, but the plugin `<id>` and the configurable id `com.github.halmuratuyghur.rally.settings` keep the original names so installs update in place. Pinned by `PluginDescriptorIdentityTest`
 
 ## Architecture
 
