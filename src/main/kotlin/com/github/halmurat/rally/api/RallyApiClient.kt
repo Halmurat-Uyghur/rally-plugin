@@ -63,11 +63,12 @@ class RallyApiClient(
     // defaults (CommonProxy on 241; JdkProxyProvider on 242+), so following those defaults
     // covers every mode on every supported build without the deprecated
     // CommonProxy/HttpConfigurable APIs. See FollowDefaultProxySelector / IdeProxyAuthenticator.
+    private val proxyAuthenticator = IdeProxyAuthenticator()
     private val httpClient: HttpClient = HttpClient.newBuilder()
         .connectTimeout(Duration.ofSeconds(15))
         .version(HttpClient.Version.HTTP_2)
         .proxy(FollowDefaultProxySelector)
-        .authenticator(IdeProxyAuthenticator)
+        .authenticator(proxyAuthenticator)
         .build()
 
     // `internal` (not private) so the `internal inline reified` parseCreateResult helper
@@ -1179,14 +1180,17 @@ class RallyApiClient(
     }
 
     /**
-     * With an Authenticator attached (see [IdeProxyAuthenticator]) the JDK HttpClient never
-     * returns a 401/407 it cannot answer — its AuthenticationFilter throws IOException instead
-     * (messages identical in JDK 17 and 21): "WWW-Authenticate header missing for response
-     * code 401", "No credentials provided", or "too many authentication attempts. Limit: 3".
-     * Map those to typed, non-retried failures so a bad API key still reads as an auth error
-     * and a stale proxy password isn't replayed by the retry loop (account-lockout risk).
+     * With an Authenticator attached (see [IdeProxyAuthenticator]) the JDK HttpClient answers
+     * Basic challenges itself, and when it can't it throws IOException instead of returning the
+     * 401/407 (messages identical in JDK 17, 21 and 25): "WWW-Authenticate header missing for
+     * response code 401", "No credentials provided", or "too many authentication attempts.
+     * Limit: 3". Challenges offering no Basic scheme (Negotiate, NTLM, Bearer…) still come back
+     * as plain 401/407 responses, which [handleResponse] maps — keep its 401/403 branches.
+     * Map the IOExceptions to typed, non-retried failures so a bad API key still reads as an
+     * auth error and a stale proxy password isn't replayed by the retry loop (lockout risk).
      * "too many authentication attempts" can only be a proxy: server challenges never get
-     * credentials. "No credentials provided" can be either, so its message names both.
+     * credentials. "No credentials provided" is a proxy failure when the IDE just declined proxy
+     * credentials (cancelled prompt, none stored), otherwise Rally's own challenge.
      */
     private fun authFailureOf(e: Exception): RallyApiException? {
         val msg = (e as? IOException)?.message ?: return null
@@ -1197,10 +1201,12 @@ class RallyApiClient(
                 RallyConnectionException(
                     "Proxy authentication failed. Check the proxy credentials in the IDE's HTTP Proxy settings.", e
                 )
-            msg.contains("No credentials provided") ->
-                RallyAuthenticationException(
-                    "Authentication failed. Please check your API key (and the IDE's HTTP Proxy credentials if you use an authenticating proxy)."
+            msg.contains("No credentials provided") && proxyAuthenticator.proxyCredentialsDeclined ->
+                RallyConnectionException(
+                    "Proxy authentication required, but no proxy credentials were provided. Check the IDE's HTTP Proxy settings.", e
                 )
+            msg.contains("No credentials provided") ->
+                RallyAuthenticationException("Authentication failed. Please check your API key.")
             else -> null
         }
     }
@@ -1879,15 +1885,24 @@ private object FollowDefaultProxySelector : ProxySelector() {
  * Server challenges get null: Rally authenticates by zsessionid, and forwarding a server
  * challenge could send proxy credentials to Rally or pop an IDE login prompt for it.
  * The JDK serializes calls per Authenticator instance, so the inherited requesting* fields
- * are stable for the duration of one call.
+ * are stable for the duration of one call. One instance per client, so [proxyCredentialsDeclined]
+ * describes that client's proxy.
  */
-private object IdeProxyAuthenticator : Authenticator() {
+private class IdeProxyAuthenticator : Authenticator() {
+    /** True when the IDE's last answer to a proxy challenge was "no credentials" (cancelled
+     *  prompt, prompts disabled, nothing stored) — lets the client report "No credentials
+     *  provided" as a proxy problem rather than a bad API key. */
+    @Volatile var proxyCredentialsDeclined = false
+        private set
+
     override fun getPasswordAuthentication(): PasswordAuthentication? {
         if (requestorType != RequestorType.PROXY) return null
-        val ide = Authenticator.getDefault()?.takeIf { it !== this } ?: return null
-        return ide.requestPasswordAuthenticationInstance(
+        val ide = Authenticator.getDefault()?.takeIf { it !== this }
+        val credentials = ide?.requestPasswordAuthenticationInstance(
             requestingHost, requestingSite, requestingPort, requestingProtocol,
             requestingPrompt, requestingScheme, requestingURL, requestorType
         )
+        proxyCredentialsDeclined = credentials == null
+        return credentials
     }
 }

@@ -4,6 +4,7 @@ import com.github.halmurat.rally.testutil.FakeRallyServer
 import com.github.halmurat.rally.testutil.FakeRallyServer.Reply
 import org.junit.After
 import org.junit.Assert.assertEquals
+import org.junit.Assert.assertFalse
 import org.junit.Assert.assertThrows
 import org.junit.Assert.assertTrue
 import org.junit.Test
@@ -15,9 +16,10 @@ import java.util.Base64
 
 /**
  * Proxy authentication and how Rally 401s surface once an Authenticator is attached to the
- * HttpClient. With an Authenticator present, the JDK never hands an unanswerable 401/407 to
- * the caller — it throws IOException — so the client must map those to non-retried
- * authentication failures instead of retrying them as connection errors.
+ * HttpClient. With an Authenticator present, the JDK throws IOException for a Basic challenge
+ * it can't answer (or a 401 without a challenge header) instead of returning the response, so
+ * the client must map those to non-retried authentication failures instead of retrying them
+ * as connection errors.
  */
 class RallyApiClientAuthTest {
 
@@ -76,6 +78,43 @@ class RallyApiClientAuthTest {
             client.fetchDescriptionStrict(rally.apiBase + "/hierarchicalrequirement/1")
         }
         assertEquals(1, rally.hitCount(storyPath))
+    }
+
+    @Test
+    fun `Rally's own challenges never get the IDE's credentials`() {
+        // Only PROXY challenges are delegated: a Basic challenge from Rally must not be
+        // answered with whatever the IDE's default authenticator would hand out.
+        rally.route(storyPath) { exchange ->
+            if (exchange.requestHeaders.containsKey("Authorization")) Reply(200, found)
+            else Reply(401, "", mapOf("WWW-Authenticate" to "Basic realm=\"Rally ALM\""))
+        }
+        ideAuthenticatorAnswering("alice", "s3cret")
+        val client = newClient()
+
+        assertThrows(RallyAuthenticationException::class.java) {
+            client.fetchDescriptionStrict(rally.apiBase + "/hierarchicalrequirement/1")
+        }
+        assertEquals(1, rally.hitCount(storyPath))
+    }
+
+    @Test
+    fun `declined proxy credentials read as a proxy failure, not a bad API key`() {
+        // Cancelled IDE proxy prompt / no stored proxy credentials: the IDE authenticator
+        // returns null and the JDK throws "No credentials provided" — the same message as for
+        // an unanswered Rally challenge, so the client must remember which side declined.
+        val proxy = FakeRallyServer().also { closeables += it }
+        proxy.route(storyPath) { Reply(407, "", mapOf("Proxy-Authenticate" to "Basic realm=\"corp\"")) }
+        useProxy(proxy)
+        Authenticator.setDefault(object : Authenticator() {
+            override fun getPasswordAuthentication(): PasswordAuthentication? = null
+        })
+        val client = newClient()
+
+        val e = assertThrows(RallyApiException::class.java) {
+            client.fetchDescriptionStrict(rally.apiBase + "/hierarchicalrequirement/1")
+        }
+        assertFalse("reported as ${e.javaClass.simpleName}", e is RallyAuthenticationException)
+        assertTrue(e.message, e.message!!.contains("proxy", ignoreCase = true))
     }
 
     @Test
