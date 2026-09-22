@@ -90,8 +90,7 @@ class RallySettingsConfigurable : Configurable {
         exportDirField!!.text = settings.exportDirectory
         pageSizeField!!.text = settings.pageSize.toString()
 
-        // Only populate if the user hasn't started typing.
-        loadApiKeyAsync { field, key -> if (field.password.isEmpty()) field.text = key }
+        loadApiKeyAsync()
 
         // Each label is linked to its field via labelFor so screen readers can announce
         // the field name when focus moves to the input.
@@ -167,11 +166,14 @@ class RallySettingsConfigurable : Configurable {
         usernameField?.text = settings.username
         exportDirField?.text = settings.exportDirectory
         pageSizeField?.text = settings.pageSize.toString()
-        loadApiKeyAsync { field, key -> field.text = key }
+        // Revert the field now; the stored key fills it once read (unless the user types first).
+        apiKeyField?.text = ""
+        loadApiKeyAsync()
     }
 
     /**
-     * Load the stored API key off-EDT, then [populate] the field and mark it loaded.
+     * Load the stored API key off-EDT, then fill the field (only if the user hasn't typed into
+     * it meanwhile — the read can land long after the page opened) and mark it loaded.
      *
      * [apiKeyLoaded] gates apply(): once set, apply() persists the field even when it is
      * blank. So it is set only after a REAL PasswordSafe read ([RallySettings.awaitApiKey]),
@@ -184,7 +186,7 @@ class RallySettingsConfigurable : Configurable {
      * invokeLater from the pooled thread would otherwise default to NON_MODAL and be
      * deferred until the dialog closes.
      */
-    private fun loadApiKeyAsync(populate: (JPasswordField, String) -> Unit) {
+    private fun loadApiKeyAsync() {
         apiKeyLoaded = false
         updateApiKeyStatus()   // show "Checking…" until the async read resolves
         val generation = apiKeyLoadGeneration.incrementAndGet()
@@ -204,7 +206,7 @@ class RallySettingsConfigurable : Configurable {
                 // DocumentListener synchronously, so the listener must already see the
                 // loaded state or it would flicker through a stale "Checking…".
                 apiKeyLoaded = true
-                populate(field, key)
+                if (field.password.isEmpty()) field.text = key
                 updateApiKeyStatus()
             }, modality)
         }
