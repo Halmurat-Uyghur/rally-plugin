@@ -130,6 +130,9 @@ class RallyToolWindowPanel(private val project: Project) : Disposable {
      *  Rally isn't configured — the cases where a State change also retries the load
      *  ([stateChangeAction]) and the empty-list placeholder keeps its error text. */
     private var lastLoadSucceeded = false
+    /** The list placeholder a failed load / "Not configured" set, restored by [updateEmptyText]
+     *  after a search pass temporarily replaced it (EDT-confined). */
+    private var loadFailurePlaceholder: String? = null
     /** Bumped on every [applySearchFilter] pass (EDT-confined); a server search applies its
      *  results only if no newer pass has run since it started. */
     private var searchGeneration = 0L
@@ -237,7 +240,9 @@ class RallyToolWindowPanel(private val project: Project) : Disposable {
         lastLoadSucceeded = false
         statusLabel.icon = AllIcons.General.Error
         statusLabel.text = "Not configured"
-        artifactList.emptyText.text = "Configure Rally in Settings → Tools → Rally"
+        val placeholder = "Configure Rally in Settings → Tools → Rally"
+        loadFailurePlaceholder = placeholder
+        artifactList.emptyText.text = placeholder
     }
 
     private fun clearStatusIcon() {
@@ -731,7 +736,9 @@ class RallyToolWindowPanel(private val project: Project) : Disposable {
                             else -> "Error"
                         }
                         statusLabel.text = errorMsg
-                        artifactList.emptyText.text = "$errorMsg: ${cause.message}"
+                        val placeholder = "$errorMsg: ${cause.message}"
+                        loadFailurePlaceholder = placeholder
+                        artifactList.emptyText.text = placeholder
                     }
                 }
             }
@@ -1019,9 +1026,12 @@ class RallyToolWindowPanel(private val project: Project) : Disposable {
      * otherwise show a stale message from the previous filter.
      */
     private fun updateEmptyText() {
-        // Keep the load-error / "Not configured" placeholder: with no successful load there
-        // is no filtered result to describe.
-        if (!lastLoadSucceeded) return
+        // With no successful load there is no filtered result to describe: show (or restore,
+        // after a server search replaced it) the load-error / "Not configured" placeholder.
+        if (!lastLoadSucceeded) {
+            loadFailurePlaceholder?.let { artifactList.emptyText.text = it }
+            return
+        }
         val scope = scopeCombo.selectedItem as? String ?: Scope.ALL_TICKETS.displayName
         val stateFilter = stateCombo.selectedItem as? String ?: StateFilter.ANY.displayName
         val projectName = projectCombo.selectedItem as? String ?: "All Projects"

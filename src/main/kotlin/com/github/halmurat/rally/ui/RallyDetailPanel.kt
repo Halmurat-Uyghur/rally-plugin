@@ -547,14 +547,15 @@ class RallyDetailPanel(private val project: Project) : com.intellij.openapi.Disp
     }
 
     /**
-     * Re-run the header + detail loads if the artifact with [artifactRef] is on display — e.g.
-     * after uploading an attachment to it, when its Attachments tab may have loaded first.
-     * Matches by ref (a list reload replaces row objects) and bumps the generation, so results
-     * of loads started before the call are dropped.
+     * Re-run the detail loads if the artifact with [artifactRef] is on display — e.g. after
+     * uploading an attachment to it, when its Attachments tab may have loaded first. Matches by
+     * ref (a list reload replaces row objects) and bumps the generation, so results of loads
+     * started before the call are dropped; the header and the selected tab are left alone.
      */
     fun reloadIfShowing(artifactRef: String) {
         if (disposed || currentArtifactRef != artifactRef) return
-        showArtifact(currentArtifact, currentClient)
+        generation.incrementAndGet()
+        loadDetails()
     }
 
     /** True when [artifact] is the exact object the panel is already showing (identity, not ref). */

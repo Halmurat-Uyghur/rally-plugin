@@ -118,6 +118,29 @@ class RallyApiClientAuthTest {
     }
 
     @Test
+    fun `a Rally challenge after an earlier declined proxy prompt still reads as a bad API key`() {
+        // The declined-proxy flag must describe the failing exchange, not stick for the life of
+        // the client: here the proxy goes away and Rally itself then rejects the key.
+        val proxy = FakeRallyServer().also { closeables += it }
+        proxy.route(storyPath) { Reply(407, "", mapOf("Proxy-Authenticate" to "Basic realm=\"corp\"")) }
+        useProxy(proxy)
+        Authenticator.setDefault(object : Authenticator() {
+            override fun getPasswordAuthentication(): PasswordAuthentication? = null
+        })
+        val client = newClient()
+        assertThrows(RallyConnectionException::class.java) {
+            client.fetchDescriptionStrict(rally.apiBase + "/hierarchicalrequirement/1")
+        }
+
+        ProxySelector.setDefault(ProxySelector.of(null))   // IDE switched to "No proxy"
+        rally.route(storyPath) { Reply(401, "", mapOf("WWW-Authenticate" to "Basic realm=\"Rally ALM\"")) }
+
+        assertThrows(RallyAuthenticationException::class.java) {
+            client.fetchDescriptionStrict(rally.apiBase + "/hierarchicalrequirement/1")
+        }
+    }
+
+    @Test
     fun `authenticating proxy gets the IDE's stored proxy credentials`() {
         val proxy = FakeRallyServer().also { closeables += it }
         proxy.route(storyPath) { exchange ->

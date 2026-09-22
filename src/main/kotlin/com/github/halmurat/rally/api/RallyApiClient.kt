@@ -772,7 +772,7 @@ class RallyApiClient(
 
     /**
      * Strict Description fetch for export (EXP-1). [fetchDescription] serves the detail panel,
-     * where any failure degrades to "no description"; an export must instead fail visibly
+     * where every failure except an auth error degrades to "no description"; an export must instead fail visibly
      * rather than write an empty description and report success. This throws on HTTP and
      * connection errors and on an OperationResult error body (deleted or unreadable object),
      * and returns "" only when the artifact really has no Description. It always goes to the
@@ -1589,7 +1589,10 @@ class RallyApiClient(
         result.queryResult.requireNoErrors("attachments")
         logWarnings(result.queryResult.warnings, "attachments")
         // Don't cache an answer that a clearAttachmentsCache() raced past: it may predate an upload.
-        if (attachmentsCacheEpoch.get() == epoch) putCache(cacheKey, result.queryResult.safeResults)
+        // Check and write under the lock the clear holds, so a clear can't slip in between.
+        synchronized(queryCache) {
+            if (attachmentsCacheEpoch.get() == epoch) putCache(cacheKey, result.queryResult.safeResults)
+        }
         return result.queryResult.safeResults
     }
 
@@ -1893,17 +1896,23 @@ private object FollowDefaultProxySelector : ProxySelector() {
  * challenge could send proxy credentials to Rally or pop an IDE login prompt for it.
  * The JDK serializes calls per Authenticator instance, so the inherited requesting* fields
  * are stable for the duration of one call. One instance per client, so [proxyCredentialsDeclined]
- * describes that client's proxy.
+ * reflects that client's own exchanges.
  */
 private class IdeProxyAuthenticator : Authenticator() {
-    /** True when the IDE's last answer to a proxy challenge was "no credentials" (cancelled
-     *  prompt, prompts disabled, nothing stored) — lets the client report "No credentials
-     *  provided" as a proxy problem rather than a bad API key. */
+    /** True when the last challenge this client answered was a proxy one the IDE declined
+     *  (cancelled prompt, prompts disabled, nothing stored); a Rally challenge resets it.
+     *  Lets the client report "No credentials provided" as a proxy problem rather than a
+     *  bad API key. A heuristic under concurrent exchanges, exact for sequential ones. */
     @Volatile var proxyCredentialsDeclined = false
         private set
 
     override fun getPasswordAuthentication(): PasswordAuthentication? {
-        if (requestorType != RequestorType.PROXY) return null
+        if (requestorType != RequestorType.PROXY) {
+            // Rally's own challenge: the exchange about to fail is a server one, not the
+            // proxy's — don't let an earlier declined proxy prompt relabel it.
+            proxyCredentialsDeclined = false
+            return null
+        }
         val ide = Authenticator.getDefault()?.takeIf { it !== this }
         val credentials = ide?.requestPasswordAuthenticationInstance(
             requestingHost, requestingSite, requestingPort, requestingProtocol,

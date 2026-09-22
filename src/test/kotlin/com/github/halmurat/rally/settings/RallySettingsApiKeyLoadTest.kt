@@ -44,4 +44,21 @@ class RallySettingsApiKeyLoadTest {
         assertEquals("late-key", settings.awaitApiKey(10_000))
         assertTrue((System.nanoTime() - started) / 1_000_000 < 5_000)
     }
+
+    @Test
+    fun `a keychain read that lands after a key was saved does not overwrite it`() {
+        // The startup read can block (keychain prompt) while the user saves a new key in
+        // Settings; its older answer must not replace the newer in-memory key.
+        val settings = RallySettings()
+        settings.completeApiKeyLoad("new-key")          // what the apiKey setter publishes
+        settings.completeApiKeyLoadIfPending("old-key") // the late PasswordSafe read
+        assertEquals("new-key", settings.awaitApiKey(50))
+    }
+
+    @Test
+    fun `a keychain read publishes when nothing was saved meanwhile`() {
+        val settings = RallySettings()
+        settings.completeApiKeyLoadIfPending("stored-key")
+        assertEquals("stored-key", settings.awaitApiKey(50))
+    }
 }

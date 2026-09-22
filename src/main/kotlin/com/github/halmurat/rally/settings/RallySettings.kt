@@ -77,7 +77,18 @@ class RallySettings : PersistentStateComponent<RallySettings.State> {
     private fun loadApiKeyFromPasswordSafe() {
         synchronized(apiKeyReady) { cachedApiKey = null; apiKeyLoaded = false }
         ApplicationManager.getApplication().executeOnPooledThread {
-            completeApiKeyLoad(PasswordSafe.instance.getPassword(credentialAttributes) ?: "")
+            completeApiKeyLoadIfPending(PasswordSafe.instance.getPassword(credentialAttributes) ?: "")
+        }
+    }
+
+    /**
+     * Publish a PasswordSafe read unless a key was set while it was in flight: the read can
+     * block for a long time (keychain access prompt), and its answer is then older than a key
+     * the user saved from Settings meanwhile.
+     */
+    internal fun completeApiKeyLoadIfPending(key: String) {
+        synchronized(apiKeyReady) {
+            if (!apiKeyLoaded) completeApiKeyLoad(key)
         }
     }
 
