@@ -19,3 +19,27 @@ internal fun buildLoadedStatusText(
     val base = if (truncated) "$shownCount of $totalAvailable loaded" else "$shownCount loaded"
     return if (incomplete) "$base (incomplete)" else base
 }
+
+/** What a State-filter change does — see [stateChangeAction]. */
+internal enum class StateChangeAction {
+    /** Re-filter the loaded list in memory and re-render the "N loaded" status. */
+    REFILTER,
+    /** Re-filter, but leave the "Loading…" status for the in-flight load to replace. */
+    REFILTER_KEEP_STATUS,
+    /** Nothing valid to re-filter: run the load again. */
+    RELOAD,
+}
+
+/**
+ * The State filter is applied client-side, so a State change normally re-filters the loaded
+ * list with no network round trip (P6). But when the last load failed, never ran, or Rally
+ * isn't configured, there is no list to re-filter: doing so would replace the error or
+ * "Not configured" message with "0 loaded" (a bogus empty success) and never retry. In that
+ * case the load runs again, as a State change did before P6 (loadTickets() re-shows
+ * "Not configured" itself). While a load is in flight, its completion re-renders the status.
+ */
+internal fun stateChangeAction(lastLoadSucceeded: Boolean, loading: Boolean): StateChangeAction = when {
+    loading -> StateChangeAction.REFILTER_KEEP_STATUS
+    !lastLoadSucceeded -> StateChangeAction.RELOAD
+    else -> StateChangeAction.REFILTER
+}

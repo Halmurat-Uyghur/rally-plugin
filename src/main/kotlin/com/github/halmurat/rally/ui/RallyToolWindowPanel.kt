@@ -125,6 +125,13 @@ class RallyToolWindowPanel(private val project: Project) : Disposable {
      *  after a client-side state-filter change (M3). */
     private var lastLoadFetched = 0
     private var lastLoadTotal = -1
+    /** Whether [allArtifacts] holds the result of a successful load (EDT-confined). False
+     *  before the first load, after a failed one, and while Rally isn't configured — the
+     *  cases where a State change must reload rather than re-filter ([stateChangeAction]). */
+    private var lastLoadSucceeded = false
+    /** Bumped on every [applySearchFilter] pass (EDT-confined); a server search applies its
+     *  results only if no newer pass has run since it started. */
+    private var searchGeneration = 0L
     @Volatile private var currentClient: RallyApiClient? = null
     @Volatile private var loading = false
     @Volatile private var pendingReload = false
@@ -226,6 +233,7 @@ class RallyToolWindowPanel(private val project: Project) : Disposable {
     }
 
     private fun showNotConfigured() {
+        lastLoadSucceeded = false
         statusLabel.icon = AllIcons.General.Error
         statusLabel.text = "Not configured"
         artifactList.emptyText.text = "Configure Rally in Settings → Tools → Rally"
@@ -396,13 +404,20 @@ class RallyToolWindowPanel(private val project: Project) : Disposable {
             lastState = newState
             // State filtering is purely client-side (applyStateFilter over the already-loaded
             // scope list), so a state change re-filters in memory with NO network round trip
-            // (P6/LOW-9). Scope/project/sprint changes still call loadTickets() because they
-            // can require a different query.
-            applySearchFilter()
-            // applySearchFilter() updates statsLabel but not the "N loaded" status; refresh it so
-            // the count tracks the new filter. Skip while a search is active — the search path owns
-            // statusLabel ("Searching Rally...", "N found via server search").
-            if (searchField.text.isBlank()) refreshLoadedStatus()
+            // (P6/LOW-9) — unless there is no loaded list to re-filter (see stateChangeAction).
+            // Scope/project/sprint changes still call loadTickets() because they can require a
+            // different query.
+            when (stateChangeAction(lastLoadSucceeded, loading)) {
+                StateChangeAction.RELOAD -> loadTickets()
+                StateChangeAction.REFILTER_KEEP_STATUS -> applySearchFilter()
+                StateChangeAction.REFILTER -> {
+                    applySearchFilter()
+                    // applySearchFilter() updates statsLabel but not the "N loaded" status. Skip
+                    // while a server search is pending — that path owns statusLabel
+                    // ("Searching Rally...", "N found via server search").
+                    if (activeServerSearch == null) refreshLoadedStatus()
+                }
+            }
         }
 
         // Project change — also reset iteration cache since iterations are project-scoped
@@ -543,7 +558,6 @@ class RallyToolWindowPanel(private val project: Project) : Disposable {
 
         // Capture all UI state on the EDT before dispatching to background thread
         val scope = scopeCombo.selectedItem as? String ?: "My Tickets"
-        val stateFilter = stateCombo.selectedItem as? String ?: "Any State"
         val pageSize = if (Scope.fromDisplay(scope) == Scope.RECENT_ACTIVITY) 20 else settings.pageSize
 
         ApplicationManager.getApplication().executeOnPooledThread {
@@ -645,20 +659,21 @@ class RallyToolWindowPanel(private val project: Project) : Disposable {
                 // time in applySearchFilter so a state-combo change re-filters in memory with no
                 // re-fetch (P6/LOW-9).
                 val scopeFiltered = applyScopeFilter(scope, artifacts)
-                val shownCount = applyStateFilter(stateFilter, scopeFiltered).size
 
                 invokeLaterIfAlive {
                     allArtifacts = scopeFiltered
+                    lastLoadSucceeded = true
                     lastLoadIncomplete = result.isPartial
                     lastLoadFetched = artifacts.size
                     lastLoadTotal = result.totalAvailable
                     detailPanel.clear()
                     applySearchFilter()
                     loading = false
-                    // A partial result (one of stories/defects failed) is shown but flagged so the
-                    // user knows the list is incomplete rather than legitimately short (MED-8).
-                    statusLabel.text = buildLoadedStatusText(shownCount, artifacts.size, result.totalAvailable, result.isPartial)
-                    statusLabel.icon = if (result.isPartial) AllIcons.General.Warning else null
+                    // Count with the State filter selected NOW, not the one captured when the load
+                    // started: a State change mid-load only re-filters. A partial result (one of
+                    // stories/defects failed) is flagged "(incomplete)" (MED-8). A server search
+                    // started by applySearchFilter() owns the status line.
+                    if (activeServerSearch == null) refreshLoadedStatus()
                     // applySearchFilter() above already refreshes the empty placeholder when the
                     // displayed list is empty (updateEmptyText), covering search + state filters.
                     if (pendingReload) {
@@ -695,6 +710,7 @@ class RallyToolWindowPanel(private val project: Project) : Disposable {
                 LOG.warn("Failed to load Rally tickets", e)
                 invokeLaterIfAlive {
                     loading = false
+                    lastLoadSucceeded = false
                     if (pendingReload) {
                         pendingReload = false
                         loadTickets()
@@ -997,6 +1013,9 @@ class RallyToolWindowPanel(private val project: Project) : Disposable {
      * otherwise show a stale message from the previous filter.
      */
     private fun updateEmptyText() {
+        // Keep the load-error / "Not configured" placeholder: with no successful load there
+        // is no filtered result to describe.
+        if (!lastLoadSucceeded) return
         val scope = scopeCombo.selectedItem as? String ?: Scope.ALL_TICKETS.displayName
         val stateFilter = stateCombo.selectedItem as? String ?: StateFilter.ANY.displayName
         val projectName = projectCombo.selectedItem as? String ?: "All Projects"
@@ -1005,14 +1024,16 @@ class RallyToolWindowPanel(private val project: Project) : Disposable {
     }
 
     /**
-     * Refresh the "N loaded" status line to match the currently displayed count. A client-side
-     * state-filter change re-filters the loaded list in memory without going through loadTickets()
-     * (P6/LOW-9), so without this the status would keep the stale count set by the last load.
-     * The partial-failure marker is preserved via [lastLoadIncomplete].
+     * Refresh the "N loaded" status line: N is the loaded list under the State filter selected
+     * now (search text doesn't change it). A client-side state-filter change re-filters the
+     * loaded list in memory without going through loadTickets() (P6/LOW-9), so without this the
+     * status would keep the stale count set by the last load. The partial-failure marker is
+     * preserved via [lastLoadIncomplete].
      */
     private fun refreshLoadedStatus() {
+        val stateFilter = stateCombo.selectedItem as? String ?: StateFilter.ANY.displayName
         statusLabel.text = buildLoadedStatusText(
-            displayedArtifacts.size, lastLoadFetched, lastLoadTotal, lastLoadIncomplete
+            applyStateFilter(stateFilter, allArtifacts).size, lastLoadFetched, lastLoadTotal, lastLoadIncomplete
         )
         statusLabel.icon = if (lastLoadIncomplete) AllIcons.General.Warning else null
     }
@@ -1020,6 +1041,10 @@ class RallyToolWindowPanel(private val project: Project) : Disposable {
     private fun applySearchFilter() {
         if (disposed) return
         val query = searchField.text.trim()
+        // Every pass supersedes any server search still in flight: it was started for an
+        // older query/scope/state, so its results must not be applied (checked by generation).
+        val generation = ++searchGeneration
+        activeServerSearch = null
 
         // allArtifacts holds the scope-filtered (but NOT state-filtered) list, so the
         // active state filter is applied here at display time — this is what lets a
@@ -1028,8 +1053,8 @@ class RallyToolWindowPanel(private val project: Project) : Disposable {
         val base = applyStateFilter(stateFilter, allArtifacts)
 
         if (query.isBlank()) {
-            // Search cleared — restore the state-filtered list and cancel any pending server search
-            activeServerSearch = null
+            // Search cleared — restore the state-filtered list (any pending server search was
+            // cancelled above)
             updateListModel(base)
             updateStats(base)
             if (base.isEmpty()) updateEmptyText()
@@ -1079,8 +1104,10 @@ class RallyToolWindowPanel(private val project: Project) : Disposable {
                         }
                     }
                     invokeLaterIfAlive {
-                        // Only apply if this is still the active search (check current search field)
-                        if (activeServerSearch == query && searchField.text.trim() == query) {
+                        // Only apply if no newer filter pass (query, scope, or State change) has run
+                        // since this search started, and the field still holds its query (a keystroke
+                        // inside the debounce window hasn't bumped the generation yet).
+                        if (generation == searchGeneration && searchField.text.trim() == query) {
                             updateListModel(filteredResults)
                             updateStats(filteredResults)
                             statusLabel.text = if (filteredResults.isEmpty()) {
@@ -1094,7 +1121,7 @@ class RallyToolWindowPanel(private val project: Project) : Disposable {
                 } catch (e: Exception) {
                     LOG.warn("Server search failed for query '$query'", e)
                     invokeLaterIfAlive {
-                        if (activeServerSearch == query) {
+                        if (generation == searchGeneration) {
                             statusLabel.text = "Search failed: ${e.message}"
                             activeServerSearch = null
                         }

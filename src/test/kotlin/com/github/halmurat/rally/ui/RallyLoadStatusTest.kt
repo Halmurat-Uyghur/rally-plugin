@@ -39,4 +39,24 @@ class RallyLoadStatusTest {
     fun `empty result shows zero loaded`() {
         assertEquals("0 loaded", buildLoadedStatusText(0, 0, 0, incomplete = false))
     }
+
+    // ── State-filter change (client-side filter, P6) ─────────────
+
+    @Test
+    fun `state change after a successful load re-filters in memory`() {
+        assertEquals(StateChangeAction.REFILTER, stateChangeAction(lastLoadSucceeded = true, loading = false))
+    }
+
+    @Test
+    fun `state change after a failed or never-run load reloads instead of showing an empty result`() {
+        // Re-filtering an empty list would replace "Network error" / "Not configured" with
+        // "0 loaded" — a bogus successful-but-empty result — and never retry.
+        assertEquals(StateChangeAction.RELOAD, stateChangeAction(lastLoadSucceeded = false, loading = false))
+    }
+
+    @Test
+    fun `state change during a load re-filters but leaves the Loading status alone`() {
+        assertEquals(StateChangeAction.REFILTER_KEEP_STATUS, stateChangeAction(lastLoadSucceeded = true, loading = true))
+        assertEquals(StateChangeAction.REFILTER_KEEP_STATUS, stateChangeAction(lastLoadSucceeded = false, loading = true))
+    }
 }
