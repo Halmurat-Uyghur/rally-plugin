@@ -755,11 +755,7 @@ class RallyApiClient(
         return try {
             val response = executeGet(url)
             handleResponse(response)
-            val root = JsonParser.parseString(response.body()).asJsonObject
-            // Rally wraps in the type name (HierarchicalRequirement, Defect, Task, etc.)
-            val obj = root.entrySet().firstOrNull()?.value?.asJsonObject
-            val descElement = obj?.get("Description")
-            val desc = if (descElement != null && !descElement.isJsonNull) descElement.asString else null
+            val desc = parseDescriptionResponse(response.body())
             putCache(cacheKey, desc ?: "")
             desc
         } catch (e: RallyAuthenticationException) {
@@ -775,6 +771,43 @@ class RallyApiClient(
             LOG.warn("Unexpected error fetching description for $artifactRef", e)
             null
         }
+    }
+
+    /**
+     * Strict Description fetch for export (EXP-1). [fetchDescription] serves the detail panel,
+     * where any failure degrades to "no description"; an export must instead fail visibly
+     * rather than write an empty description and report success. This throws on HTTP and
+     * connection errors and on an OperationResult error body (deleted or unreadable object),
+     * and returns "" only when the artifact really has no Description. It always goes to the
+     * network (an export is a point-in-time snapshot) and refreshes the shared "desc:" entry.
+     */
+    fun fetchDescriptionStrict(artifactRef: String): String {
+        val response = executeGet("$artifactRef?fetch=Description")
+        handleResponse(response)
+        val desc = parseDescriptionResponse(response.body())
+        putCache("desc:$artifactRef", desc ?: "")
+        return desc ?: ""
+    }
+
+    /**
+     * Parse a direct-ref `?fetch=Description` body. Rally wraps a found object in its type
+     * name (HierarchicalRequirement, Defect, Task, …); a deleted or unreadable object comes
+     * back as HTTP 200 with an OperationResult carrying Errors, which is thrown here instead
+     * of being read as "no description".
+     */
+    internal fun parseDescriptionResponse(body: String): String? {
+        val root = JsonParser.parseString(body).asJsonObject
+        root.getAsJsonObject("OperationResult")?.let { result ->
+            val errors = result.getAsJsonArray("Errors")
+            throw RallyApiException(
+                if (errors != null && errors.size() > 0) "Failed to read artifact: ${errors.joinToString()}"
+                else "Unexpected response: OperationResult without an object"
+            )
+        }
+        val obj = root.entrySet().firstOrNull()?.value?.takeIf { it.isJsonObject }?.asJsonObject
+            ?: throw RallyApiException("Unexpected response: no artifact object")
+        val descElement = obj.get("Description")
+        return if (descElement != null && !descElement.isJsonNull) descElement.asString else null
     }
 
     /**

@@ -176,6 +176,10 @@ class RallyExporter(private val client: RallyApiClient) : AutoCloseable {
      *  [downloadedPaths]: the JSON and Markdown passes generate identical image jobs. */
     private val downloadedImagePaths = ConcurrentHashMap<String, String>()
 
+    /** Descriptions fetched by [resolveDescription], keyed by artifact ref — shared by the
+     *  JSON and Markdown passes of one export. Only successful fetches are stored. */
+    private val resolvedDescriptions = ConcurrentHashMap<String, String>()
+
     /**
      * Guards the filesystem name-allocation + write critical section in
      * [downloadAttachmentContent] (MED-1/P2). Attachment downloads now run on a
@@ -468,7 +472,7 @@ class RallyExporter(private val client: RallyApiClient) : AutoCloseable {
      * Export an already-in-memory artifact to JSON (MED-3). Avoids the redundant
      * FormattedID search the String-ID overload pays: the artifact object is already
      * loaded, and its Description (excluded from list queries) is obtained via the
-     * cheaper direct-ref [RallyApiClient.fetchDescription] GET rather than another
+     * cheaper direct-ref [RallyApiClient.fetchDescriptionStrict] GET rather than another
      * heavy search query. If the object already carries a non-blank Description, no
      * fetch is issued at all.
      */
@@ -527,7 +531,7 @@ class RallyExporter(private val client: RallyApiClient) : AutoCloseable {
     /**
      * Export an already-in-memory artifact to Markdown (MED-3). Same rationale as
      * [exportArtifactJson]: no redundant FormattedID search, Description resolved via
-     * the cheaper direct-ref [RallyApiClient.fetchDescription] (or skipped entirely
+     * the cheaper direct-ref [RallyApiClient.fetchDescriptionStrict] (or skipped entirely
      * when already populated).
      */
     fun exportArtifactMarkdown(artifact: RallyArtifact, outputDir: String) {
@@ -583,14 +587,20 @@ class RallyExporter(private val client: RallyApiClient) : AutoCloseable {
     /**
      * Description for an in-memory artifact (MED-3). List queries exclude Description
      * for smaller payloads, so the object's [RallyArtifact.description] is usually null;
-     * we then fetch it via the cheap direct-ref GET ([RallyApiClient.fetchDescription])
-     * instead of re-running a FormattedID search. When the object already carries a
-     * non-blank Description, no fetch is issued.
+     * we then fetch it via the cheap direct-ref GET instead of re-running a FormattedID
+     * search. When the object already carries a non-blank Description, no fetch is issued.
+     *
+     * The fetch is strict ([RallyApiClient.fetchDescriptionStrict]): a failed request or a
+     * deleted artifact throws and fails the export instead of writing an empty description
+     * (EXP-1). A successful result is memoized in [resolvedDescriptions] so the JSON and
+     * Markdown passes share one fetch and can't disagree; failures are not memoized.
      */
     private fun resolveDescription(artifact: RallyArtifact): String {
         artifact.description?.takeIf { it.isNotBlank() }?.let { return it }
         val ref = artifact.ref ?: return ""
-        return client.fetchDescription(ref) ?: ""
+        resolvedDescriptions[ref]?.let { return it }
+        val desc = client.fetchDescriptionStrict(ref)
+        return resolvedDescriptions.putIfAbsent(ref, desc) ?: desc
     }
 
     // ── Helpers ──────────────────────────────────────────────────
