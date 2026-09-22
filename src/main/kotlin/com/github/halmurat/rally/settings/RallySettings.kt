@@ -52,11 +52,7 @@ class RallySettings : PersistentStateComponent<RallySettings.State> {
         if (state.apiKey.isNotBlank()) {
             val keyToMigrate = state.apiKey
             state.apiKey = ""
-            synchronized(apiKeyReady) {
-                cachedApiKey = keyToMigrate
-                apiKeyLoaded = true
-                apiKeyReady.notifyAll()
-            }
+            completeApiKeyLoad(keyToMigrate)
             ApplicationManager.getApplication().executeOnPooledThread {
                 PasswordSafe.instance.set(credentialAttributes, Credentials(CREDENTIAL_USER, keyToMigrate))
             }
@@ -81,12 +77,39 @@ class RallySettings : PersistentStateComponent<RallySettings.State> {
     private fun loadApiKeyFromPasswordSafe() {
         synchronized(apiKeyReady) { cachedApiKey = null; apiKeyLoaded = false }
         ApplicationManager.getApplication().executeOnPooledThread {
-            val key = PasswordSafe.instance.getPassword(credentialAttributes) ?: ""
-            synchronized(apiKeyReady) {
-                cachedApiKey = key
-                apiKeyLoaded = true
-                apiKeyReady.notifyAll()
+            completeApiKeyLoad(PasswordSafe.instance.getPassword(credentialAttributes) ?: "")
+        }
+    }
+
+    /** Publish the loaded key ("" = none stored) and wake every [awaitApiKey] waiter. */
+    internal fun completeApiKeyLoad(key: String) {
+        synchronized(apiKeyReady) {
+            cachedApiKey = key
+            apiKeyLoaded = true
+            apiKeyReady.notifyAll()
+        }
+    }
+
+    /**
+     * Wait (off-EDT only) up to [timeoutMs] for the async PasswordSafe load. Returns the key
+     * ("" when none is stored) once loaded, or null while the load is still in flight — so a
+     * caller that writes the key back (the Settings page's apply()) can tell "still loading"
+     * from "loaded and empty". A slow keychain read (access prompt, KeePass master password)
+     * must never read as an empty key there, or Apply would overwrite the stored one.
+     */
+    fun awaitApiKey(timeoutMs: Long): String? {
+        synchronized(apiKeyReady) {
+            val deadline = System.currentTimeMillis() + timeoutMs
+            while (!apiKeyLoaded) {
+                val remaining = deadline - System.currentTimeMillis()
+                if (remaining <= 0) return null
+                try { apiKeyReady.wait(remaining) }
+                catch (_: InterruptedException) {
+                    Thread.currentThread().interrupt()
+                    return null
+                }
             }
+            return cachedApiKey ?: ""
         }
     }
 
@@ -97,28 +120,13 @@ class RallySettings : PersistentStateComponent<RallySettings.State> {
 
     var apiKey: String
         get() {
-            if (!ApplicationManager.getApplication().isDispatchThread) {
-                synchronized(apiKeyReady) {
-                    val deadline = System.currentTimeMillis() + 2_000L
-                    while (!apiKeyLoaded) {
-                        val remaining = deadline - System.currentTimeMillis()
-                        if (remaining <= 0) break
-                        try { apiKeyReady.wait(remaining) }
-                        catch (_: InterruptedException) {
-                            Thread.currentThread().interrupt()
-                            break
-                        }
-                    }
-                }
-            }
+            // Read-only callers get "" if the load hasn't finished within 2s. Callers that
+            // persist the value must use awaitApiKey() instead, which reports "still loading".
+            if (!ApplicationManager.getApplication().isDispatchThread) awaitApiKey(2_000L)
             return cachedApiKey ?: ""
         }
         set(value) {
-            synchronized(apiKeyReady) {
-                cachedApiKey = value
-                apiKeyLoaded = true
-                apiKeyReady.notifyAll()
-            }
+            completeApiKeyLoad(value)
             ApplicationManager.getApplication().executeOnPooledThread {
                 PasswordSafe.instance.set(credentialAttributes, Credentials(CREDENTIAL_USER, value))
             }

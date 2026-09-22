@@ -20,6 +20,7 @@ import javax.swing.JPanel
 import javax.swing.JPasswordField
 import javax.swing.event.DocumentEvent
 import javax.swing.event.DocumentListener
+import java.util.concurrent.atomic.AtomicInteger
 
 class RallySettingsConfigurable : Configurable {
 
@@ -32,6 +33,8 @@ class RallySettingsConfigurable : Configurable {
     private var apiKeyStatusLabel: JBLabel? = null
     @Volatile private var loadedApiKey: String = ""
     @Volatile private var apiKeyLoaded = false
+    /** Bumped per API-key load and on dispose; a pending load stops once superseded. */
+    private val apiKeyLoadGeneration = AtomicInteger()
 
     override fun getDisplayName(): String = "Rally"
 
@@ -87,31 +90,8 @@ class RallySettingsConfigurable : Configurable {
         exportDirField!!.text = settings.exportDirectory
         pageSizeField!!.text = settings.pageSize.toString()
 
-        // Load API key off-EDT to avoid blocking and to prevent writing blank on early apply.
-        // Capture the modality state on the EDT FIRST: the Settings dialog is modal, so an
-        // invokeLater dispatched from the pooled thread below defaults to NON_MODAL and would be
-        // deferred until the dialog closes — leaving the field empty and the status frozen on
-        // "Checking…" the whole time Settings is open. Passing the captured state runs the
-        // callback under the dialog's own modality instead.
-        apiKeyLoaded = false
-        updateApiKeyStatus()   // show "Checking…" until the async read resolves
-        val modality = ModalityState.current()
-        ApplicationManager.getApplication().executeOnPooledThread {
-            val key = settings.apiKey
-            loadedApiKey = key
-            ApplicationManager.getApplication().invokeLater({
-                val field = apiKeyField ?: return@invokeLater
-                // Flip the flag BEFORE the programmatic setText: setText notifies the
-                // DocumentListener synchronously, so the listener must already see the
-                // loaded state or it would flicker through a stale "Checking…".
-                apiKeyLoaded = true
-                // Only populate if user hasn't started typing
-                if (field.password.isEmpty()) {
-                    field.text = key
-                }
-                updateApiKeyStatus()
-            }, modality)
-        }
+        // Only populate if the user hasn't started typing.
+        loadApiKeyAsync { field, key -> if (field.password.isEmpty()) field.text = key }
 
         // Each label is linked to its field via labelFor so screen readers can announce
         // the field name when focus moves to the input.
@@ -187,17 +167,44 @@ class RallySettingsConfigurable : Configurable {
         usernameField?.text = settings.username
         exportDirField?.text = settings.exportDirectory
         pageSizeField?.text = settings.pageSize.toString()
-        // Load API key off-EDT. Capture modality on the EDT so the populate/status callback
-        // runs under the modal Settings dialog instead of being deferred (see createComponent).
+        loadApiKeyAsync { field, key -> field.text = key }
+    }
+
+    /**
+     * Load the stored API key off-EDT, then [populate] the field and mark it loaded.
+     *
+     * [apiKeyLoaded] gates apply(): once set, apply() persists the field even when it is
+     * blank. So it is set only after a REAL PasswordSafe read ([RallySettings.awaitApiKey]),
+     * never on a timeout — a slow keychain read (access prompt, KeePass master password)
+     * used to read as "" after 2s and let Apply overwrite the stored key with a blank one.
+     * Until the read lands the status stays "Checking…" and a blank field is not persisted.
+     * The wait ends when the read lands or when this load is superseded (reset/dispose).
+     *
+     * The modality state is captured on the EDT: the Settings dialog is modal, so an
+     * invokeLater from the pooled thread would otherwise default to NON_MODAL and be
+     * deferred until the dialog closes.
+     */
+    private fun loadApiKeyAsync(populate: (JPasswordField, String) -> Unit) {
         apiKeyLoaded = false
         updateApiKeyStatus()   // show "Checking…" until the async read resolves
+        val generation = apiKeyLoadGeneration.incrementAndGet()
         val modality = ModalityState.current()
+        val settings = RallySettings.getInstance()
         ApplicationManager.getApplication().executeOnPooledThread {
-            val key = settings.apiKey
-            loadedApiKey = key
+            var key: String? = null
+            while (key == null && apiKeyLoadGeneration.get() == generation) {
+                key = settings.awaitApiKey(1_000L)
+            }
+            if (key == null) return@executeOnPooledThread   // superseded by reset()/dispose
             ApplicationManager.getApplication().invokeLater({
+                if (apiKeyLoadGeneration.get() != generation) return@invokeLater
+                val field = apiKeyField ?: return@invokeLater
+                loadedApiKey = key
+                // Flip the flag BEFORE the programmatic setText: setText notifies the
+                // DocumentListener synchronously, so the listener must already see the
+                // loaded state or it would flicker through a stale "Checking…".
                 apiKeyLoaded = true
-                apiKeyField?.text = key
+                populate(field, key)
                 updateApiKeyStatus()
             }, modality)
         }
@@ -225,6 +232,7 @@ class RallySettingsConfigurable : Configurable {
     }
 
     override fun disposeUIResources() {
+        apiKeyLoadGeneration.incrementAndGet()   // stop any pending API-key wait
         serverUrlField = null
         apiKeyField = null
         workspaceRefField = null
