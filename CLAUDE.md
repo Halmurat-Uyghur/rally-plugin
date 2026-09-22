@@ -8,7 +8,7 @@ IntelliJ IDEA plugin that provides a **Tool Window** for browsing and managing R
 
 - **Language**: Kotlin 1.9.25 (JVM 17)
 - **Build**: Gradle with Kotlin DSL, `org.jetbrains.intellij.platform` plugin 2.16.0 (IntelliJ Platform Gradle Plugin 2.x)
-- **Target IDE**: IntelliJ IDEA Community 2024.1 (builds 241–261.*)
+- **Target IDE**: IntelliJ IDEA Community 2024.1 (builds 241–262.*)
 - **Dependencies**: Gson 2.10.1 (JSON), JUnit 4.13.2 (tests)
 - **Plugin ID**: `com.github.halmuratuyghur.rally` (NOT `com.intellij.*` — that prefix is reserved by JetBrains)
 
@@ -122,7 +122,7 @@ Core artifact models (`RallyUserStory`, `RallyDefect`, `RallyTaskItem`) include:
 
 Warnings during `runIde` about GradleJvmSupportMatrix, Maven, or memory leaks on UI switch are IntelliJ 2024.1 internal issues — not from this plugin.
 
-`verifyPlugin` uses a pinned IDE list (`pluginVerification.ides`, one release per major across 241–261) instead of the default dynamic `recommended()` feed: that feed serves 2025.3.x distributions whose layout (no `modules/module-descriptors.jar`) the newest Plugin Verifier (1.405) cannot read, which kills the whole task with `InvalidIdeException`. Re-add 2025.3 or return to `recommended()` once the verifier supports the new layout. Verifier-reported deprecated/scheduled-for-removal API usages (7 on newer IDEs) are the deliberate 241-floor keeps.
+`verifyPlugin` uses a pinned IDE list (`pluginVerification.ides`, one release per major across 241–262) instead of the default dynamic `recommended()` feed: that feed serves 2025.3.x distributions whose layout (no `modules/module-descriptors.jar`) the newest Plugin Verifier (1.405) cannot read, which kills the whole task with `InvalidIdeException`. Re-add 2025.3 or return to `recommended()` once the verifier supports the new layout. Verifier-reported deprecated/scheduled-for-removal API usages (7 on newer IDEs) are the deliberate 241-floor keeps.
 
 ## Current Filter Options (in Tool Window)
 

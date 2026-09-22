@@ -37,7 +37,7 @@ intellijPlatform {
     pluginConfiguration {
         ideaVersion {
             sinceBuild = "241"
-            untilBuild = "261.*"
+            untilBuild = "262.*"
         }
 
         changeNotes = """
@@ -59,7 +59,7 @@ intellijPlatform {
             // serves 2025.3.x distributions, whose layout drops
             // modules/module-descriptors.jar — the newest Plugin Verifier (1.405) cannot
             // read them (InvalidIdeException) and the whole verifyPlugin task dies before
-            // verifying anything else. This list covers the declared 241–261 range minus
+            // verifying anything else. This list covers the declared 241–262 range minus
             // that one unreadable release line; re-add 2025.3 (or go back to
             // recommended()) once the verifier understands the new layout.
             create("IC", "2024.1.7")
@@ -68,6 +68,7 @@ intellijPlatform {
             create("IC", "2025.1.7.1")
             create("IC", "2025.2.6.2")
             create("IU", "2026.1.3")
+            create("IU", "2026.2.3")
         }
     }
 
