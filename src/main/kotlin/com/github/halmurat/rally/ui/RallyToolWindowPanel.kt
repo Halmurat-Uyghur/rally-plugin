@@ -1331,6 +1331,10 @@ class RallyToolWindowPanel(private val project: Project) : Disposable {
                 // insert immediately, BEFORE the separately-failable upload (HIGH-2).
                 val created = createFn(client, ownerRef)
                 val createdId = created.formattedID ?: "?"
+                val uploadPending = attachment != null && created.ref != null
+                // Row the list had selected once the new row was inserted; Phase 2 selects the
+                // new row only if the user hasn't picked something else during the upload.
+                var selectionAfterInsert: RallyArtifact? = null
                 invokeLaterIfAlive {
                     val warningMsg = assignWarning?.let { " ($it)" } ?: ""
                     val messageType = if (assignWarning != null) MessageType.WARNING else MessageType.INFO
@@ -1359,9 +1363,11 @@ class RallyToolWindowPanel(private val project: Project) : Disposable {
                         } else {
                             applySearchFilter()
                         }
-                        val index = listModel.indexOf(created)
-                        if (index >= 0) artifactList.selectedIndex = index
+                        // With an upload pending, select after Phase 2: selecting now would load the
+                        // Attachments tab (and cache its list) before the file exists in Rally.
+                        if (!uploadPending) selectCreatedRow(created)
                     }
+                    selectionAfterInsert = artifactList.selectedValue
                     // Announce the result LAST: relaxing the state filter above re-runs the
                     // stateCombo listener (refreshLoadedStatus), which would otherwise overwrite
                     // this status with the "N loaded" count. The balloon is the durable confirmation.
@@ -1381,12 +1387,23 @@ class RallyToolWindowPanel(private val project: Project) : Disposable {
                 val createdRef = created.ref
                 if (attachment != null && createdRef != null) {
                     invokeLaterIfAlive { statusLabel.text = "Uploading attachment..." }
+                    // Select the new row once the upload has settled, unless the user moved on.
+                    val selectIfUntouched = {
+                        if (artifactList.selectedValue === selectionAfterInsert) selectCreatedRow(created)
+                    }
                     try {
                         client.uploadAttachment(createdRef, attachment.toPath())
-                        invokeLaterIfAlive { statusLabel.text = "Created $createdId with attachment" }
+                        // The Attachments tab may already have cached the pre-upload (empty) list
+                        // if the user opened the new row during the upload.
+                        created.formattedID?.let { client.clearAttachmentsCache(it) }
+                        invokeLaterIfAlive {
+                            statusLabel.text = "Created $createdId with attachment"
+                            if (detailPanel.isShowing(created)) detailPanel.loadDetails() else selectIfUntouched()
+                        }
                     } catch (e: Exception) {
                         LOG.warn("Attachment upload failed for $createdId", e)
                         invokeLaterIfAlive {
+                            selectIfUntouched()
                             statusLabel.text = "Created $createdId — attachment upload failed"
                             val safeMsg = com.intellij.openapi.util.text.StringUtil.escapeXmlEntities(
                                 e.message ?: e.javaClass.simpleName
@@ -1411,6 +1428,12 @@ class RallyToolWindowPanel(private val project: Project) : Disposable {
                 }
             }
         }
+    }
+
+    /** Select a just-created artifact's row, if the current filters show it. */
+    private fun selectCreatedRow(created: RallyArtifact) {
+        val index = listModel.indexOf(created)
+        if (index >= 0) artifactList.selectedIndex = index
     }
 
     /** Selected toolbar iteration's ref (null for "All Sprints"), read off the persisted selection. */

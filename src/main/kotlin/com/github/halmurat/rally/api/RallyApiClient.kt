@@ -286,6 +286,17 @@ class RallyApiClient(
         }
     }
 
+    /**
+     * Evict one artifact's cached attachment list — call after uploading to it. The detail
+     * panel may have cached the pre-upload (empty) list, and [clearArtifactCache] deliberately
+     * keeps `attachments:` entries.
+     */
+    fun clearAttachmentsCache(artifactFormattedId: String) {
+        synchronized(queryCache) {
+            queryCache.remove("attachments:$artifactFormattedId")
+        }
+    }
+
     companion object {
         private val LOG = com.intellij.openapi.diagnostic.Logger.getInstance(RallyApiClient::class.java)
 
