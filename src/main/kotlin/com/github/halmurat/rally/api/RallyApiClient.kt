@@ -290,13 +290,18 @@ class RallyApiClient(
     /**
      * Evict one artifact's cached attachment list — call after uploading to it. The detail
      * panel may have cached the pre-upload (empty) list, and [clearArtifactCache] deliberately
-     * keeps `attachments:` entries.
+     * keeps `attachments:` entries. Also bumps [attachmentsCacheEpoch] so an attachments query
+     * already on the wire can't store its possibly pre-upload answer after this eviction.
      */
     fun clearAttachmentsCache(artifactFormattedId: String) {
         synchronized(queryCache) {
+            attachmentsCacheEpoch.incrementAndGet()
             queryCache.remove("attachments:$artifactFormattedId")
         }
     }
+
+    /** Bumped by [clearAttachmentsCache]; [queryAttachments] caches only if it didn't change mid-request. */
+    private val attachmentsCacheEpoch = java.util.concurrent.atomic.AtomicLong()
 
     companion object {
         private val LOG = com.intellij.openapi.diagnostic.Logger.getInstance(RallyApiClient::class.java)
@@ -1576,13 +1581,15 @@ class RallyApiClient(
             url += "&workspace=${URLEncoder.encode(normalizeRef("workspace", ws), StandardCharsets.UTF_8)}"
         }
 
+        val epoch = attachmentsCacheEpoch.get()
         val response = executeGet(url)
         handleResponse(response)
 
         val result: RallyQueryResult<RallyAttachment> = gson.fromJson(response.body(), TYPE_ATTACHMENTS)
         result.queryResult.requireNoErrors("attachments")
         logWarnings(result.queryResult.warnings, "attachments")
-        putCache(cacheKey, result.queryResult.safeResults)
+        // Don't cache an answer that a clearAttachmentsCache() raced past: it may predate an upload.
+        if (attachmentsCacheEpoch.get() == epoch) putCache(cacheKey, result.queryResult.safeResults)
         return result.queryResult.safeResults
     }
 

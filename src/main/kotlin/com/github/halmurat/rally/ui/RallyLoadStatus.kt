@@ -26,17 +26,18 @@ internal enum class StateChangeAction {
     REFILTER,
     /** Re-filter, but leave the "Loading…" status for the in-flight load to replace. */
     REFILTER_KEEP_STATUS,
-    /** Nothing valid to re-filter: run the load again. */
+    /** The last load failed or never ran: re-filter what's shown and run the load again. */
     RELOAD,
 }
 
 /**
  * The State filter is applied client-side, so a State change normally re-filters the loaded
  * list with no network round trip (P6). But when the last load failed, never ran, or Rally
- * isn't configured, there is no list to re-filter: doing so would replace the error or
- * "Not configured" message with "0 loaded" (a bogus empty success) and never retry. In that
- * case the load runs again, as a State change did before P6 (loadTickets() re-shows
- * "Not configured" itself). While a load is in flight, its completion re-renders the status.
+ * isn't configured, re-filtering alone would replace the error or "Not configured" status with
+ * "0 loaded" (a bogus empty success) and never retry. In that case the rows on screen (possibly
+ * from an earlier successful load) are re-filtered and the load runs again, as a State change
+ * did before P6 (loadTickets() re-shows "Not configured" itself). While a load is in flight,
+ * its completion re-renders the status.
  */
 internal fun stateChangeAction(lastLoadSucceeded: Boolean, loading: Boolean): StateChangeAction = when {
     loading -> StateChangeAction.REFILTER_KEEP_STATUS

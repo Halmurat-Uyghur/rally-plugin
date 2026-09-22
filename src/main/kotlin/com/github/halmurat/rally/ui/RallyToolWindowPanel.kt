@@ -125,9 +125,10 @@ class RallyToolWindowPanel(private val project: Project) : Disposable {
      *  after a client-side state-filter change (M3). */
     private var lastLoadFetched = 0
     private var lastLoadTotal = -1
-    /** Whether [allArtifacts] holds the result of a successful load (EDT-confined). False
-     *  before the first load, after a failed one, and while Rally isn't configured — the
-     *  cases where a State change must reload rather than re-filter ([stateChangeAction]). */
+    /** Whether the most recent load succeeded (EDT-confined). False before the first load,
+     *  after a failed one (the rows of an earlier load may still be on screen), and while
+     *  Rally isn't configured — the cases where a State change also retries the load
+     *  ([stateChangeAction]) and the empty-list placeholder keeps its error text. */
     private var lastLoadSucceeded = false
     /** Bumped on every [applySearchFilter] pass (EDT-confined); a server search applies its
      *  results only if no newer pass has run since it started. */
@@ -408,7 +409,12 @@ class RallyToolWindowPanel(private val project: Project) : Disposable {
             // Scope/project/sprint changes still call loadTickets() because they can require a
             // different query.
             when (stateChangeAction(lastLoadSucceeded, loading)) {
-                StateChangeAction.RELOAD -> loadTickets()
+                StateChangeAction.RELOAD -> {
+                    // Re-filter what's on screen (rows of an earlier successful load survive a
+                    // failed refresh) and retry; the error placeholder is kept (updateEmptyText).
+                    applySearchFilter()
+                    loadTickets()
+                }
                 StateChangeAction.REFILTER_KEEP_STATUS -> applySearchFilter()
                 StateChangeAction.REFILTER -> {
                     applySearchFilter()
@@ -1110,6 +1116,9 @@ class RallyToolWindowPanel(private val project: Project) : Disposable {
                         if (generation == searchGeneration && searchField.text.trim() == query) {
                             updateListModel(filteredResults)
                             updateStats(filteredResults)
+                            // Set directly: updateEmptyText() keeps a failed load's error text,
+                            // but this search just reached Rally.
+                            if (filteredResults.isEmpty()) artifactList.emptyText.text = "No results for \"$query\""
                             statusLabel.text = if (filteredResults.isEmpty()) {
                                 "No results found"
                             } else {
@@ -1331,10 +1340,6 @@ class RallyToolWindowPanel(private val project: Project) : Disposable {
                 // insert immediately, BEFORE the separately-failable upload (HIGH-2).
                 val created = createFn(client, ownerRef)
                 val createdId = created.formattedID ?: "?"
-                val uploadPending = attachment != null && created.ref != null
-                // Row the list had selected once the new row was inserted; Phase 2 selects the
-                // new row only if the user hasn't picked something else during the upload.
-                var selectionAfterInsert: RallyArtifact? = null
                 invokeLaterIfAlive {
                     val warningMsg = assignWarning?.let { " ($it)" } ?: ""
                     val messageType = if (assignWarning != null) MessageType.WARNING else MessageType.INFO
@@ -1355,22 +1360,21 @@ class RallyToolWindowPanel(private val project: Project) : Disposable {
                         allArtifacts = listOf(created) + allArtifacts
                         // A fresh CreateResult doesn't echo ScheduleState/State, so any non-"Any
                         // State" filter would hide the new row. Relax it (client-side, no network)
-                        // so the just-created ticket is actually shown.
+                        // so the just-created ticket is actually shown. lastState is set first so
+                        // the combo listener short-circuits: its stateChangeAction would RELOAD
+                        // after a failed load, and a reload discards this optimistic insert.
                         val stateFilter = stateCombo.selectedItem as? String ?: StateFilter.ANY.displayName
                         if (StateFilter.fromDisplay(stateFilter) != StateFilter.ANY &&
                             applyStateFilter(stateFilter, listOf(created)).isEmpty()) {
-                            stateCombo.selectedItem = StateFilter.ANY.displayName  // listener re-runs applySearchFilter
-                        } else {
-                            applySearchFilter()
+                            lastState = StateFilter.ANY.displayName
+                            stateCombo.selectedItem = StateFilter.ANY.displayName
                         }
-                        // With an upload pending, select after Phase 2: selecting now would load the
-                        // Attachments tab (and cache its list) before the file exists in Rally.
-                        if (!uploadPending) selectCreatedRow(created)
+                        applySearchFilter()
+                        val index = listModel.indexOf(created)
+                        if (index >= 0) artifactList.selectedIndex = index
                     }
-                    selectionAfterInsert = artifactList.selectedValue
-                    // Announce the result LAST: relaxing the state filter above re-runs the
-                    // stateCombo listener (refreshLoadedStatus), which would otherwise overwrite
-                    // this status with the "N loaded" count. The balloon is the durable confirmation.
+                    // Announce the result LAST, after the re-filter above. The balloon is the
+                    // durable confirmation.
                     statusLabel.text = "Created $createdId$warningMsg"
                     val balloon = JBPopupFactory.getInstance()
                         .createHtmlTextBalloonBuilder("Created $createdId$warningMsg", messageType, null)
@@ -1387,23 +1391,20 @@ class RallyToolWindowPanel(private val project: Project) : Disposable {
                 val createdRef = created.ref
                 if (attachment != null && createdRef != null) {
                     invokeLaterIfAlive { statusLabel.text = "Uploading attachment..." }
-                    // Select the new row once the upload has settled, unless the user moved on.
-                    val selectIfUntouched = {
-                        if (artifactList.selectedValue === selectionAfterInsert) selectCreatedRow(created)
-                    }
                     try {
                         client.uploadAttachment(createdRef, attachment.toPath())
-                        // The Attachments tab may already have cached the pre-upload (empty) list
-                        // if the user opened the new row during the upload.
+                        // The new row was selected in Phase 1, so its Attachments tab loaded (and
+                        // cached an empty list) while the upload ran. Evict that entry — the epoch
+                        // bump also stops a still-in-flight query from re-caching it — and re-run
+                        // the detail loads if the new artifact is still on display.
                         created.formattedID?.let { client.clearAttachmentsCache(it) }
                         invokeLaterIfAlive {
                             statusLabel.text = "Created $createdId with attachment"
-                            if (detailPanel.isShowing(created)) detailPanel.loadDetails() else selectIfUntouched()
+                            detailPanel.reloadIfShowing(createdRef)
                         }
                     } catch (e: Exception) {
                         LOG.warn("Attachment upload failed for $createdId", e)
                         invokeLaterIfAlive {
-                            selectIfUntouched()
                             statusLabel.text = "Created $createdId — attachment upload failed"
                             val safeMsg = com.intellij.openapi.util.text.StringUtil.escapeXmlEntities(
                                 e.message ?: e.javaClass.simpleName
@@ -1428,12 +1429,6 @@ class RallyToolWindowPanel(private val project: Project) : Disposable {
                 }
             }
         }
-    }
-
-    /** Select a just-created artifact's row, if the current filters show it. */
-    private fun selectCreatedRow(created: RallyArtifact) {
-        val index = listModel.indexOf(created)
-        if (index >= 0) artifactList.selectedIndex = index
     }
 
     /** Selected toolbar iteration's ref (null for "All Sprints"), read off the persisted selection. */
