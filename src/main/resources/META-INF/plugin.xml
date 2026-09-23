@@ -1,32 +1,36 @@
 <idea-plugin>
     <id>com.github.halmuratuyghur.rally</id>
     <name>Rally Integration</name>
-    <vendor url="https://github.com/Halmurat-Uyghur">Halmurat</vendor>
+    <vendor url="https://github.com/Halmurat-Uyghur/rally-plugin">Halmurat Tahir</vendor>
 
     <description><![CDATA[
-        <p>Browse and manage Rally (Broadcom Agile Central) work items directly from your IDE.</p>
-        <br/>
-        <p><b>Features:</b></p>
+        <p>Browse and manage Rally (Broadcom Agile Central) work items without leaving your IDE.
+        A dedicated tool window lists your User Stories, Defects, and Test Cases, shows their details,
+        and lets you create, update, and export them.</p>
+
+        <h3>Features</h3>
         <ul>
-            <li>Browse User Stories and Defects with search, scope, state, project, and sprint filters</li>
-            <li>Detail panel with HTML description, linked Test Cases, Tasks, and Attachments</li>
-            <li>View test case steps by double-clicking a test case</li>
-            <li>Create User Stories with project, sprint, and owner assignment</li>
-            <li>Change ticket state (Defined, In-Progress, Completed) with multi-select support</li>
-            <li>Export individual artifacts and linked test cases to JSON/Markdown</li>
-            <li>Sprint summary with ticket counts and story points</li>
-            <li>Open any artifact in Rally web UI, copy FormattedID to clipboard</li>
-            <li>Auto-loads tickets on startup, parallel API queries, 2-minute query cache</li>
+            <li><b>Ticket list:</b> search by ID or name, filter by scope (All Tickets, My Tickets, User Stories, Defects, Test Cases, Recent Activity), state, project, and sprint.</li>
+            <li><b>Detail panel:</b> HTML description with inline images, plus tabs for linked Test Cases, Tasks, and Attachments. Double-click a test case to see its steps.</li>
+            <li><b>Create:</b> User Stories and Defects (with project, sprint, severity, priority, and an optional attachment), and Tasks under a story or defect.</li>
+            <li><b>Update:</b> move tickets to Defined, In-Progress, or Completed (multi-select supported) and edit story points.</li>
+            <li><b>Start / Finish Working:</b> create and check out a Git branch for the ticket, move it to In-Progress and assign it to you; mark it Completed when done.</li>
+            <li><b>Export:</b> save tickets and their linked test cases to JSON and Markdown, including attachments and inline images.</li>
+            <li><b>Sprint summary:</b> ticket counts, story points, planned velocity, and days remaining.</li>
+            <li>Open any ticket in the Rally web UI or copy its ID.</li>
         </ul>
-        <br/>
-        <p><b>Setup:</b></p>
+
+        <h3>Setup</h3>
         <ol>
-            <li>Open Settings → Tools → Rally</li>
-            <li>Enter your Rally server URL (e.g., https://rally1.rallydev.com)</li>
-            <li>Enter your Rally API Key (get it from Rally → Profile → API Keys)</li>
-            <li>Enter your Workspace Ref and Username</li>
-            <li>Click "Test Connection" to verify</li>
+            <li>Open <b>Settings | Tools | Rally</b>.</li>
+            <li>Enter your Rally server URL (for example, https://rally1.rallydev.com).</li>
+            <li>Enter your Rally API key (Rally: your profile | API Keys). It is stored in the IDE's password safe.</li>
+            <li>Enter your workspace and username, then click <b>Test Connection</b>.</li>
+            <li>Open the <b>Rally</b> tool window.</li>
         </ol>
+
+        <p><i>This is an independent, community-built plugin. It is not affiliated with, endorsed by,
+        or sponsored by Broadcom Inc. Rally and Agile Central are trademarks of Broadcom Inc.</i></p>
     ]]></description>
 
     <depends>com.intellij.modules.platform</depends>

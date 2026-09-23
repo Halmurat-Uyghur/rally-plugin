@@ -52,13 +52,15 @@ intellijPlatform {
 
         changeNotes = """
             <h3>1.0.0</h3>
+            <p>First public release.</p>
             <ul>
-                <li>Browse User Stories and Defects with scope, state, project, and sprint filters</li>
-                <li>Detail panel with description, test cases, tasks, attachments, and test steps</li>
-                <li>Create User Stories with project, sprint, and owner assignment</li>
-                <li>Change ticket state (Defined, In-Progress, Completed)</li>
-                <li>Export artifacts and test cases to JSON/Markdown</li>
-                <li>Sprint summary, auto-load on startup, parallel API queries with caching</li>
+                <li>Tool window for User Stories, Defects, and Test Cases with search and scope, state, project, and sprint filters</li>
+                <li>Detail panel with description, linked test cases (and their steps), tasks, and attachments</li>
+                <li>Create User Stories, Defects, and Tasks</li>
+                <li>Change ticket state (multi-select) and edit story points</li>
+                <li>Start / Finish Working with Git branch creation</li>
+                <li>Export tickets and linked test cases to JSON and Markdown, with attachments and images</li>
+                <li>Sprint summary with points, planned velocity, and days remaining</li>
             </ul>
         """.trimIndent()
     }
