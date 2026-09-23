@@ -738,8 +738,10 @@ class RallyApiClient(
     }
 
     /**
-     * Fetch the Description field for a single artifact by ref URL.
-     * Returns the HTML description or null.
+     * Fetch the Description field for a single artifact by ref URL (detail panel; cached).
+     * Returns the HTML description, or null when the artifact has none. Failures — auth,
+     * HTTP, connection, or a deleted/unreadable object — are thrown, never read as "no
+     * description", so the UI can say the load failed. Failures are not cached.
      */
     fun fetchDescription(artifactRef: String): String? {
         val cacheKey = "desc:$artifactRef"
@@ -748,35 +750,20 @@ class RallyApiClient(
         val cached = getCached<String>(cacheKey)
         if (cached != null) return cached.ifEmpty { null }
 
-        val url = "$artifactRef?fetch=Description"
-        return try {
-            val response = executeGet(url)
-            handleResponse(response)
-            val desc = parseDescriptionResponse(response.body())
-            putCache(cacheKey, desc ?: "")
-            desc
-        } catch (e: RallyAuthenticationException) {
-            // Surface auth failures so the UI can show an actionable message instead
-            // of a generic "No description" — every other detail-panel call hits the
-            // same credentials, so this almost always means the API key is bad/expired.
-            LOG.warn("Auth failure fetching description for $artifactRef", e)
-            throw e
-        } catch (e: RallyApiException) {
-            LOG.warn("API error fetching description for $artifactRef: ${e.message}")
-            null
-        } catch (e: Exception) {
-            LOG.warn("Unexpected error fetching description for $artifactRef", e)
-            null
-        }
+        val response = executeGet("$artifactRef?fetch=Description")
+        handleResponse(response)
+        val desc = parseDescriptionResponse(response.body())
+        putCache(cacheKey, desc ?: "")
+        return desc
     }
 
     /**
-     * Strict Description fetch for export (EXP-1). [fetchDescription] serves the detail panel,
-     * where every failure except an auth error degrades to "no description"; an export must instead fail visibly
-     * rather than write an empty description and report success. This throws on HTTP and
-     * connection errors and on an OperationResult error body (deleted or unreadable object),
-     * and returns "" only when the artifact really has no Description. It always goes to the
-     * network (an export is a point-in-time snapshot) and refreshes the shared "desc:" entry.
+     * Strict Description fetch for export (EXP-1): an export must fail visibly rather than
+     * write an empty description and report success. Like [fetchDescription] it throws on
+     * HTTP and connection errors and on an OperationResult error body (deleted or unreadable
+     * object), and returns "" only when the artifact really has no Description. Unlike it,
+     * this always goes to the network (an export is a point-in-time snapshot) and refreshes
+     * the shared "desc:" entry.
      */
     fun fetchDescriptionStrict(artifactRef: String): String {
         val response = executeGet("$artifactRef?fetch=Description")

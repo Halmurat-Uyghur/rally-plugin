@@ -8,6 +8,8 @@ import com.intellij.openapi.application.ApplicationManager
 import com.intellij.openapi.components.PersistentStateComponent
 import com.intellij.openapi.components.State
 import com.intellij.openapi.components.Storage
+import com.intellij.openapi.diagnostic.ControlFlowException
+import com.intellij.openapi.diagnostic.Logger
 
 @State(
     // Opaque persistence key written into RallyPlugin.xml as <component name="…">. The IDE uses
@@ -43,6 +45,16 @@ class RallySettings : PersistentStateComponent<RallySettings.State> {
     @Volatile
     private var apiKeyLoaded = false
 
+    /**
+     * True when the last PasswordSafe read threw. The key then stays "not loaded" (so
+     * Settings Apply still can't persist a blank field over the stored key), but waiters
+     * that would otherwise wait for it forever can tell "failed" from "still loading".
+     * Cleared when a key is published or a new read starts.
+     */
+    @Volatile
+    var apiKeyLoadFailed = false
+        private set
+
     override fun getState(): State = myState
 
     override fun loadState(state: State) {
@@ -75,9 +87,26 @@ class RallySettings : PersistentStateComponent<RallySettings.State> {
 
     /** Eagerly load the API key from PasswordSafe off-EDT and signal readiness. */
     private fun loadApiKeyFromPasswordSafe() {
-        synchronized(apiKeyReady) { cachedApiKey = null; apiKeyLoaded = false }
+        synchronized(apiKeyReady) { cachedApiKey = null; apiKeyLoaded = false; apiKeyLoadFailed = false }
         ApplicationManager.getApplication().executeOnPooledThread {
-            completeApiKeyLoadIfPending(PasswordSafe.instance.getPassword(credentialAttributes) ?: "")
+            val key = try {
+                PasswordSafe.instance.getPassword(credentialAttributes) ?: ""
+            } catch (e: Exception) {
+                failApiKeyLoad()
+                if (e is ControlFlowException) throw e   // e.g. ProcessCanceledException: never log
+                LOG.warn("Couldn't read the Rally API key from the IDE credential store", e)
+                return@executeOnPooledThread
+            }
+            completeApiKeyLoadIfPending(key)
+        }
+    }
+
+    /** Record a failed PasswordSafe read and wake every [awaitApiKey] waiter to re-check it. */
+    internal fun failApiKeyLoad() {
+        synchronized(apiKeyReady) {
+            if (apiKeyLoaded) return
+            apiKeyLoadFailed = true
+            apiKeyReady.notifyAll()
         }
     }
 
@@ -97,6 +126,7 @@ class RallySettings : PersistentStateComponent<RallySettings.State> {
         synchronized(apiKeyReady) {
             cachedApiKey = key
             apiKeyLoaded = true
+            apiKeyLoadFailed = false
             apiKeyReady.notifyAll()
         }
     }
@@ -132,7 +162,8 @@ class RallySettings : PersistentStateComponent<RallySettings.State> {
     var apiKey: String
         get() {
             // Read-only callers get "" if the load hasn't finished within 2s. Callers that
-            // persist the value must use awaitApiKey() instead, which reports "still loading".
+            // must tell "still loading" from "empty" (Settings apply, the tool window's
+            // getClient) use awaitApiKey() instead.
             if (!ApplicationManager.getApplication().isDispatchThread) awaitApiKey(2_000L)
             return cachedApiKey ?: ""
         }
@@ -171,6 +202,8 @@ class RallySettings : PersistentStateComponent<RallySettings.State> {
     }
 
     companion object {
+        private val LOG = Logger.getInstance(RallySettings::class.java)
+
         // PasswordSafe credential identifiers. Together with the @State name above, these are the
         // plugin's persistence keys: changing any of them orphans the user's stored API key and
         // forces re-entry, exactly like a changed @State name orphans the settings XML. They are

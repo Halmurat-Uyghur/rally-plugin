@@ -29,6 +29,7 @@ import com.github.halmurat.rally.api.RallyUser
 import com.github.halmurat.rally.api.RallyUserStory
 import com.github.halmurat.rally.export.RallyExporter
 import com.github.halmurat.rally.settings.RallySettings
+import com.github.halmurat.rally.settings.RallyApiKeyUnavailableException
 import com.github.halmurat.rally.settings.RallySettingsListener
 import com.github.halmurat.rally.util.RallyGitOps
 
@@ -223,9 +224,28 @@ class RallyToolWindowPanel(private val project: Project) : Disposable {
     }
 
     private fun checkInitialConfiguration() {
-        // Check configuration off-EDT so the PasswordSafe preload can complete
+        // Check configuration off-EDT so the PasswordSafe preload can complete. The read can
+        // outlast isConfigured()'s 2s wait (keychain access prompt, KeePass master password);
+        // reading that as "Not configured" would stick until a manual Refresh, so keep waiting.
         ApplicationManager.getApplication().executeOnPooledThread {
-            val configured = RallySettings.getInstance().isConfigured()
+            val settings = RallySettings.getInstance()
+            if (settings.serverUrl.isNotBlank() && settings.awaitApiKey(2_000L) == null) {
+                if (!settings.apiKeyLoadFailed) {
+                    invokeLaterIfAlive { showApiKeyUnavailable(RallyApiKeyUnavailableException(loadFailed = false)) }
+                }
+                // No upper bound on purpose: an unanswered keychain prompt is a legitimate wait.
+                // A read that throws sets apiKeyLoadFailed, which ends the wait.
+                while (!disposed && !project.isDisposed && !Thread.currentThread().isInterrupted &&
+                    !settings.apiKeyLoadFailed && settings.awaitApiKey(5_000L) == null) {
+                    // keep waiting; the PasswordSafe read is still in flight
+                }
+                if (disposed || project.isDisposed) return@executeOnPooledThread
+                if (settings.apiKeyLoadFailed) {
+                    invokeLaterIfAlive { showApiKeyUnavailable(RallyApiKeyUnavailableException(loadFailed = true)) }
+                    return@executeOnPooledThread
+                }
+            }
+            val configured = settings.isConfigured()
             invokeLaterIfAlive {
                 if (configured) {
                     loadTickets()
@@ -241,6 +261,19 @@ class RallyToolWindowPanel(private val project: Project) : Disposable {
         statusLabel.icon = AllIcons.General.Error
         statusLabel.text = "Not configured"
         val placeholder = "Configure Rally in Settings → Tools → Rally"
+        loadFailurePlaceholder = placeholder
+        artifactList.emptyText.text = placeholder
+    }
+
+    /**
+     * The API key is still loading (no error: the startup task loads the list once it lands)
+     * or its read failed (warning: re-entering the key in Settings recovers).
+     */
+    private fun showApiKeyUnavailable(e: RallyApiKeyUnavailableException) {
+        lastLoadSucceeded = false
+        statusLabel.icon = if (e.loadFailed) AllIcons.General.Warning else null
+        statusLabel.text = if (e.loadFailed) "API key unavailable" else "Waiting for API key..."
+        val placeholder = e.message ?: ""
         loadFailurePlaceholder = placeholder
         artifactList.emptyText.text = placeholder
     }
@@ -725,6 +758,8 @@ class RallyToolWindowPanel(private val project: Project) : Disposable {
                     if (pendingReload) {
                         pendingReload = false
                         loadTickets()
+                    } else if (e is RallyApiKeyUnavailableException) {
+                        showApiKeyUnavailable(e)
                     } else {
                         statusLabel.icon = AllIcons.General.Error
                         val cause = if (e is java.util.concurrent.ExecutionException) e.cause ?: e else e
@@ -1454,7 +1489,9 @@ class RallyToolWindowPanel(private val project: Project) : Disposable {
             Messages.showInfoMessage(project, "Select a ticket first.", "Rally")
             return
         }
-        val client = try { getClient() } catch (_: Exception) { return }
+        // A selected row implies a loaded list, hence a client; building the URL needs only the
+        // server URL, so don't go through getClient() (which refuses while the key loads).
+        val client = currentClient ?: try { getClient() } catch (_: Exception) { return }
         val url = client.buildWebUrl(selected)
         LOG.info("Opening Rally URL: $url")
         BrowserUtil.browse(url)
@@ -1501,6 +1538,9 @@ class RallyToolWindowPanel(private val project: Project) : Disposable {
             val artifactFailed = java.util.concurrent.atomic.AtomicInteger(0)
             val tcExported = java.util.concurrent.atomic.AtomicInteger(0)
             val tcFailed = java.util.concurrent.atomic.AtomicInteger(0)
+            // Artifacts whose linked-test-case lookup failed: their test cases were never
+            // attempted, so they can't be counted in tcFailed — reported separately instead.
+            val tcLookupFailed = java.util.concurrent.atomic.AtomicInteger(0)
 
             // Export all selected artifacts in parallel
             val futures = selected.mapNotNull { artifact ->
@@ -1535,6 +1575,7 @@ class RallyToolWindowPanel(private val project: Project) : Disposable {
                             }
                         } catch (e: Exception) {
                             LOG.warn("Failed to query test cases for $id", e)
+                            tcLookupFailed.incrementAndGet()
                         }
                     }
                 }, exportExecutor)
@@ -1543,22 +1584,29 @@ class RallyToolWindowPanel(private val project: Project) : Disposable {
             // Wait for all exports to complete
             java.util.concurrent.CompletableFuture.allOf(*futures.toTypedArray()).join()
 
+            val counts = ExportCounts(
+                artifactsExported = artifactSuccess.get(),
+                artifactsFailed = artifactFailed.get(),
+                testCasesExported = tcExported.get(),
+                testCasesFailed = tcFailed.get(),
+                testCaseLookupsFailed = tcLookupFailed.get(),
+                downloadsFailed = exporter.failedDownloadCount,
+            )
             invokeLaterIfAlive {
-                statusLabel.text = "Exported ${artifactSuccess.get()} artifact(s), ${tcExported.get()} test case(s)"
                 // createHtmlTextBalloonBuilder treats its argument as HTML, so an export
                 // directory containing '<' or '&' would break rendering or inject markup.
                 // Escape every interpolated value before substituting <br> for newlines.
                 val safeOutputDir = com.intellij.openapi.util.text.StringUtil.escapeXmlEntities(outputDir)
-                val summary = buildString {
-                    append("Exported to:\n$safeOutputDir\n\n")
-                    append("Artifacts: ${artifactSuccess.get()} exported")
-                    if (artifactFailed.get() > 0) append(", ${artifactFailed.get()} failed")
-                    append("\nTest Cases: ${tcExported.get()} exported")
-                    if (tcFailed.get() > 0) append(", ${tcFailed.get()} failed")
-                }
+                val summary = buildExportSummary(counts, safeOutputDir)
+                statusLabel.text = summary.statusText
                 val balloon = JBPopupFactory.getInstance()
-                    .createHtmlTextBalloonBuilder(summary.replace("\n", "<br>"), MessageType.INFO, null)
-                    .setFadeoutTime(5000)
+                    .createHtmlTextBalloonBuilder(
+                        summary.balloonText.replace("\n", "<br>"),
+                        if (summary.anyFailed) MessageType.WARNING else MessageType.INFO,
+                        null
+                    )
+                    // A warning stays until dismissed: the status bar alone is easy to miss.
+                    .setFadeoutTime(if (summary.anyFailed) 0 else 5000)
                     .createBalloon()
                 balloon.show(RelativePoint.getSouthWestOf(statusLabel), Balloon.Position.above)
             }
@@ -1967,7 +2015,12 @@ class RallyToolWindowPanel(private val project: Project) : Disposable {
         // up to 2s on PasswordSafe, which would prevent dispose() from acquiring clientLock.
         val settings = RallySettings.getInstance()
         val serverUrl = settings.serverUrl
-        val apiKey = settings.apiKey
+        // A still-loading (or unreadable) key must not become a client with an empty key: every
+        // call would then fail as a bogus "Auth error". Report it as what it is instead. Never
+        // wait on the EDT.
+        val keyWaitMs = if (ApplicationManager.getApplication().isDispatchThread) 0L else 2_000L
+        val apiKey = settings.awaitApiKey(keyWaitMs)
+            ?: throw RallyApiKeyUnavailableException(settings.apiKeyLoadFailed)
         val workspaceRef = settings.workspaceRef.ifBlank { null }
 
         return synchronized(clientLock) {

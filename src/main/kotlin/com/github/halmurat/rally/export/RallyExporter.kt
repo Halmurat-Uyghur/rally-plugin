@@ -180,6 +180,14 @@ class RallyExporter(private val client: RallyApiClient) : AutoCloseable {
      *  JSON and Markdown passes of one export. Only successful fetches are stored. */
     private val resolvedDescriptions = ConcurrentHashMap<String, String>()
 
+    /** Attachment/inline-image downloads that failed and never succeeded on a later pass.
+     *  The file marks each one ("downloaded": false / "(download failed)"), but the export
+     *  still reads as complete, so callers report [failedDownloadCount] in their summary. */
+    private val failedDownloads: MutableSet<String> = ConcurrentHashMap.newKeySet()
+
+    /** Distinct attachment/inline-image downloads that failed during this export session. */
+    val failedDownloadCount: Int get() = failedDownloads.size
+
     /**
      * Guards the filesystem name-allocation + write critical section in
      * [downloadAttachmentContent] (MED-1/P2). Attachment downloads now run on a
@@ -198,10 +206,9 @@ class RallyExporter(private val client: RallyApiClient) : AutoCloseable {
             ?: throw RuntimeException("Test case $testCaseId not found")
 
         val steps = client.queryTestSteps(testCaseId)
-        val attachments = try { client.queryAttachments(testCaseId) } catch (e: Exception) {
-            LOG.warn("Failed to fetch attachments for test case $testCaseId", e)
-            emptyList()
-        }
+        // No fallback to an empty list: a failed lookup must fail this export (like the
+        // strict description fetch) instead of writing a file that silently lacks attachments.
+        val attachments = client.queryAttachments(testCaseId)
 
         val output = JsonObject().apply {
             addProperty("id", testCaseId)
@@ -234,10 +241,9 @@ class RallyExporter(private val client: RallyApiClient) : AutoCloseable {
             ?: throw RuntimeException("Test case $testCaseId not found")
 
         val steps = client.queryTestSteps(testCaseId)
-        val attachments = try { client.queryAttachments(testCaseId) } catch (e: Exception) {
-            LOG.warn("Failed to fetch attachments for test case $testCaseId", e)
-            emptyList()
-        }
+        // No fallback to an empty list: a failed lookup must fail this export (like the
+        // strict description fetch) instead of writing a file that silently lacks attachments.
+        val attachments = client.queryAttachments(testCaseId)
 
         val md = StringBuilder()
         md.appendLine("# $testCaseId - ${escapeMarkdown(tc.name ?: "")}")
@@ -479,6 +485,10 @@ class RallyExporter(private val client: RallyApiClient) : AutoCloseable {
     fun exportArtifactJson(artifact: RallyArtifact, outputDir: String) {
         val artifactId = artifact.formattedID ?: ""
         LOG.info("Generating JSON for artifact: $artifactId")
+        // No fallback to an empty list: a failed lookup must fail this export (like the
+        // strict description fetch) instead of writing a file that silently lacks attachments.
+        // Looked up first so a failure leaves nothing behind (not even downloaded inline images).
+        val attachments = client.queryAttachments(artifactId)
 
         val output = JsonObject().apply {
             addProperty("id", artifactId)
@@ -508,10 +518,6 @@ class RallyExporter(private val client: RallyApiClient) : AutoCloseable {
         }
 
         // Attachments
-        val attachments = try { client.queryAttachments(artifactId) } catch (e: Exception) {
-            LOG.warn("Failed to fetch attachments for $artifactId", e)
-            emptyList()
-        }
         output.add("attachments", attachmentsToJsonArray(attachments, artifactId, outputDir))
         output.addProperty("totalAttachments", attachments.size)
 
@@ -537,6 +543,10 @@ class RallyExporter(private val client: RallyApiClient) : AutoCloseable {
     fun exportArtifactMarkdown(artifact: RallyArtifact, outputDir: String) {
         val artifactId = artifact.formattedID ?: ""
         LOG.info("Generating Markdown for artifact: $artifactId")
+        // No fallback to an empty list: a failed lookup must fail this export (like the
+        // strict description fetch) instead of writing a file that silently lacks attachments.
+        // Looked up first so a failure leaves nothing behind (not even downloaded inline images).
+        val attachments = client.queryAttachments(artifactId)
 
         val md = StringBuilder()
         md.appendLine("# $artifactId - ${escapeMarkdown(artifact.name ?: "")}")
@@ -567,10 +577,6 @@ class RallyExporter(private val client: RallyApiClient) : AutoCloseable {
         }
 
         // Attachments
-        val attachments = try { client.queryAttachments(artifactId) } catch (e: Exception) {
-            LOG.warn("Failed to fetch attachments for $artifactId", e)
-            emptyList()
-        }
         if (attachments.isNotEmpty()) {
             md.appendLine("## Attachments")
             md.appendLine()
@@ -605,14 +611,10 @@ class RallyExporter(private val client: RallyApiClient) : AutoCloseable {
 
     // ── Helpers ──────────────────────────────────────────────────
 
-    private fun queryTestCaseByFormattedId(testCaseId: String): com.github.halmurat.rally.api.RallyTestCase? {
-        return try {
-            client.queryTestCaseByFormattedId(testCaseId)
-        } catch (e: Exception) {
-            LOG.warn("Failed to query test case $testCaseId", e)
-            null
-        }
-    }
+    /** Lookup failures propagate: turning them into null would report a network or auth
+     *  error as "Test case X not found". */
+    private fun queryTestCaseByFormattedId(testCaseId: String): com.github.halmurat.rally.api.RallyTestCase? =
+        client.queryTestCaseByFormattedId(testCaseId)
 
     private fun stepsToJsonArray(steps: List<RallyTestCaseStep>): JsonArray {
         val array = JsonArray()
@@ -692,7 +694,8 @@ class RallyExporter(private val client: RallyApiClient) : AutoCloseable {
 
             // Raw-first with base64 fallback, shared with the detail panel's
             // Save to Disk (M4) — see RallyApiClient.downloadAttachmentBytes.
-            val fileBytes = client.downloadAttachmentBytes(attachment) ?: return null
+            val fileBytes = client.downloadAttachmentBytes(attachment)
+                ?: run { failedDownloads.add("att:$cacheKey"); return null }
 
             // OID-keyed names are unique per attachment (M5), so same-name collisions
             // are impossible and re-exports idempotently overwrite. The lock now only
@@ -706,9 +709,11 @@ class RallyExporter(private val client: RallyApiClient) : AutoCloseable {
             }
             // putIfAbsent: harmless today (passes are sequential per artifact), but keeps
             // a same-key race from ever returning two different paths for one attachment.
+            failedDownloads.remove("att:$cacheKey")
             downloadedPaths.putIfAbsent(cacheKey, path) ?: path
         } catch (e: Exception) {
             LOG.warn("Failed to download attachment '$fileName'", e)
+            failedDownloads.add("att:$cacheKey")
             // Don't cache failures — allow retry on transient errors
             null
         }
@@ -805,10 +810,12 @@ class RallyExporter(private val client: RallyApiClient) : AutoCloseable {
             Files.write(outputPath, fileBytes)
             LOG.info("Downloaded inline image: $outputPath (${fileBytes.size} bytes)")
             val path = outputPath.toAbsolutePath().toString()
+            failedDownloads.remove("img:$cacheKey")
             return downloadedImagePaths.putIfAbsent(cacheKey, path) ?: path
         } catch (e: Exception) {
             // Don't cache failures — allow retry on transient errors
             LOG.warn("Failed to download image OID=$objectId", e)
+            failedDownloads.add("img:$cacheKey")
             return null
         }
     }

@@ -1,6 +1,7 @@
 package com.github.halmurat.rally.settings
 
 import org.junit.Assert.assertEquals
+import org.junit.Assert.assertFalse
 import org.junit.Assert.assertNull
 import org.junit.Assert.assertTrue
 import org.junit.Test
@@ -60,5 +61,31 @@ class RallySettingsApiKeyLoadTest {
         val settings = RallySettings()
         settings.completeApiKeyLoadIfPending("stored-key")
         assertEquals("stored-key", settings.awaitApiKey(50))
+    }
+
+    @Test
+    fun `a failed keychain read is reported but never reads as an empty key`() {
+        // Settings Apply must still not persist a blank field over the stored key.
+        val settings = RallySettings()
+        settings.failApiKeyLoad()
+        assertTrue(settings.apiKeyLoadFailed)
+        assertNull(settings.awaitApiKey(50))
+    }
+
+    @Test
+    fun `saving a key after a failed read clears the failure`() {
+        val settings = RallySettings()
+        settings.failApiKeyLoad()
+        settings.completeApiKeyLoad("typed-key")
+        assertFalse(settings.apiKeyLoadFailed)
+        assertEquals("typed-key", settings.awaitApiKey(50))
+    }
+
+    @Test
+    fun `a failure reported after the key loaded is ignored`() {
+        val settings = RallySettings()
+        settings.completeApiKeyLoad("abc123")
+        settings.failApiKeyLoad()
+        assertFalse(settings.apiKeyLoadFailed)
     }
 }

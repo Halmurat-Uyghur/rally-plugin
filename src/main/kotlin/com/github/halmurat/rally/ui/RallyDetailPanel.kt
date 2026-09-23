@@ -51,11 +51,12 @@ class RallyDetailPanel(private val project: Project) : com.intellij.openapi.Disp
         private const val TAB_TEST_CASES = 0
         private const val TAB_TASKS = 1
         private const val TAB_ATTACHMENTS = 2
-        // Sentinel returned by the description-fetch supplyAsync when Rally rejects
-        // the API key, so the EDT-side renderer can show an actionable error rather
-        // than a generic "No description". The leading control char ensures Rally
-        // HTML can never accidentally collide with this value.
+        // Sentinels returned by the description fetch when Rally rejects the API key or
+        // the request otherwise fails, so the renderer can show an error rather than a
+        // generic "No description". The leading control char ensures Rally HTML can never
+        // accidentally collide with these values.
         private const val DESC_AUTH_FAILED = "\u0001RALLY_AUTH_FAILED\u0001"
+        private const val DESC_LOAD_FAILED = "\u0001RALLY_LOAD_FAILED\u0001"
         // Uses a `class` (not an inline `style='color:...'`) because wrapHtml runs the
         // description through RallyHtmlUtils.stripInlineColors, which would otherwise strip
         // the red. The `.rally-error` rule is defined in wrapHtml's <style> block, so the
@@ -63,6 +64,12 @@ class RallyDetailPanel(private val project: Project) : com.intellij.openapi.Disp
         private const val AUTH_ERROR_HTML =
             "<span class='rally-error'><b>Authentication failed.</b> " +
             "Check your Rally API key in Settings → Tools → Rally.</span>"
+        // Clicking the already-selected row fires no selection event, so "reselect" can't
+        // retry; the link does (handled by descriptionPane's HyperlinkListener).
+        private const val RETRY_HREF = "rally:retry"
+        private const val LOAD_ERROR_HTML =
+            "<span class='rally-error'><b>Couldn't load the description.</b></span> " +
+            "<a href='$RETRY_HREF'>Retry</a> (details are in idea.log)"
 
         // Colors are defined in RallyColors object
         // Matches external src attributes (double- or single-quoted, protocol-relative included)
@@ -96,6 +103,13 @@ class RallyDetailPanel(private val project: Project) : com.intellij.openapi.Disp
         contentType = "text/html"
         isEditable = false
         border = JBUI.Borders.empty(4)
+        addHyperlinkListener { e ->
+            // e.url is null for the custom scheme; match on the raw href.
+            if (e.eventType == javax.swing.event.HyperlinkEvent.EventType.ACTIVATED &&
+                e.description == RETRY_HREF) {
+                currentArtifactRef?.let { reloadIfShowing(it) }
+            }
+        }
     }
 
     // Test Cases
@@ -583,6 +597,7 @@ class RallyDetailPanel(private val project: Project) : com.intellij.openapi.Disp
                         return@run DESC_AUTH_FAILED
                     } catch (e: Exception) {
                         LOG.warn("Failed to fetch description for $id", e)
+                        return@run DESC_LOAD_FAILED
                     }
                 }
                 if (generation.get() != gen) return@run null
@@ -597,6 +612,7 @@ class RallyDetailPanel(private val project: Project) : com.intellij.openapi.Disp
             if (generation.get() == gen && !disposed) {
                 val text = when {
                     resolvedDesc == DESC_AUTH_FAILED -> AUTH_ERROR_HTML
+                    resolvedDesc == DESC_LOAD_FAILED -> LOAD_ERROR_HTML
                     !resolvedDesc.isNullOrBlank() -> resolvedDesc
                     else -> "<i>No description</i>"
                 }
@@ -752,6 +768,7 @@ class RallyDetailPanel(private val project: Project) : com.intellij.openapi.Disp
 
         ApplicationManager.getApplication().executeOnPooledThread {
             var success = 0
+            var downloadsFailed = 0
             RallyExporter(client).use { exporter ->
                 for (tc in selected) {
                     val tcId = tc.formattedID ?: continue
@@ -763,16 +780,31 @@ class RallyDetailPanel(private val project: Project) : com.intellij.openapi.Disp
                         LOG.warn("Failed to export $tcId", e)
                     }
                 }
+                downloadsFailed = exporter.failedDownloadCount
             }
 
             ApplicationManager.getApplication().invokeLater {
                 if (disposed || project.isDisposed) return@invokeLater
-                Messages.showMessageDialog(
-                    project,
-                    "Exported $success/${selected.size} test case(s) to:\n$outputDir",
-                    "Rally - Export",
-                    AllIcons.General.InspectionsOK
-                )
+                val failed = selected.size - success
+                if (failed > 0 || downloadsFailed > 0) {
+                    val problems = buildList {
+                        if (failed > 0) add("$failed test case(s) failed")
+                        if (downloadsFailed > 0) add("$downloadsFailed attachment/image download(s) failed")
+                    }.joinToString("; ")
+                    Messages.showWarningDialog(
+                        project,
+                        "Exported $success/${selected.size} test case(s) to:\n$outputDir\n\n" +
+                            "$problems — details are in idea.log.",
+                        "Rally - Export"
+                    )
+                } else {
+                    Messages.showMessageDialog(
+                        project,
+                        "Exported $success/${selected.size} test case(s) to:\n$outputDir",
+                        "Rally - Export",
+                        AllIcons.General.InspectionsOK
+                    )
+                }
             }
         }
     }
