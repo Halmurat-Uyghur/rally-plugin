@@ -660,7 +660,7 @@ class RallyApiClient(
             putCache(cacheKey, user)
             return user
         }
-        throw RallyApiException("No user found with the configured username")
+        throw RallyUserNotFoundException("No user found with the configured username")
     }
 
     /**

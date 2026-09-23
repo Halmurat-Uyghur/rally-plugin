@@ -37,11 +37,14 @@ src/main/kotlin/com/github/halmurat/rally/
 │   ├── CreateUserStoryDialog.kt   # Create User Story dialog (extends the base)
 │   ├── CreateDefectDialog.kt      # Create Defect dialog (adds Severity/Priority rows)
 │   ├── RallyFilters.kt            # Scope / StateFilter enums (single source of truth for filter display strings)
+│   ├── RallyWorkActions.kt        # State-change / Start Working decisions (confirmation, button state, owner step, outcome text, withState/withOwner)
 │   ├── ThinDividerSplitPaneUI.kt  # Extracted thin-divider split-pane UI
 │   ├── StatusBadge.kt             # Tinted-chip status badge component (update() schedules nothing, only invalidate()s on a text change; refresh() schedules revalidate+repaint)
 │   └── RallyColors.kt             # Shared color constants + StateColors chips + forState()/forMethod() lookup
 ├── util/
-│   └── RallyHtmlUtils.kt          # Shared HTML/image utilities + author-color stripping
+│   ├── RallyHtmlUtils.kt          # Shared HTML/image utilities + author-color stripping
+│   ├── RallyGitOps.kt             # Git4Idea wrapper for Start Working (optional dependency; gate on isAvailable())
+│   └── RepositoryChoice.kt        # pickRepository: which repo Start Working branches (git4idea-free, testable)
 ```
 
 ## Key Design Decisions
@@ -141,7 +144,7 @@ Core artifact models (`RallyUserStory`, `RallyDefect`, `RallyTaskItem`) include:
 
 ## Testing
 
-244 unit tests across 26 classes: Rally API JSON parsing, query-value escaping, Retry-After parsing, host/scheme/port validation, field-update bodies, exporter formatting, file/HTML utils (incl. inline-color/embedded-stylesheet stripping), sprint summary, gzip body decoding, status color mapping, StatusBadge behavior, plus the audit additions: `RallyArtifactExt` (effectiveState/storyPoints), `Scope`/`StateFilter` enums, `requireNoErrors` + `ArtifactQueryResult` (the 200-with-Errors / partial-failure paths), the `RallyApiClient` instance helpers (`normalizeRef`, reentrant bulk-mode depth, `checkOperationResult`/`parseCreateResult`), and the query-per-scope builder (H1), selection-index restore, load-status text (M3), exporter attachment naming (M5), and entity decode order (L1); plus the review fixes: State-change reload decision (`stateChangeAction`), StatusBadge re-layout inside a renderer container, `RallySettings.awaitApiKey` (slow keychain reads never read as an empty key), plugin/configurable id pinning (`PluginDescriptorIdentityTest`), and HTTP-level tests against an in-process fake Rally server / authenticating proxy (`testutil/FakeRallyServer`): strict export description fetch, detail-panel description failures thrown (not read as empty, 401 kept as an auth failure), export failing on an attachment-lookup error for artifacts and test cases with nothing left on disk, failed-download counting, the export summary (`buildExportSummary`), the failed-keychain-read state, proxy auth + non-retried 401/407 mapping, attachments-cache eviction. Run via `./gradlew test`.
+269 unit tests across 28 classes: Rally API JSON parsing, query-value escaping, Retry-After parsing, host/scheme/port validation, field-update bodies, exporter formatting, file/HTML utils (incl. inline-color/embedded-stylesheet stripping), sprint summary, gzip body decoding, status color mapping, StatusBadge behavior, plus the audit additions: `RallyArtifactExt` (effectiveState/storyPoints), `Scope`/`StateFilter` enums, `requireNoErrors` + `ArtifactQueryResult` (the 200-with-Errors / partial-failure paths), the `RallyApiClient` instance helpers (`normalizeRef`, reentrant bulk-mode depth, `checkOperationResult`/`parseCreateResult`), and the query-per-scope builder (H1), selection-index restore, load-status text (M3), exporter attachment naming (M5), and entity decode order (L1); plus the review fixes: State-change reload decision (`stateChangeAction`), StatusBadge re-layout inside a renderer container, `RallySettings.awaitApiKey` (slow keychain reads never read as an empty key), plugin/configurable id pinning (`PluginDescriptorIdentityTest`), and HTTP-level tests against an in-process fake Rally server / authenticating proxy (`testutil/FakeRallyServer`): strict export description fetch, detail-panel description failures thrown (not read as empty, 401 kept as an auth failure), export failing on an attachment-lookup error for artifacts and test cases with nothing left on disk, failed-download counting, the export summary (`buildExportSummary`), the failed-keychain-read state, proxy auth + non-retried 401/407 mapping, attachments-cache eviction; plus the PR #12 review fixes: state-change confirmation/status text, Start Working button state, owner-step reporting and outcome text (`RallyWorkActionsTest`), and repository choice in multi-root projects (`RepositoryChoiceTest`). Run via `./gradlew test`.
 
 ## Build & Run
 
@@ -169,6 +172,7 @@ Any State, Idea, Defined, In-Progress, Completed, Accepted, Active (excludes Acc
 
 ## What's Implemented
 
+- **Refresh** — clears the query cache and re-queries projects and sprints too; both dropdowns are disabled until the reload commits, and a failed re-query keeps the current lists
 - Tool window with ticket list, search (debounced client-side + server-side fallback), filters, and sprint summary
 - **Detail panel** — selecting a ticket shows its HTML description (inline images resolved to base64 data URIs, capped at 10 and guarded against stale selections; Rally's light-UI author colors stripped and body/link/error colors pinned to the IDE theme) and three tabs:
   - **Test Cases** — linked test cases with Method (Automated/Manual) badges and LastVerdict (Pass/Fail)
@@ -180,12 +184,12 @@ Any State, Idea, Defined, In-Progress, Completed, Accepted, Active (excludes Acc
 - Project switcher dropdown — fetches projects from Rally, persists selection across sessions
 - Iteration (sprint) switcher dropdown — shows date ranges in dropdown (e.g., "Sprint 42 (2026-02-10 → 2026-02-24)"), deduplicates iterations, defaults to "All Sprints"
 - Settings page (Server URL, API Key, Workspace Ref, Username, Page Size, Export Directory) with Test Connection (shows DisplayName + UserName) and folder chooser
-- State change actions (In-Progress, Completed, Defined) via toolbar and context menu — supports multi-select with optimistic UI updates
+- State change actions (In-Progress, Completed, Defined) via toolbar and context menu — supports multi-select with optimistic UI updates. Confirms multi-ticket changes and always confirms Completed (`stateChangeConfirmation`)
 - Open in Browser, Copy FormattedID via context menu and detail panel header
-- **Export** — toolbar Export button exports selected artifact(s) + their linked test cases to JSON and Markdown. Also available via right-click context menu
+- **Export** — toolbar Export button exports selected artifact(s) + their linked test cases to JSON and Markdown; selected test cases (Test Cases scope) export directly with their steps and are counted as test cases. Also available via right-click context menu
 - Inline image downloading during export (replaces Rally image URLs with local paths)
 - Attachment downloading during export (via base64 content API, deduplicated across JSON+Markdown)
-- **Start Working** — dialog lets user choose branch prefix (feature, bugfix, hotfix, refactor, chore, test) with auto-selection based on ticket type. Creates/checks out branch, moves ticket to In-Progress, assigns owner. Verifies branch checkout before proceeding with Rally state changes
+- **Start Working** — dialog lets user choose branch prefix (feature, bugfix, hotfix, refactor, chore, test) with auto-selection based on ticket type. Creates/checks out branch, moves ticket to In-Progress, assigns owner. Verifies branch checkout before proceeding with Rally state changes. Single selection only (the button is disabled for multi-select, test cases, and while a run is in progress); branches the repo holding the project root in multi-root projects and refuses when that's ambiguous; the owner is assigned only after the state change lands, and every skipped assignment is reported (a blank Username, already announced in the dialog, only in the status bar)
 - **Security** — Rally query value escaping, attachment filename sanitization with path traversal prevention, canonical path verification
 - **Threading safety** — PasswordSafe access cached off-EDT, project/iteration selection read from cached data instead of Swing state, generation-based stale result prevention
 - **Performance** — caching, parallel queries, lazy description loading, HTTP/2, generation-based cancellation, disposed-client guards (see Performance Optimizations table)

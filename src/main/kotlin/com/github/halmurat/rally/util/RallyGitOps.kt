@@ -52,14 +52,16 @@ object RallyGitOps {
         val repos = repoManager.repositories
         if (repos.isEmpty()) return "No Git repository found in this project"
 
-        // In a multi-root project, branch the repository that holds the project root — the
-        // user's working repo — rather than whichever root the manager happens to list first
-        // (possibly a vendored or submodule repo). Refuse to guess when that's ambiguous.
-        val repo = project.guessProjectDir()?.let { repoManager.getRepositoryForFileQuick(it) }
-            ?: repos.singleOrNull()
-            ?: return "This project has ${repos.size} Git repositories and none contains the project root — " +
-                "can't tell which one to create the branch in"
+        val rootRepo = project.guessProjectDir()?.let { repoManager.getRepositoryForFileQuick(it) }
+        val repo = when (val choice = pickRepository(rootRepo, repos)) {
+            is RepositoryChoice.Chosen -> choice.repo
+            is RepositoryChoice.Refused -> return choice.reason
+        }
         val targetRepos = listOf(repo)
+        // Refresh git4idea's cached repository state first: a branch created from the command
+        // line since the last VFS refresh would otherwise be missed, and createBranch would
+        // fail with "branch already exists" next to an otherwise successful checkout.
+        repo.update()
         val existingBranches = repo.branches.localBranches.map { it.name }
         val brancher = GitBrancher.getInstance(project)
         val latch = CountDownLatch(1)
