@@ -10,7 +10,7 @@
 
         <h3>Features</h3>
         <ul>
-            <li><b>Ticket list:</b> search by ID or name, filter by scope (All, My Tickets, User Stories, Defects, Test Cases, Recent Activity), state, project, and sprint.</li>
+            <li><b>Ticket list:</b> search by ID or name, filter by scope (All Tickets, My Tickets, User Stories, Defects, Test Cases, Recent Activity), state, project, and sprint.</li>
             <li><b>Detail panel:</b> HTML description with inline images, plus tabs for linked Test Cases, Tasks, and Attachments. Double-click a test case to see its steps.</li>
             <li><b>Create:</b> User Stories and Defects (with project, sprint, severity, priority, and an optional attachment), and Tasks under a story or defect.</li>
             <li><b>Update:</b> move tickets to Defined, In-Progress, or Completed (multi-select supported) and edit story points.</li>
