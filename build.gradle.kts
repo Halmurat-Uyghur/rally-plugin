@@ -58,7 +58,7 @@ intellijPlatform {
                 <li>Detail panel with description, linked test cases (and their steps), tasks, and attachments</li>
                 <li>Create User Stories, Defects, and Tasks</li>
                 <li>Change ticket state (multi-select) and edit story points</li>
-                <li>Start / Finish Working with Git branch creation</li>
+                <li>Start Working: create a Git branch, move the ticket to In-Progress, and assign it to you</li>
                 <li>Export tickets and linked test cases to JSON and Markdown, with attachments and images</li>
                 <li>Sprint summary with points, planned velocity, and days remaining</li>
             </ul>

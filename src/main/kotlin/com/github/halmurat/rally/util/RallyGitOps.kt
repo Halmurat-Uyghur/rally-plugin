@@ -3,6 +3,7 @@ package com.github.halmurat.rally.util
 import com.intellij.openapi.application.ApplicationManager
 import com.intellij.openapi.diagnostic.Logger
 import com.intellij.openapi.project.Project
+import com.intellij.openapi.project.guessProjectDir
 import git4idea.branch.GitBrancher
 import git4idea.repo.GitRepositoryManager
 import java.util.concurrent.CountDownLatch
@@ -51,7 +52,13 @@ object RallyGitOps {
         val repos = repoManager.repositories
         if (repos.isEmpty()) return "No Git repository found in this project"
 
-        val repo = repos.first()
+        // In a multi-root project, branch the repository that holds the project root — the
+        // user's working repo — rather than whichever root the manager happens to list first
+        // (possibly a vendored or submodule repo). Refuse to guess when that's ambiguous.
+        val repo = project.guessProjectDir()?.let { repoManager.getRepositoryForFileQuick(it) }
+            ?: repos.singleOrNull()
+            ?: return "This project has ${repos.size} Git repositories and none contains the project root — " +
+                "can't tell which one to create the branch in"
         val targetRepos = listOf(repo)
         val existingBranches = repo.branches.localBranches.map { it.name }
         val brancher = GitBrancher.getInstance(project)
@@ -95,7 +102,10 @@ object RallyGitOps {
         }
 
         if (!latch.await(30, TimeUnit.SECONDS)) {
-            return "Branch operation timed out"
+            // GitBrancher's background task can't be cancelled from here, so it may still
+            // finish after we give up. Say so, so the user checks before retrying.
+            return "Branch operation for $branchName in ${repo.root.name} did not finish within 30 s. " +
+                "It may still complete in the background — check the current branch before retrying"
         }
         return error
     }

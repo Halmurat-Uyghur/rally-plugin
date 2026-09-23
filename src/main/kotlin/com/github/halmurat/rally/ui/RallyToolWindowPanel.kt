@@ -63,6 +63,12 @@ class RallyToolWindowPanel(private val project: Project) : Disposable {
             "2. Moves the ticket to In-Progress<br>" +
             "3. Assigns it to you (the Username in Settings)<br>" +
             "The Rally ticket is left unchanged if the branch can't be checked out.</html>"
+        // Screen readers announce the tooltip as the accessible description when none is set,
+        // which would read the HTML markup above aloud — so the button carries this plain twin.
+        private const val START_WORKING_DESCRIPTION = "Start working on the selected ticket: creates " +
+            "or checks out a git branch, moves the ticket to In-Progress, and assigns it to you."
+        private const val START_WORKING_NO_GIT_TOOLTIP = "Git integration is not available in this IDE"
+        private const val START_WORKING_TEST_CASE_TOOLTIP = "Start Working doesn't apply to test cases — select a User Story or Defect"
         private val STATE_OPTIONS = StateFilter.entries.map { it.displayName }.toTypedArray()
     }
 
@@ -99,16 +105,10 @@ class RallyToolWindowPanel(private val project: Project) : Disposable {
     private val statusLabel = JBLabel("Ready")
     /** Cached at construction time so the EDT-side selection listener doesn't reflectively probe Class.forName on every selection change. */
     private val gitAvailable: Boolean = RallyGitOps.isAvailable()
-    private val startWorkingButton = JButton("Start Working", AllIcons.Actions.Execute).apply {
-        isFocusable = true
-        toolTipText = START_WORKING_TOOLTIP
-        // Start Working creates a git branch; if the IDE ships without Git4Idea,
-        // there's nothing the button can do — keep it visible but disabled so the
-        // affordance is obvious.
-        if (!gitAvailable) {
-            isEnabled = false
-            toolTipText = "Git integration is not available in this IDE"
-        }
+    private val startWorkingButton = createButton("Start Working", AllIcons.Actions.Execute, START_WORKING_TOOLTIP) {
+        startWorking()
+    }.apply {
+        accessibleContext.accessibleDescription = START_WORKING_DESCRIPTION
     }
 
 
@@ -295,29 +295,28 @@ class RallyToolWindowPanel(private val project: Project) : Disposable {
         // Toolbar
         val toolbar = JPanel(FlowLayout(FlowLayout.LEFT, 4, 2))
         toolbar.add(createButton("Refresh", AllIcons.Actions.Refresh,
-            "Clear the cache and reload tickets from Rally") { currentClient?.clearCache(); loadTickets() })
-        val createButton = createButton("Create", AllIcons.General.Add, "Create a new User Story or Defect in Rally") {}
-        createButton.addActionListener {
+            "Clear the cache and reload tickets, projects, and sprints from Rally") { refreshAll() })
+        val createMenuButton = createButton("Create", AllIcons.General.Add, "Create a new User Story or Defect in Rally") {}
+        createMenuButton.addActionListener {
             val menu = JPopupMenu()
             menu.add(JMenuItem("User Story").apply { addActionListener { showCreateUserStoryDialog() } })
             menu.add(JMenuItem("Defect").apply { addActionListener { showCreateDefectDialog() } })
-            menu.show(createButton, 0, createButton.height)
+            menu.show(createMenuButton, 0, createMenuButton.height)
         }
-        toolbar.add(createButton)
+        toolbar.add(createMenuButton)
         toolbar.add(JSeparator(SwingConstants.VERTICAL).apply { preferredSize = java.awt.Dimension(2, 24) })
         toolbar.add(createButton("Defined", AllIcons.Actions.MoveToButton,
             "Move the selected ticket(s) to Defined") { changeState("Defined") })
         toolbar.add(createButton("In-Progress", AllIcons.Actions.Execute,
             "Move the selected ticket(s) to In-Progress (state only — no branch, no owner change)") { changeState("In-Progress") })
         toolbar.add(createButton("Completed", AllIcons.Actions.Checked,
-            "Move the selected ticket(s) to Completed") { changeState("Completed") })
+            "Move the selected ticket(s) to Completed (asks for confirmation)") { changeState("Completed") })
         toolbar.add(JSeparator(SwingConstants.VERTICAL).apply { preferredSize = java.awt.Dimension(2, 24) })
         toolbar.add(createButton("Export", AllIcons.ToolbarDecorator.Export,
-            "Export the selected ticket(s) and their linked test cases to JSON and Markdown") { exportSelectedArtifact() })
+            "Export the selected ticket(s) and their linked test cases (or selected test cases with their steps) to JSON and Markdown") { exportSelectedArtifact() })
         toolbar.add(JSeparator(SwingConstants.VERTICAL).apply { preferredSize = java.awt.Dimension(2, 24) })
         toolbar.add(startWorkingButton)
-
-        startWorkingButton.addActionListener { startWorking() }
+        updateStartWorkingButton(null)
 
         toolbar.add(Box.createHorizontalGlue())
         toolbar.add(statsLabel)
@@ -438,6 +437,39 @@ class RallyToolWindowPanel(private val project: Project) : Disposable {
         }
     }
 
+    /**
+     * Keeps Start Working's enabled state AND tooltip in step with the selection: a disabled
+     * button explains why it's disabled instead of describing what it would do. Runs on every
+     * selection change, including a cleared selection, so a button disabled by a test case
+     * doesn't stay disabled after that row disappears on reload.
+     */
+    private fun updateStartWorkingButton(selected: RallyArtifact?) {
+        val (enabled, tooltip) = when {
+            // Start Working creates a git branch; without Git4Idea there's nothing it can do —
+            // keep it visible but disabled so the affordance is obvious.
+            !gitAvailable -> false to START_WORKING_NO_GIT_TOOLTIP
+            selected is RallyTestCase -> false to START_WORKING_TEST_CASE_TOOLTIP
+            else -> true to START_WORKING_TOOLTIP
+        }
+        startWorkingButton.isEnabled = enabled
+        startWorkingButton.toolTipText = tooltip
+        startWorkingButton.accessibleContext.accessibleDescription =
+            if (tooltip == START_WORKING_TOOLTIP) START_WORKING_DESCRIPTION else tooltip
+    }
+
+    /**
+     * Manual Refresh: drop the query cache AND force the project/sprint dropdowns to re-query,
+     * so projects or sprints created in Rally since the tool window opened show up. loadTickets()
+     * alone only reloads those lists when they were never loaded or the settings changed.
+     */
+    private fun refreshAll() {
+        currentClient?.clearCache()
+        projectsLoaded = false
+        projectLoadGeneration.incrementAndGet()
+        invalidateIterations()
+        loadTickets()
+    }
+
     private fun setupListeners() {
         // Scope/state change (with duplicate-selection guard)
         scopeCombo.addActionListener {
@@ -518,6 +550,7 @@ class RallyToolWindowPanel(private val project: Project) : Disposable {
                     detailPanel.showArtifactHeader(selected, currentClient)
                     if (selected != null) selectionDebounceTimer.restart()
                 }
+                updateStartWorkingButton(selected)
                 val sp = mainSplitPane ?: return@addListSelectionListener
                 if (selected != null) {
                     // Auto-expand detail panel if collapsed
@@ -526,10 +559,6 @@ class RallyToolWindowPanel(private val project: Project) : Disposable {
                         sp.dividerSize = DIVIDER_THICKNESS
                         sp.dividerLocation = (sp.width * 0.55).toInt()
                     }
-                    val isTc = selected is RallyTestCase
-                    // Start Working stays disabled when Git4Idea is absent regardless of selection
-                    // — clicking it has nowhere to go without git operations.
-                    startWorkingButton.isEnabled = !isTc && gitAvailable
                 } else {
                     // Auto-collapse detail panel when nothing is selected
                     sp.dividerSize = 0
@@ -584,9 +613,9 @@ class RallyToolWindowPanel(private val project: Project) : Disposable {
             menu.add(JMenuItem("Set Completed").apply { addActionListener { changeState("Completed") } })
             menu.add(JMenuItem("Set Defined").apply { addActionListener { changeState("Defined") } })
             menu.add(JMenuItem("Edit Points").apply { addActionListener { editPoints() } })
-            menu.addSeparator()
-            menu.add(JMenuItem("Export to JSON/Markdown").apply { addActionListener { exportSelectedArtifact() } })
         }
+        menu.addSeparator()
+        menu.add(JMenuItem("Export to JSON/Markdown").apply { addActionListener { exportSelectedArtifact() } })
         menu.show(artifactList, e.x, e.y)
     }
 
@@ -1267,6 +1296,14 @@ class RallyToolWindowPanel(private val project: Project) : Disposable {
         else -> artifact
     }
 
+    /** Optimistic copy of an artifact with its Owner replaced (Start Working's assignment). */
+    private fun withOwner(artifact: RallyArtifact, owner: RallyUser): RallyArtifact = when (artifact) {
+        is RallyUserStory -> artifact.copy(owner = owner)
+        is RallyDefect -> artifact.copy(owner = owner)
+        is RallyTaskItem -> artifact.copy(owner = owner)
+        else -> artifact
+    }
+
     private fun updateStats(artifacts: List<RallyArtifact>) {
         var totalPoints = 0.0
         for (artifact in artifacts) {
@@ -1555,6 +1592,21 @@ class RallyToolWindowPanel(private val project: Project) : Disposable {
                 val id = artifact.formattedID ?: return@mapNotNull null
                 val ref = artifact.ref
                 java.util.concurrent.CompletableFuture.runAsync({
+                    // A selected test case (Test Cases scope) exports as a test case — with its
+                    // steps — and has no linked test cases of its own: querying
+                    // (WorkProduct = <test case ref>) would be a wasted round trip at best and a
+                    // bogus "with errors" lookup failure at worst.
+                    if (artifact is RallyTestCase) {
+                        try {
+                            exporter.exportTestCaseJson(id, outputDir)
+                            exporter.exportTestCaseMarkdown(id, outputDir)
+                            artifactSuccess.incrementAndGet()
+                        } catch (e: Exception) {
+                            LOG.warn("Failed to export test case $id", e)
+                            artifactFailed.incrementAndGet()
+                        }
+                        return@runAsync
+                    }
                     try {
                         // Pass the in-memory artifact so the exporter resolves Description via a
                         // cheap ref GET instead of re-running a FormattedID search query (MED-3/P4).
@@ -1708,15 +1760,23 @@ class RallyToolWindowPanel(private val project: Project) : Disposable {
             Messages.showInfoMessage(project, "State changes don't apply to test cases.", "Rally")
             return
         }
+        val skippedTestCases = rawSelected.size - selected.size
 
-        // Single-item state changes are a one-click reversible action — confirming
-        // every one of them gets in the way. Only ask when bulk-changing more than
-        // one ticket so a stray multi-select doesn't move 50 stories at once.
-        if (selected.size > 1) {
+        // Most single-item state changes are a one-click reversible action — confirming
+        // every one of them gets in the way. Ask when bulk-changing more than one ticket
+        // (so a stray multi-select doesn't move 50 stories at once), when test cases in the
+        // selection would be silently dropped, and always for Completed: it sits next to
+        // In-Progress, and the prior state isn't recorded, so a misclick isn't easy to undo.
+        if (selected.size > 1 || skippedTestCases > 0 || newState == "Completed") {
             val ids = selected.mapNotNull { it.formattedID }.joinToString(", ")
+            val what = if (selected.size == 1) ids else "${selected.size} tickets"
+            val skippedNote = if (skippedTestCases > 0) {
+                "\n\n$skippedTestCases selected test case(s) will be skipped — state changes don't apply to test cases."
+            } else ""
+            val details = if (selected.size > 1) "\n$ids" else ""
             val confirm = Messages.showYesNoDialog(
                 project,
-                "Move ${selected.size} tickets to '$newState'?\n$ids",
+                "Move $what to '$newState'?$details$skippedNote",
                 "Rally - Change State",
                 Messages.getQuestionIcon()
             )
@@ -1778,21 +1838,34 @@ class RallyToolWindowPanel(private val project: Project) : Disposable {
                 artifactList.selectedValue?.let { sel ->
                     if (sel.ref in successfulRefs) detailPanel.showArtifact(sel, client)
                 }
-                statusLabel.text = "Updated ${results.get()}"
+                statusLabel.text = "Updated ${results.get()}" +
+                    if (skippedTestCases > 0) " ($skippedTestCases test case(s) skipped)" else ""
             }
             } catch (e: Exception) {
                 LOG.warn("State change aborted", e)
                 invokeLaterIfAlive {
                     statusLabel.text = "State change failed"
+                    Messages.showErrorDialog(project, "Failed to change state: ${e.message}", "Rally - Change State")
                 }
             }
         }
     }
 
     private fun startWorking() {
-        val selected = artifactList.selectedValue
-        if (selected == null) {
+        val selectedValues = artifactList.selectedValuesList
+        if (selectedValues.isEmpty()) {
             Messages.showInfoMessage(project, "Select a ticket first.", "Rally")
+            return
+        }
+        // One branch per ticket: with a multi-selection, selectedValue would silently pick the
+        // lowest-index row (not the one last clicked) and drop the rest.
+        if (selectedValues.size > 1) {
+            Messages.showInfoMessage(project, "Select a single ticket to start working on.", "Rally")
+            return
+        }
+        val selected = selectedValues.single()
+        if (selected is RallyTestCase) {
+            Messages.showInfoMessage(project, "Start Working doesn't apply to test cases.", "Rally")
             return
         }
 
@@ -1849,9 +1922,14 @@ class RallyToolWindowPanel(private val project: Project) : Disposable {
                     add(previewLabel, gbc)
 
                     gbc.gridy = 2
+                    // Say up front when the owner step can't happen, rather than only
+                    // reporting it afterwards.
+                    val ownerItem = if (username.isNotBlank()) "<li>Assign it to you (${
+                        com.intellij.openapi.util.text.StringUtil.escapeXmlEntities(username)})</li>"
+                        else "<li>Owner unchanged — set Username in Settings → Tools → Rally to be assigned</li>"
                     add(javax.swing.JLabel("<html><br>This will also:<ul>" +
-                            "<li>Move ticket to In-Progress</li>" +
-                            "<li>Assign you as owner</li>" +
+                            "<li>Move the ticket to In-Progress</li>" +
+                            ownerItem +
                             "</ul></html>"), gbc)
                 }
             }
@@ -1909,13 +1987,23 @@ class RallyToolWindowPanel(private val project: Project) : Disposable {
                 errors.add("State change failed: ${e.message}")
             }
 
-            // 3. Assign owner
-            if (username.isNotBlank()) {
+            // 3. Assign owner — only once the state change landed, so a failure can't leave
+            // the ticket reassigned but not In-Progress. Every skip is reported: the tooltip
+            // and dialog promise this step, so it must never be dropped silently.
+            var assignedOwner: RallyUser? = null
+            if (!stateChangeSucceeded) {
+                errors.add("Owner not assigned because the state change failed")
+            } else if (username.isBlank()) {
+                errors.add("Owner not assigned: Username is not set in Settings → Tools → Rally")
+            } else {
                 try {
                     val user = client.getUserByUsername(username)
                     val userRef = user.ref
                     if (userRef != null) {
                         client.updateArtifactOwner(ticketRef, ticketType, userRef)
+                        assignedOwner = user
+                    } else {
+                        errors.add("Owner not assigned: Rally user '$username' was not found")
                     }
                 } catch (e: Exception) {
                     LOG.warn("Failed to assign owner for $ticketId", e)
@@ -1924,13 +2012,17 @@ class RallyToolWindowPanel(private val project: Project) : Disposable {
             }
 
             invokeLaterIfAlive {
-                // Only update local state if Rally accepted the state change
+                // Only update local state for what Rally accepted. The owner is patched too,
+                // so the row, the detail header and "My Tickets" reflect the claim at once.
+                val transform: (RallyArtifact) -> RallyArtifact = { artifact ->
+                    withState(artifact, "In-Progress").let { a -> assignedOwner?.let { withOwner(a, it) } ?: a }
+                }
                 if (stateChangeSucceeded) {
-                    allArtifacts = allArtifacts.map { if (it.ref == ticketRef) withState(it, "In-Progress") else it }
+                    allArtifacts = allArtifacts.map { if (it.ref == ticketRef) transform(it) else it }
                 }
                 client.clearArtifactCache()
                 if (stateChangeSucceeded) {
-                    patchArtifactsInModel(listOf(ticketRef)) { withState(it, "In-Progress") }
+                    patchArtifactsInModel(listOf(ticketRef), transform)
                     // Keep the open detail panel's header in sync (see changeState).
                     artifactList.selectedValue?.let { sel ->
                         if (sel.ref == ticketRef) detailPanel.showArtifact(sel, client)
@@ -1951,6 +2043,7 @@ class RallyToolWindowPanel(private val project: Project) : Disposable {
                 LOG.warn("Start working aborted", e)
                 invokeLaterIfAlive {
                     statusLabel.text = "Start working failed"
+                    Messages.showErrorDialog(project, "Failed to start working on $ticketId: ${e.message}", "Rally - Start Working")
                 }
             }
         }
