@@ -192,7 +192,6 @@ Any State, Idea, Defined, In-Progress, Completed, Accepted, Active (excludes Acc
 - **Create Defect dialog** — full dialog with Name, Project, Sprint, Severity, Priority, Assign to me, Description, and ZIP attachment upload
 - **Create Task** — create task from detail panel Tasks tab, linked to the selected work product
 - **Edit Points** — edit PlanEstimate via context menu on user stories/defects
-- **Finish Working** — toolbar button moves ticket to Completed state
 - **Metadata strip** — detail panel header shows Owner, Points, Sprint, Severity, Priority
 - **Balloon notifications** — non-modal success feedback via JBPopupFactory for create, export, and other actions
 - **Keyboard accessibility** — focusable buttons, Enter key support on ticket list

@@ -58,6 +58,11 @@ class RallyToolWindowPanel(private val project: Project) : Disposable {
         // typed enums instead of bare literals (MED-13).
         private val SCOPE_OPTIONS = Scope.entries.map { it.displayName }.toTypedArray()
         private const val DIVIDER_THICKNESS = 3
+        private const val START_WORKING_TOOLTIP = "<html><b>Start working on the selected ticket</b><br>" +
+            "1. Creates (or checks out) a git branch, e.g. <code>feature/US123</code> — you pick the prefix<br>" +
+            "2. Moves the ticket to In-Progress<br>" +
+            "3. Assigns it to you (the Username in Settings)<br>" +
+            "The Rally ticket is left unchanged if the branch can't be checked out.</html>"
         private val STATE_OPTIONS = StateFilter.entries.map { it.displayName }.toTypedArray()
     }
 
@@ -96,6 +101,7 @@ class RallyToolWindowPanel(private val project: Project) : Disposable {
     private val gitAvailable: Boolean = RallyGitOps.isAvailable()
     private val startWorkingButton = JButton("Start Working", AllIcons.Actions.Execute).apply {
         isFocusable = true
+        toolTipText = START_WORKING_TOOLTIP
         // Start Working creates a git branch; if the IDE ships without Git4Idea,
         // there's nothing the button can do — keep it visible but disabled so the
         // affordance is obvious.
@@ -104,7 +110,6 @@ class RallyToolWindowPanel(private val project: Project) : Disposable {
             toolTipText = "Git integration is not available in this IDE"
         }
     }
-    private val finishWorkingButton = JButton("Finish Working", AllIcons.Actions.Checked).apply { isFocusable = true }
 
 
     private val detailPanel = RallyDetailPanel(project)
@@ -289,8 +294,9 @@ class RallyToolWindowPanel(private val project: Project) : Disposable {
     private fun setupUI() {
         // Toolbar
         val toolbar = JPanel(FlowLayout(FlowLayout.LEFT, 4, 2))
-        toolbar.add(createButton("Refresh", AllIcons.Actions.Refresh) { currentClient?.clearCache(); loadTickets() })
-        val createButton = createButton("Create", AllIcons.General.Add) {}
+        toolbar.add(createButton("Refresh", AllIcons.Actions.Refresh,
+            "Clear the cache and reload tickets from Rally") { currentClient?.clearCache(); loadTickets() })
+        val createButton = createButton("Create", AllIcons.General.Add, "Create a new User Story or Defect in Rally") {}
         createButton.addActionListener {
             val menu = JPopupMenu()
             menu.add(JMenuItem("User Story").apply { addActionListener { showCreateUserStoryDialog() } })
@@ -299,17 +305,19 @@ class RallyToolWindowPanel(private val project: Project) : Disposable {
         }
         toolbar.add(createButton)
         toolbar.add(JSeparator(SwingConstants.VERTICAL).apply { preferredSize = java.awt.Dimension(2, 24) })
-        toolbar.add(createButton("Defined", AllIcons.Actions.MoveToButton) { changeState("Defined") })
-        toolbar.add(createButton("In-Progress", AllIcons.Actions.Execute) { changeState("In-Progress") })
-        toolbar.add(createButton("Completed", AllIcons.Actions.Checked) { changeState("Completed") })
+        toolbar.add(createButton("Defined", AllIcons.Actions.MoveToButton,
+            "Move the selected ticket(s) to Defined") { changeState("Defined") })
+        toolbar.add(createButton("In-Progress", AllIcons.Actions.Execute,
+            "Move the selected ticket(s) to In-Progress (state only — no branch, no owner change)") { changeState("In-Progress") })
+        toolbar.add(createButton("Completed", AllIcons.Actions.Checked,
+            "Move the selected ticket(s) to Completed") { changeState("Completed") })
         toolbar.add(JSeparator(SwingConstants.VERTICAL).apply { preferredSize = java.awt.Dimension(2, 24) })
-        toolbar.add(createButton("Export", AllIcons.ToolbarDecorator.Export) { exportSelectedArtifact() })
+        toolbar.add(createButton("Export", AllIcons.ToolbarDecorator.Export,
+            "Export the selected ticket(s) and their linked test cases to JSON and Markdown") { exportSelectedArtifact() })
         toolbar.add(JSeparator(SwingConstants.VERTICAL).apply { preferredSize = java.awt.Dimension(2, 24) })
         toolbar.add(startWorkingButton)
-        toolbar.add(finishWorkingButton)
 
         startWorkingButton.addActionListener { startWorking() }
-        finishWorkingButton.addActionListener { finishWorking() }
 
         toolbar.add(Box.createHorizontalGlue())
         toolbar.add(statsLabel)
@@ -422,9 +430,10 @@ class RallyToolWindowPanel(private val project: Project) : Disposable {
         mainPanel.add(bottomPanel, BorderLayout.SOUTH)
     }
 
-    private fun createButton(text: String, icon: Icon, action: () -> Unit): JButton {
+    private fun createButton(text: String, icon: Icon, tooltip: String, action: () -> Unit): JButton {
         return JButton(text, icon).apply {
             isFocusable = true
+            toolTipText = tooltip
             addActionListener { action() }
         }
     }
@@ -521,7 +530,6 @@ class RallyToolWindowPanel(private val project: Project) : Disposable {
                     // Start Working stays disabled when Git4Idea is absent regardless of selection
                     // — clicking it has nowhere to go without git operations.
                     startWorkingButton.isEnabled = !isTc && gitAvailable
-                    finishWorkingButton.isEnabled = !isTc
                 } else {
                     // Auto-collapse detail panel when nothing is selected
                     sp.dividerSize = 0
@@ -1249,8 +1257,8 @@ class RallyToolWindowPanel(private val project: Project) : Disposable {
     /**
      * Optimistic copy of an artifact with its state field updated — Stories and
      * Defects carry ScheduleState, Tasks carry State. Shared by changeState /
-     * startWorking / finishWorking so the three paths can't drift (the missing
-     * RallyTaskItem branch once had to be fixed in all three separately).
+     * startWorking so the paths can't drift (the missing RallyTaskItem branch once
+     * had to be fixed in each separately).
      */
     private fun withState(artifact: RallyArtifact, newState: String): RallyArtifact = when (artifact) {
         is RallyUserStory -> artifact.copy(scheduleState = newState)
@@ -1943,53 +1951,6 @@ class RallyToolWindowPanel(private val project: Project) : Disposable {
                 LOG.warn("Start working aborted", e)
                 invokeLaterIfAlive {
                     statusLabel.text = "Start working failed"
-                }
-            }
-        }
-    }
-
-    private fun finishWorking() {
-        val selected = artifactList.selectedValue
-        if (selected == null) {
-            Messages.showInfoMessage(project, "Select a ticket first.", "Rally")
-            return
-        }
-        if (selected is RallyTestCase) return
-
-        val ticketId = selected.formattedID ?: return
-        val ticketRef = selected.ref ?: return
-        val ticketType = selected.type ?: return
-
-        val confirm = Messages.showYesNoDialog(
-            project,
-            "Finish working on $ticketId?\n\nThis will move the ticket to Completed.",
-            "Rally - Finish Working",
-            Messages.getQuestionIcon()
-        )
-        if (confirm != Messages.YES) return
-
-        statusLabel.text = "Finishing $ticketId..."
-
-        ApplicationManager.getApplication().executeOnPooledThread {
-            try {
-                val client = getClient()
-                client.updateArtifactState(ticketRef, ticketType, "Completed")
-
-                invokeLaterIfAlive {
-                    allArtifacts = allArtifacts.map { if (it.ref == ticketRef) withState(it, "Completed") else it }
-                    client.clearArtifactCache()
-                    patchArtifactsInModel(listOf(ticketRef)) { withState(it, "Completed") }
-                    // Keep the open detail panel's header in sync (see changeState).
-                    artifactList.selectedValue?.let { sel ->
-                        if (sel.ref == ticketRef) detailPanel.showArtifact(sel, client)
-                    }
-                    statusLabel.text = "Finished $ticketId"
-                }
-            } catch (e: Exception) {
-                LOG.warn("Failed to finish working on $ticketId", e)
-                invokeLaterIfAlive {
-                    statusLabel.text = "Finish failed"
-                    Messages.showErrorDialog(project, "Failed to finish working: ${e.message}", "Rally")
                 }
             }
         }
