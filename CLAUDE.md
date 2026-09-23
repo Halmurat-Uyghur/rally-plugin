@@ -6,22 +6,23 @@ IntelliJ IDEA plugin that provides a **Tool Window** for browsing and managing R
 
 ## Tech Stack
 
-- **Language**: Kotlin 1.9.25 (JVM 17)
-- **Build**: Gradle with Kotlin DSL, `org.jetbrains.intellij.platform` plugin 2.16.0 (IntelliJ Platform Gradle Plugin 2.x)
+- **Language**: Kotlin 2.0.21 (JVM 17) — upgraded from 1.9.25 to unblock Gradle's configuration cache (enabled in `gradle.properties`) and clear a Gradle-10 deprecation. Kotlin 2.0 creates a `.kotlin/` build-cache dir (gitignored)
+- **Build**: Gradle with Kotlin DSL, `org.jetbrains.intellij.platform` plugin 2.16.0 (IntelliJ Platform Gradle Plugin 2.x). `instrumentCode = false` (all-Kotlin module, zero `.java`/`.form` files, so the form/@NotNull instrumentation pass is pure overhead)
 - **Target IDE**: IntelliJ IDEA Community 2024.1 (builds 241–262.*)
 - **Dependencies**: Gson 2.10.1 (JSON), JUnit 4.13.2 (tests)
-- **Plugin ID**: `com.github.halmuratuyghur.rally` (NOT `com.intellij.*` — that prefix is reserved by JetBrains)
+- **Plugin ID**: `com.github.halmuratuyghur.rally` (NOT `com.intellij.*` — that prefix is reserved by JetBrains). FROZEN, like the settings persistence keys: the Kotlin package is `com.github.halmurat.rally`, but the plugin `<id>` and the configurable id `com.github.halmuratuyghur.rally.settings` keep the original names so installs update in place. Pinned by `PluginDescriptorIdentityTest`
 
 ## Architecture
 
 ```
-src/main/kotlin/com/github/halmuratuyghur/rally/
+src/main/kotlin/com/github/halmurat/rally/
 ├── api/
-│   ├── RallyApiClient.kt         # HTTP client for Rally WSAPI 2.0 (with caching + parallel queries)
-│   ├── RallyApiModels.kt         # Data classes (RallyUserStory, RallyDefect, RallyTaskItem, RallyTestCase, RallyTestCaseStep, RallyAttachment, etc.)
+│   ├── RallyApiClient.kt         # HTTP client for Rally WSAPI 2.0 (caching + parallel queries; requireNoErrors, queryAllArtifactsParallel, parseCreateResult/checkOperationResult helpers)
+│   ├── RallyApiModels.kt         # Data classes + ArtifactQueryResult (partial-failure wrapper) + requireNoErrors extension
+│   ├── RallyArtifactExt.kt       # RallyArtifact extensions: effectiveState/effectiveStateOrEmpty/storyPoints + RallyType _type constants
 │   └── RallyApiException.kt      # Exception hierarchy
 ├── export/
-│   └── RallyExporter.kt          # JSON/Markdown export for artifacts and test cases (with attachments + inline images)
+│   └── RallyExporter.kt          # JSON/Markdown export (attachments + inline images downloaded on a dedicated pool; artifact-object overloads)
 ├── settings/
 │   ├── RallySettings.kt          # Application-level persistent settings (@State)
 │   └── RallySettingsConfigurable.kt  # Settings UI (Settings > Tools > Rally)
@@ -29,7 +30,14 @@ src/main/kotlin/com/github/halmuratuyghur/rally/
 │   ├── RallyToolWindowFactory.kt  # ToolWindowFactory + DumbAware
 │   ├── RallyToolWindowPanel.kt    # Main UI: toolbar, filters, project switcher, ticket list, detail panel, sprint summary
 │   ├── RallyDetailPanel.kt        # Detail panel: description (HTML) + tabbed pane (Test Cases/Steps, Tasks, Attachments)
-│   ├── StatusBadge.kt             # Tinted-chip status badge component (opaque pastel fill)
+│   ├── DetailCellRenderers.kt     # Extracted detail-tab renderers (TestCase/Task/Step/Attachment)
+│   ├── ArtifactCellRenderer.kt    # Extracted ticket-list cell renderer
+│   ├── AbstractCreateArtifactDialog.kt # Shared Create dialog base (form + combos + validation + resolved-ref properties)
+│   ├── CreateUserStoryDialog.kt   # Create User Story dialog (extends the base)
+│   ├── CreateDefectDialog.kt      # Create Defect dialog (adds Severity/Priority rows)
+│   ├── RallyFilters.kt            # Scope / StateFilter enums (single source of truth for filter display strings)
+│   ├── ThinDividerSplitPaneUI.kt  # Extracted thin-divider split-pane UI
+│   ├── StatusBadge.kt             # Tinted-chip status badge component (update() schedules nothing, only invalidate()s on a text change; refresh() schedules revalidate+repaint)
 │   └── RallyColors.kt             # Shared color constants + StateColors chips + forState()/forMethod() lookup
 ├── util/
 │   └── RallyHtmlUtils.kt          # Shared HTML/image utilities + author-color stripping
@@ -44,13 +52,16 @@ src/main/kotlin/com/github/halmuratuyghur/rally/
 - **Lazy description loading** — List queries use `LIST_FIELDS` (no Description) for smaller payloads. Description is fetched on demand via `fetchDescription()` when the detail panel opens
 - **Parallel detail loading** — Description runs synchronously on the pooled thread (fetch + image resolution + `wrapHtml` all off-EDT), while test cases, tasks, and attachments load concurrently via `CompletableFuture` on apiExecutor. Generation-based cancellation (AtomicLong) prevents stale selections from continuing to update the UI
 - **Theme-pinned description colors** — `wrapHtml` (the single chokepoint for every non-empty `descriptionPane.text` assignment) runs descriptions through `RallyHtmlUtils.stripInlineColors`: inline `color`/`background-color`/`background` declarations, presentational `color`/`bgcolor` attributes, and whole `<style>`/`<link>` elements are removed — Rally colors are authored for its light web UI and render as white blocks / dark-on-dark text on dark themes. Body/link/error colors are then pinned from the current theme (`UIUtil.getLabelForeground()`, `JBUI.CurrentTheme.Link.Foreground.ENABLED`, `Label.errorForeground` via the `.rally-error` class). Stripping is required because Swing's HTMLEditorKit gives author inline styles precedence over stylesheet rules (no `!important`). No live re-render on LaF switch — reselecting the ticket re-renders; a `LafManagerListener` is a known follow-up. Exporter paths intentionally keep author colors
-- **Caching** — LRU query cache (access-ordered `LinkedHashMap`, max 200 entries) with 2-minute TTL. Downloaded images use a bounded in-memory cache (10 MB cap, 1 MB per-image cap). Bulk export mode extends TTL to 15 minutes. `getUserByUsername` is cached; `clearArtifactCache` no longer evicts `currentIteration` (date-derived, mutation-independent)
+- **Caching** — LRU query cache (access-ordered `LinkedHashMap`, max 200 entries) with 2-minute TTL. Downloaded images use a bounded in-memory cache (10 MB cap, 1 MB per-image cap). Bulk export mode extends TTL to 15 minutes via a **reentrant `bulkModeDepth` AtomicInteger** (`enterBulkMode`/`exitBulkMode` increment/decrement; floor at 0) so overlapping exports/browse don't stomp each other's extended-TTL window. `getUserByUsername` is cached; `clearArtifactCache` no longer evicts `currentIteration` (date-derived, mutation-independent)
 - **Threading**: `executeOnPooledThread` for API calls, `invokeLater` for UI updates, `CompletableFuture.supplyAsync` for parallel operations. Dedicated `apiExecutor` thread pool in RallyApiClient (4 daemon threads)
 - **Disposal safety** — `RallyToolWindowPanel` implements `Disposable` with a `disposed` flag. `dispose()` and `getClient()` are synchronized on `clientLock` so no client can be created after disposal begins. All `getClient()` call sites are guarded with try/catch to prevent late background tasks from crashing
-- **HTTP/2** — Enabled for connection multiplexing on parallel requests. Respects IDE proxy settings
+- **HTTP/2** — Enabled for connection multiplexing on parallel requests. Respects IDE proxy settings (static, PAC, exceptions) by following the JVM-default `ProxySelector`, which the IDE installs as its own; proxy challenges are answered by the IDE's default `Authenticator` (server challenges never are). With an Authenticator attached the JDK throws IOException for a Basic challenge it can't answer (or a 401 without a challenge header) instead of returning the response — `authFailureOf` maps those to non-retried `RallyAuthenticationException`/proxy failures (a declined IDE proxy prompt reads as a proxy failure, not a bad API key). Non-Basic challenges (Negotiate/NTLM/Bearer) still come back as plain 401/407 responses handled by `handleResponse`
 - **No external Rally SDK** — uses Java's built-in `HttpClient` with `zsessionid` header for API key auth
 - **State field logic**: User Stories use `ScheduleState`; Defects carry both `ScheduleState` and `State`; Tasks use `State`
-- **Client-side state filtering** — because ScheduleState vs State differs by artifact type, filter queries for state are applied client-side after fetching
+- **Client-side state filtering** — because ScheduleState vs State differs by artifact type, the state filter is applied **client-side at display time** (`applyStateFilter` inside `applySearchFilter`) over the scope-filtered `allArtifacts`. A state-combo change therefore re-filters in memory with **no network round trip** — except after a failed or never-run load, when it also retries the load (`stateChangeAction`, so an error / "Not configured" isn't replaced by a bogus "0 loaded"); scope/project/sprint changes always call `loadTickets()`. `applyScopeFilter`/`applyStateFilter`/`applyClientFilter` and the `Scope`/`StateFilter` enums (`RallyFilters.kt`) are the single source of truth
+- **Effective-state & story-points helpers** — `RallyArtifact.effectiveState` (TestCase → LastVerdict; else ScheduleState ?: State ?: "Unknown"), `effectiveStateOrEmpty` (filter form, "" fallback), and `storyPoints` (PlanEstimate for stories/defects) in `RallyArtifactExt.kt` replace ~7 drifting copies. `_type` discriminators are constants in `RallyType`
+- **Server-side errors surfaced, not swallowed** — Rally WSAPI returns HTTP 200 with a populated `Errors` array for field/permission/scoping errors. `QueryResultData.requireNoErrors(ctx)` is called after every `gson.fromJson` so those become a thrown `RallyApiException` instead of a silent empty list; `Warnings` are logged. `queryAllArtifactsParallel`/`searchArtifacts` return `ArtifactQueryResult` carrying partial-failure reasons so the list shows a warning icon + "(incomplete)" rather than looking complete
+- **Create/upload split** — the shared `executeCreate` helper (used by both Create dialogs) creates the artifact in Phase 1 (optimistic insert + success balloon immediately) and uploads the attachment in a separate Phase 2 `try/catch`; a post-create upload failure reports "created, but attachment upload failed" instead of "Create failed" (which previously hid the created artifact and invited duplicates)
 - **Server-side owner filtering** — `(Owner.UserName = "...")` is applied as a Rally query
 - **Workspace/Project refs** — Rally WSAPI requires full API URLs for workspace/project params. The `normalizeRef()` method in RallyApiClient handles conversion from bare IDs, ref paths, or full URLs
 - **Iteration filtering** — Iterations are scoped to the selected project via server-side project filtering in `queryIterations()`
@@ -59,6 +70,10 @@ src/main/kotlin/com/github/halmuratuyghur/rally/
 - **invokeLaterIfAlive helper** — private inline function replaces 19 disposed-guard boilerplate instances
 - **Balloon notifications** — non-modal success feedback via JBPopupFactory
 - **Generic plugin design** — No workflow-specific or company-specific custom fields hardcoded. Only standard Rally fields (Method, ScheduleState, etc.) are used
+- **Log policy** — expected environmental failures (network, auth, declined transitions) log at WARN; `LOG.error` is reserved for programming errors because the platform turns it into an IDE fatal-error report
+- **Selection preserved across refresh** — `updateListModel` re-selects surviving rows by ref and collapses the detail split when the selection is gone
+- **Settings-apply refresh** — `RallySettingsListener.TOPIC` (application message bus) triggers `loadTickets()` when Settings are applied
+- **Export filenames** — attachments are `${objectId}_name` (OID-keyed, like inline images) so re-exports overwrite instead of accumulating copies
 
 ## Performance Optimizations
 
@@ -67,7 +82,8 @@ src/main/kotlin/com/github/halmuratuyghur/rally/
 | **Caching** | LRU query cache (200 entries, 2-min TTL), bounded image cache (10 MB cap) | Eliminates redundant API calls without unbounded heap growth |
 | **List queries** | `LIST_FIELDS` excludes Description field | Smaller payloads for 200+ items |
 | **Lazy description** | `fetchDescription()` on demand when detail panel opens | Faster initial list load |
-| **Parallel list** | User stories + defects fetched sequentially in `queryAllArtifacts` (changed from parallel to prevent thread-pool deadlock) | Deadlock-safe list load |
+| **Parallel list** | `queryAllArtifactsParallel` runs user stories + defects concurrently (defects on `apiExecutor`, stories inline) — called from the **outer pooled thread** (not `apiExecutor`) so it only ever blocks on one sub-task slot, staying deadlock-free | ~½ the cold-load latency (`max` instead of `stories+defects` RTT) |
+| **Client-side state filter** | State-combo changes re-filter `allArtifacts` in memory (`applyStateFilter` at display time) instead of re-querying Rally (a failed last load is retried instead — `stateChangeAction`) | Instant state switches, zero network |
 | **Parallel detail** | Description + test cases + tasks + attachments via CompletableFuture | ~3-4x faster detail load |
 | **Parallel sprint** | Sprint summary loads alongside artifact list | Removes serial bottleneck |
 | **HTTP/2** | `HttpClient.Version.HTTP_2` for connection multiplexing | Better throughput for parallel requests |
@@ -84,10 +100,20 @@ src/main/kotlin/com/github/halmuratuyghur/rally/
 | **gzip transport** | `Accept-Encoding: gzip` + transparent decode for all JSON responses (raw-body fallback on mislabeled encoding) | 5-10x smaller payloads on cold loads |
 | **Parallel iterations** | Sprint list loads concurrently with artifacts when no saved sprint needs validation | Removes a serial RTT from cold start/project switch |
 | **In-place row patching** | `patchArtifactsInModel` replaces full list rebuilds after optimistic updates (server-search rows get the same optimistic transform applied in place) | Selection preserved, single-cell repaint |
-| **Fixed cell height** | Prototype-measured `fixedCellHeight` on the ticket list | O(1) instead of O(n) layout per model event |
+| **Fixed cell height** | Prototype-measured `fixedCellHeight` on the ticket list AND the detail-tab lists (test cases/tasks/steps/attachments), prototypes populated so the StatusBadge chip isn't clipped | O(1) instead of O(n) layout per model event |
+| **StatusBadge cheap setter** | `update()` schedules no revalidate/repaint (rubber-stamp renderers don't need it) — it only `invalidate()`s on a text change so CellRendererPane re-lays out the row; real-container badges call `refresh()` | Removes per-cell repaint-queue churn on 200-row lists |
 | **Off-EDT description pipeline** | Description fetch + image resolution + `wrapHtml` run on the unbounded pooled thread, not apiExecutor/EDT | apiExecutor never parks on image joins; EDT stays responsive on multi-MB descriptions |
-| **Export download dedup** | Inline images + attachments deduplicated across JSON+Markdown passes; raw-bytes attachment endpoint with base64 fallback; exporter bypasses the UI image cache | Halves export downloads, ~1x peak heap, no UI-cache eviction |
+| **Export download dedup** | Inline images + attachments deduplicated across JSON+Markdown passes (thread-safe `ConcurrentHashMap`); raw-bytes attachment endpoint with base64 fallback; exporter bypasses the UI image cache | Halves export downloads, ~1x peak heap, no UI-cache eviction |
+| **Parallel export downloads** | Per-artifact inline images and attachments download on a **dedicated** daemon `Executors` pool (separate from `apiExecutor` and from the export-orchestrator pool to avoid self-deadlock), `allOf().join()`; output order preserved via index/key maps | Image/attachment-heavy exports no longer serialize each download |
+| **Export skips redundant lookup** | `exportArtifact{Json,Markdown}(artifact, dir)` overloads reuse the in-memory artifact + `fetchDescriptionStrict` (ref GET, memoized per exporter so both passes share it; a failed fetch or deleted artifact fails the export instead of writing an empty description) instead of re-running a FormattedID search per artifact | One fewer search query per exported artifact |
+| **Reentrant bulk mode** | `enterBulkMode`/`exitBulkMode` use an `AtomicInteger` depth counter (floor 0) | Overlapping exports/browse keep a consistent extended-TTL window |
 | **Streamed JSON export** | `gson.toJson(output, bufferedWriter)` instead of full-string materialization | Halves peak memory of export write phase |
+| **Selection debounce** | 200 ms single-shot Timer between list selection and detail loads (header/badge update instantly) | Arrow-scrolling costs zero API calls for skipped rows |
+| **Dedicated export executor** | Per-export daemon pool for export orchestration; apiExecutor only serves short HTTP calls | Tool window stays responsive during multi-ticket exports |
+| **Truncation-aware status** | TotalResultCount plumbed through PagedResult/ArtifactQueryResult → "200 of 934 loaded" | Removes silent page-size truncation |
+| **Raw-first attachment fetch** | downloadAttachmentBytes: raw endpoint, base64 fallback (save + export) | ~25% less transfer, ~1x peak heap on large attachments |
+| **Parallel project load** | Project list loads concurrently with artifacts when scoped to "All Projects" | One RTT off cold open |
+| **Shared exporter download pool** | One lazy pool per RallyExporter (AutoCloseable) instead of a pool per call | No pool churn on step-heavy test cases |
 
 ## Rally WSAPI Gotchas
 
@@ -103,6 +129,8 @@ src/main/kotlin/com/github/halmuratuyghur/rally/
 - Query values escape `"` as `\"` and `\` as `\\` (Broadcom-documented); other documented escapes (`\q` for `'`, `\l`/`\g` for `<`/`>`) are deliberately not applied — those characters round-trip fine unescaped in practice
 - Rally's attachment upload limit is 50 MB; the create dialogs validate size in `doValidate()` and re-check on the pooled thread BEFORE the artifact is created (a post-create upload failure would orphan the new artifact)
 - `requireSameHost` pins host, scheme, AND effective port — the configured Server URL must match the host/port Rally uses in its `_ref` URLs (relevant behind reverse proxies with port rewriting)
+- `TestCase` has no `Iteration` attribute — `(Iteration.Name = …)` on `/testcase` returns 200-with-Errors. The plugin filters test cases by sprint via `WorkProduct.Iteration.Name`, but that is **unverified against a live workspace**: Broadcom KB 57618 says `WorkProduct` points to the abstract Artifact type, which has no `Iteration`, so the traversal may also fail (alternatives: `TestSets.Iteration`, or resolve the sprint's stories/defects first)
+- The `/user` endpoint ignores unknown fetch fields and silently returns a ref-only user — always pass user fields explicitly
 
 ## Data Model (Tier 1 Fields)
 
@@ -110,7 +138,7 @@ Core artifact models (`RallyUserStory`, `RallyDefect`, `RallyTaskItem`) include:
 
 ## Testing
 
-145 unit tests across 10 classes: Rally API JSON parsing, query-value escaping, Retry-After parsing, host/scheme/port validation, field-update bodies, exporter formatting, file/HTML utils (incl. inline-color/embedded-stylesheet stripping), sprint summary, gzip body decoding, status color mapping, and StatusBadge behavior. Run via `./gradlew test`.
+228 unit tests across 23 classes: Rally API JSON parsing, query-value escaping, Retry-After parsing, host/scheme/port validation, field-update bodies, exporter formatting, file/HTML utils (incl. inline-color/embedded-stylesheet stripping), sprint summary, gzip body decoding, status color mapping, StatusBadge behavior, plus the audit additions: `RallyArtifactExt` (effectiveState/storyPoints), `Scope`/`StateFilter` enums, `requireNoErrors` + `ArtifactQueryResult` (the 200-with-Errors / partial-failure paths), the `RallyApiClient` instance helpers (`normalizeRef`, reentrant bulk-mode depth, `checkOperationResult`/`parseCreateResult`), and the query-per-scope builder (H1), selection-index restore, load-status text (M3), exporter attachment naming (M5), and entity decode order (L1); plus the review fixes: State-change reload decision (`stateChangeAction`), StatusBadge re-layout inside a renderer container, `RallySettings.awaitApiKey` (slow keychain reads never read as an empty key), plugin/configurable id pinning (`PluginDescriptorIdentityTest`), and HTTP-level tests against an in-process fake Rally server / authenticating proxy (`testutil/FakeRallyServer`): strict export description fetch, proxy auth + non-retried 401/407 mapping, attachments-cache eviction. Run via `./gradlew test`.
 
 ## Build & Run
 
@@ -122,7 +150,11 @@ Core artifact models (`RallyUserStory`, `RallyDefect`, `RallyTaskItem`) include:
 
 Warnings during `runIde` about GradleJvmSupportMatrix, Maven, or memory leaks on UI switch are IntelliJ 2024.1 internal issues — not from this plugin.
 
-`verifyPlugin` uses a pinned IDE list (`pluginVerification.ides`, one release per major across 241–262) instead of the default dynamic `recommended()` feed: that feed serves 2025.3.x distributions whose layout (no `modules/module-descriptors.jar`) the newest Plugin Verifier (1.405) cannot read, which kills the whole task with `InvalidIdeException`. Re-add 2025.3 or return to `recommended()` once the verifier supports the new layout. Verifier-reported deprecated/scheduled-for-removal API usages (7 on newer IDEs) are the deliberate 241-floor keeps.
+The build uses Gradle's **configuration cache** (enabled in `gradle.properties`, unblocked by the Kotlin 2.0 upgrade) — `compileKotlin`/`test`/`buildPlugin` all store/reuse a config-cache entry. If a future change reintroduces a config-cache incompatibility, the line in `gradle.properties` can be removed without losing the Kotlin upgrade. `verifyPlugin` downloads several full IDE distributions and needs multiple GB of free disk.
+
+`buildSearchableOptions` is ON by default — every shipped ZIP is built locally (no CI), and the index is what lets Settings search find the Rally page by "API key", "workspace", etc. It boots a headless IDE per `buildPlugin`, so pass `-PskipSearchableOptions=true` on the command line to skip it while iterating — not in `~/.gradle/gradle.properties`, which would silently drop the index from release ZIPs too (L10).
+
+`verifyPlugin` uses a pinned IDE list (`pluginVerification.ides`, one release per major across 241–262) instead of the default dynamic `recommended()` feed: that feed serves 2025.3.x distributions whose layout (no `modules/module-descriptors.jar`) the newest Plugin Verifier (1.405) cannot read, which kills the whole task with `InvalidIdeException`. Re-add 2025.3 or return to `recommended()` once the verifier supports the new layout. Verifier-reported deprecated/scheduled-for-removal API usages: 4 on newer IDEs. Three are the deliberate 241-floor keeps (`FileSaverDescriptor(title, desc, ext)`, `CredentialAttributes(serviceName)`, the 4-arg `addBrowseFolderListener`); `ComponentPanelBuilder.createCommentComponent` (Settings help text) is deprecated even on 241 and is a follow-up. Proxy handling no longer uses `CommonProxy`/`HttpConfigurable`.
 
 ## Current Filter Options (in Tool Window)
 
@@ -173,7 +205,6 @@ Any State, Idea, Defined, In-Progress, Completed, Accepted, Active (excludes Acc
 |--------|---------|
 | `queryUserStories()` | Query user stories with filters |
 | `queryDefects()` | Query defects with filters |
-| `queryAllArtifacts()` | Combined user stories + defects (sequential, cached) |
 | `queryAllTestCases()` | Query all test cases in workspace/project |
 | `queryTestCases(workProductRef)` | Test cases linked to a user story/defect (cached) |
 | `queryTasksForWorkProduct(ref)` | Tasks linked to a user story/defect (cached) |
@@ -181,12 +212,14 @@ Any State, Idea, Defined, In-Progress, Completed, Accepted, Active (excludes Acc
 | `queryTestSteps(formattedId)` | Test steps for a test case |
 | `queryAttachments(formattedId)` | Attachments for any artifact (cached) |
 | `searchArtifacts(text, scope)` | Server-side search by Name/FormattedID |
-| `fetchDescription(artifactRef)` | On-demand description fetch (cached) |
+| `fetchDescription(artifactRef)` | On-demand description fetch for the detail panel (cached; auth failures are thrown and shown as an auth error, other failures read as no description) |
+| `fetchDescriptionStrict(artifactRef)` | Export-path description fetch: throws on HTTP/connection errors and deleted objects |
 | `getArtifactByFormattedId(id)` | Lookup by FormattedID (US/DE/TA) |
 | `updateArtifactState(ref, type, state)` | Change ScheduleState/State |
 | `updateArtifactOwner(ref, type, ownerRef)` | Change Owner |
 | `getAttachmentContent(contentRef)` | Get base64 attachment content |
 | `downloadAttachment(url, cache)` | Download attachment bytes via HTTP (bounded image cache unless cache=false, 10 MB cap) |
+| `downloadAttachmentBytes(attachment)` | Attachment bytes, raw endpoint first, base64 fallback |
 | `queryProjects()` / `queryIterations()` | Project and sprint lists |
 | `queryCurrentIteration()` | Find active sprint by today's date |
 | `createUserStory()` | Create a new user story |
@@ -196,10 +229,10 @@ Any State, Idea, Defined, In-Progress, Completed, Accepted, Active (excludes Acc
 | `uploadAttachment(ref, path)` | Two-step attachment upload (content + link) |
 | `getUserByUsername(username)` | Lookup user by email |
 | `clearCache()` / `clearArtifactCache()` | Cache invalidation |
+| `clearAttachmentsCache(formattedId)` | Evict one artifact's attachment list after an upload (epoch-guarded against in-flight queries) |
 | `enterBulkMode()` / `exitBulkMode()` | Extended cache TTL for exports |
 | `getCurrentUser()` | Get authenticated user info |
 | `buildWebUrl(artifact)` | Construct Rally web UI URL |
-| `queryIterationArtifacts(name)` | Artifacts in a named iteration |
 
 ## Git Commit Rules
 

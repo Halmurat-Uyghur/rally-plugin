@@ -2,11 +2,11 @@ import org.jetbrains.intellij.platform.gradle.TestFrameworkType
 
 plugins {
     id("java")
-    id("org.jetbrains.kotlin.jvm") version "1.9.25"
+    id("org.jetbrains.kotlin.jvm") version "2.0.21"
     id("org.jetbrains.intellij.platform") version "2.16.0"
 }
 
-group = "com.github.halmuratuyghur"
+group = "com.github.halmurat"
 version = "1.0.0"
 
 repositories {
@@ -30,8 +30,18 @@ dependencies {
 }
 
 intellijPlatform {
-    buildSearchableOptions = true
-    instrumentCode = true
+    // Building searchable options boots a headless IDE per buildPlugin run to index the
+    // Settings page, so Settings search finds "API key", "workspace", etc. Every shipped ZIP
+    // is built locally (there is no CI), so the index is ON by default; pass
+    // -PskipSearchableOptions=true on the command line to skip it while iterating (L10).
+    // Don't put it in ~/.gradle/gradle.properties: release ZIPs would silently lose the index.
+    buildSearchableOptions = providers.gradleProperty("skipSearchableOptions")
+        .map { !it.toBoolean() }
+        .orElse(true)
+    // This module is all-Kotlin with zero .java and zero .form files, so the form
+    // binding / @NotNull bytecode instrumentation pass has nothing to do — disabling
+    // it removes pure build overhead.
+    instrumentCode = false
     sandboxContainer = layout.projectDirectory.dir(".sandbox")
 
     pluginConfiguration {

@@ -1,7 +1,7 @@
 # Repository Guidelines
 
 ## Project Structure & Module Organization
-The IntelliJ plugin code lives in `src/main/kotlin/com/github/halmuratuyghur/rally`, grouped by feature (`api`, `ui`, `settings`, `export`). UI resources and `META-INF/plugin.xml` stay under `src/main/resources`. Built ZIPs land in `build/distributions`, while Gradle and wrapper files (`build.gradle.kts`, `gradlew`) sit at the repo root. Keep Rally-specific assets (icons, mock data) beside the feature code they support.
+The IntelliJ plugin code lives in `src/main/kotlin/com/github/halmurat/rally`, grouped by feature (`api`, `ui`, `settings`, `export`). UI resources and `META-INF/plugin.xml` stay under `src/main/resources`. Built ZIPs land in `build/distributions`, while Gradle and wrapper files (`build.gradle.kts`, `gradlew`) sit at the repo root. Keep Rally-specific assets (icons, mock data) beside the feature code they support.
 
 ## Build, Test, and Development Commands
 - `./gradlew buildPlugin` — compiles the Kotlin sources, runs unit tests, and assembles the distributable ZIP.
