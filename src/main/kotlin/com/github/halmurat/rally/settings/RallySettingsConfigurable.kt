@@ -9,6 +9,7 @@ import com.intellij.openapi.options.Configurable
 import com.intellij.openapi.ui.Messages
 import com.intellij.openapi.ui.TextFieldWithBrowseButton
 import com.github.halmurat.rally.api.RallyApiClient
+import com.github.halmurat.rally.api.RallyUserNotFoundException
 import com.intellij.ui.components.JBLabel
 import com.intellij.ui.components.JBTextField
 import com.intellij.util.ui.FormBuilder
@@ -249,6 +250,7 @@ class RallySettingsConfigurable : Configurable {
         val url = serverUrlField?.text?.trim() ?: ""
         val key = String(apiKeyField?.password ?: charArrayOf()).trim()
         val fieldUsername = usernameField?.text?.trim() ?: ""
+        val fieldWorkspace = workspaceRefField?.text?.trim() ?: ""
 
         if (url.isBlank() || key.isBlank()) {
             Messages.showErrorDialog("Please provide server URL and API key.", "Rally Connection")
@@ -263,6 +265,9 @@ class RallySettingsConfigurable : Configurable {
             var client: RallyApiClient? = null
             try {
                 client = RallyApiClient(url, key)
+                // Scope the checks below the way the tool window will: a mistyped Workspace Ref
+                // must fail here, not after "Connected successfully!" on every load.
+                client.workspaceRef = fieldWorkspace.ifBlank { null }
                 val apiKeyOwner = client.getCurrentUser()
                 val apiKeyName = apiKeyOwner.displayName ?: "Unknown"
                 val apiKeyUserName = apiKeyOwner.userName ?: "Unknown"
@@ -276,12 +281,29 @@ class RallySettingsConfigurable : Configurable {
                     }
                 }, modality)
 
+                var workspaceProblem = false
+                val workspaceInfo = if (fieldWorkspace.isNotBlank()) {
+                    try {
+                        "\n\nWorkspace: ${client.getWorkspaceName(fieldWorkspace)}"
+                    } catch (e: Exception) {
+                        LOG.warn("Workspace check failed for '$fieldWorkspace'", e)
+                        workspaceProblem = true
+                        "\n\nWorkspace Ref '$fieldWorkspace' could not be read: ${e.message ?: e.javaClass.simpleName}\n" +
+                            "Check the Workspace Ref (the workspace's ObjectID), or leave it empty to use your default workspace."
+                    }
+                } else ""
+
                 // Check if a username is configured and validate it
-                val usernameInfo = if (configuredUsername.isNotBlank()) {
+                val usernameInfo = if (workspaceProblem) {
+                    "" // the user lookup is workspace-scoped; it would only repeat the error
+                } else if (configuredUsername.isNotBlank()) {
                     try {
                         val configuredUser = client.getUserByUsername(configuredUsername)
                         val name = configuredUser.displayName ?: configuredUser.refObjectName ?: "Unknown"
                         "\n\nConfigured Username: $configuredUsername\nResolved to: $name (valid)"
+                    } catch (_: RallyUserNotFoundException) {
+                        "\n\nConfigured Username: $configuredUsername\nWarning: no Rally user has this UserName — " +
+                            "'My Tickets' will be empty and tickets can't be assigned to you."
                     } catch (e: Exception) {
                         // Could be a genuine "no such user" OR a transient network/auth error.
                         // Don't assert the username is wrong — log the cause and word it neutrally.
@@ -292,11 +314,13 @@ class RallySettingsConfigurable : Configurable {
                     "\n\nUsername field is empty. Enter your Rally UserName (email) for 'My Tickets' filter."
                 }
 
+                val summary = "API Key Owner: $apiKeyName ($apiKeyUserName)$workspaceInfo$usernameInfo"
                 ApplicationManager.getApplication().invokeLater({
-                    Messages.showInfoMessage(
-                        "Connected successfully!\n\nAPI Key Owner: $apiKeyName ($apiKeyUserName)$usernameInfo",
-                        "Rally Connection"
-                    )
+                    if (workspaceProblem) {
+                        Messages.showWarningDialog("Connected, but the workspace check failed.\n\n$summary", "Rally Connection")
+                    } else {
+                        Messages.showInfoMessage("Connected successfully!\n\n$summary", "Rally Connection")
+                    }
                 }, modality)
             } catch (e: Exception) {
                 LOG.warn("Rally test connection failed", e)

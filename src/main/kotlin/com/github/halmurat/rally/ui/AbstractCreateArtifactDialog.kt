@@ -133,19 +133,27 @@ abstract class AbstractCreateArtifactDialog(
         attachPanel.add(attachmentPathField, BorderLayout.CENTER)
         val browseButton = JButton("Browse...")
         browseButton.addActionListener {
-            // Use NoJars so a .zip is selectable as a single leaf file rather than
-            // navigable like a jar. createSingleFileDescriptor() (no-arg) is deprecated;
+            // Any file type (screenshots, logs, archives); the size limit is checked in
+            // doValidate. Use NoJars so a .zip/.jar is selectable as a single leaf file rather
+            // than navigable like a jar. createSingleFileDescriptor() (no-arg) is deprecated;
             // this variant is the supported replacement and exists since 2024.1.
             val descriptor = com.intellij.openapi.fileChooser.FileChooserDescriptorFactory.createSingleFileNoJarsDescriptor()
-                .withTitle("Select ZIP file to attach")
-                .withFileFilter { it.extension.equals("zip", ignoreCase = true) }
+                .withTitle("Select File to Attach")
             val chosen = com.intellij.openapi.fileChooser.FileChooser.chooseFile(descriptor, owningProject, null)
             if (chosen != null) {
                 attachmentFile = File(chosen.path)
                 attachmentPathField.text = chosen.name
             }
         }
-        attachPanel.add(browseButton, BorderLayout.EAST)
+        val clearButton = JButton("Clear")
+        clearButton.addActionListener {
+            attachmentFile = null
+            attachmentPathField.text = ""
+        }
+        val attachButtons = JPanel(java.awt.FlowLayout(java.awt.FlowLayout.RIGHT, 4, 0))
+        attachButtons.add(browseButton)
+        attachButtons.add(clearButton)
+        attachPanel.add(attachButtons, BorderLayout.EAST)
         formPanel.add(attachPanel, gbc)
 
         panel.add(formPanel, BorderLayout.NORTH)

@@ -60,6 +60,13 @@ val activeExcludedStates: Set<String> = setOf("Accepted", "Completed", "Idea")
  * type, which has no Iteration, so Rally may reject this traversal too.
  * Pure and top-level so it is unit-testable.
  */
+/**
+ * "My Tickets" filters on the configured Username; with none it would silently show everyone's
+ * tickets under a "My Tickets" label. The tool window shows a "set your Username" state instead.
+ */
+internal fun myTicketsWithoutUsername(scope: String?, username: String): Boolean =
+    Scope.fromDisplay(scope) == Scope.MY_TICKETS && username.isBlank()
+
 internal fun buildTicketQuery(scope: String?, selectedIter: String, username: String): String? {
     val conditions = mutableListOf<String>()
 

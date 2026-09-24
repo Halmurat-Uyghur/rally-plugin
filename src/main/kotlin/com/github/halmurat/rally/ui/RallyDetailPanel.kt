@@ -37,7 +37,6 @@ import java.util.concurrent.CompletableFuture
 import java.util.concurrent.ExecutorService
 import java.util.concurrent.Executors
 import java.util.concurrent.atomic.AtomicLong
-import java.util.regex.Pattern
 import javax.swing.*
 
 class RallyDetailPanel(private val project: Project) : com.intellij.openapi.Disposable {
@@ -71,13 +70,6 @@ class RallyDetailPanel(private val project: Project) : com.intellij.openapi.Disp
             "<span class='rally-error'><b>Couldn't load the description.</b></span> " +
             "<a href='$RETRY_HREF'>Retry</a> (details are in idea.log)"
 
-        // Colors are defined in RallyColors object
-        // Matches external src attributes (double- or single-quoted, protocol-relative included)
-        // so JTextPane doesn't fetch them over the network before we neutralize the description.
-        private val EXTERNAL_SRC_PATTERN = Pattern.compile(
-            """src\s*=\s*(["'])(?:https?:)?//[^"']*\1""",
-            Pattern.CASE_INSENSITIVE
-        )
 
         fun formatFileSize(bytes: Long?): String {
             if (bytes == null || bytes <= 0) return ""
@@ -101,6 +93,9 @@ class RallyDetailPanel(private val project: Project) : com.intellij.openapi.Disp
     }
     private val descriptionPane = JTextPane().apply {
         contentType = "text/html"
+        // Belt and braces with neutralizeActiveContent: a <form> that slipped through must
+        // never submit (HTMLEditorKit's default loads the action URL into this pane).
+        (editorKit as? javax.swing.text.html.HTMLEditorKit)?.isAutoFormSubmission = false
         isEditable = false
         border = JBUI.Borders.empty(4)
         addHyperlinkListener { e ->
@@ -1112,14 +1107,15 @@ class RallyDetailPanel(private val project: Project) : com.intellij.openapi.Disp
         // RallyHtmlUtils.stripInlineColors). Done before the src neutralizer — they
         // target disjoint attributes, so order is irrelevant.
         val decolored = RallyHtmlUtils.stripInlineColors(safe)
-        // Neutralize external http(s):// (and protocol-relative) image src attributes so
-        // JTextPane never makes an off-host network fetch when rendering a Rally-authored
-        // description (tracking pixels / SSRF-style leaks). This is the single chokepoint:
+        // Remove what JTextPane would act on rather than draw (forms, <base>, <object>,
+        // frames) and blank every non-data: image source and CSS url(), so rendering a
+        // Rally-authored description never contacts another host (tracking pixels, form
+        // submission, off-host fetches via an injected <base>). This is the single chokepoint:
         // every non-empty descriptionPane.text assignment goes through wrapHtml, including the early
         // "description already loaded" path and descriptions with only external images
         // (which skip resolveInlineImages' own pass). data:…;base64 URIs produced by
-        // resolveInlineImages are left intact — the pattern only matches http(s):// or //.
-        val neutralized = EXTERNAL_SRC_PATTERN.matcher(decolored).replaceAll("src=\"\"")
+        // resolveInlineImages are left intact.
+        val neutralized = RallyHtmlUtils.neutralizeActiveContent(decolored)
         // Pin text + link colors to the current IDE theme. With inline colors stripped
         // above, the body color cascades to every span, so the description renders in one
         // consistent, readable color on the pane's theme background (and adapts to a Light

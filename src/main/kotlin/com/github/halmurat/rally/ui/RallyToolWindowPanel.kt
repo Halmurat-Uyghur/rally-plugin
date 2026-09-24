@@ -259,11 +259,40 @@ class RallyToolWindowPanel(private val project: Project) : Disposable {
         }
     }
 
+    /**
+     * A load that stops before querying leaves the lists as they were: undo refreshAll()'s
+     * disable so the dropdowns don't stay greyed out. forceListReload stays set, so the next
+     * real load still re-queries them.
+     */
+    private fun reenableLoadedLists() {
+        if (projectsLoaded) projectCombo.isEnabled = true
+        if (iterationsLoaded) iterationCombo.isEnabled = true
+    }
+
     private fun showNotConfigured() {
+        reenableLoadedLists()
         lastLoadSucceeded = false
         statusLabel.icon = AllIcons.General.Error
         statusLabel.text = "Not configured"
         val placeholder = "Configure Rally in Settings → Tools → Rally"
+        loadFailurePlaceholder = placeholder
+        artifactList.emptyText.text = placeholder
+    }
+
+    /**
+     * "My Tickets" with no Username in Settings: show an empty list that says why, rather than
+     * everyone's tickets. Marked as a failed load so a State change retries (and re-checks).
+     */
+    private fun showUsernameNeeded() {
+        reenableLoadedLists()
+        lastLoadSucceeded = false
+        allArtifacts = emptyList()
+        detailPanel.clear()
+        updateListModel(emptyList())
+        updateStats(emptyList())
+        statusLabel.icon = AllIcons.General.Warning
+        statusLabel.text = "Username not set"
+        val placeholder = "My Tickets needs your Rally Username — set it in Settings → Tools → Rally"
         loadFailurePlaceholder = placeholder
         artifactList.emptyText.text = placeholder
     }
@@ -617,6 +646,10 @@ class RallyToolWindowPanel(private val project: Project) : Disposable {
     // ── Data Loading ─────────────────────────────────────────────
 
     fun loadTickets() {
+        // Scope/settings changes supersede any server search, even when this load stops
+        // early (for example, My Tickets without a Username) or queues behind another load.
+        ++searchGeneration
+        activeServerSearch = null
         val settings = RallySettings.getInstance()
         if (!settings.isConfiguredOrLoading()) {
             showNotConfigured()
@@ -627,13 +660,18 @@ class RallyToolWindowPanel(private val project: Project) : Disposable {
             pendingReload = true
             return
         }
+
+        // Capture all UI state on the EDT before dispatching to background thread
+        val scope = scopeCombo.selectedItem as? String ?: "My Tickets"
+        if (myTicketsWithoutUsername(scope, settings.username)) {
+            showUsernameNeeded()
+            return
+        }
+
         loading = true
         pendingReload = false
         clearStatusIcon()
         statusLabel.text = "Loading..."
-
-        // Capture all UI state on the EDT before dispatching to background thread
-        val scope = scopeCombo.selectedItem as? String ?: "My Tickets"
         val pageSize = if (Scope.fromDisplay(scope) == Scope.RECENT_ACTIVITY) 20 else settings.pageSize
 
         ApplicationManager.getApplication().executeOnPooledThread {
@@ -808,13 +846,7 @@ class RallyToolWindowPanel(private val project: Project) : Disposable {
                     } else {
                         statusLabel.icon = AllIcons.General.Error
                         val cause = if (e is java.util.concurrent.ExecutionException) e.cause ?: e else e
-                        val errorMsg = when {
-                            cause.message?.contains("401") == true || cause.message?.contains("403") == true -> "Auth error"
-                            cause.message?.contains("429") == true -> "Rate limited"
-                            cause is java.net.ConnectException || cause is java.net.UnknownHostException -> "Network error"
-                            cause.message?.contains("timeout", ignoreCase = true) == true -> "Timeout"
-                            else -> "Error"
-                        }
+                        val errorMsg = loadErrorLabel(cause)
                         statusLabel.text = errorMsg
                         val placeholder = "$errorMsg: ${cause.message}"
                         loadFailurePlaceholder = placeholder
@@ -1185,8 +1217,11 @@ class RallyToolWindowPanel(private val project: Project) : Disposable {
         updateStats(filtered)
         if (filtered.isEmpty()) updateEmptyText()
 
-        // Server-side fallback: fire when client-side returns 0 results and query >= 3 chars
-        if (filtered.isEmpty() && query.length >= 3) {
+        // Server-side fallback: fire when client-side returns 0 results and query >= 3 chars.
+        // Not for My Tickets without a Username: the search couldn't filter by owner.
+        val searchScope = scopeCombo.selectedItem as? String
+        if (filtered.isEmpty() && query.length >= 3 &&
+            !myTicketsWithoutUsername(searchScope, RallySettings.getInstance().username)) {
             activeServerSearch = query
             statusLabel.text = "Searching Rally..."
             val scope = scopeCombo.selectedItem as? String ?: "All Tickets"
@@ -2041,7 +2076,12 @@ class RallyToolWindowPanel(private val project: Project) : Disposable {
         synchronized(clientLock) {
             disposed = true
             currentClient?.clearCache()
-            currentClient?.apiExecutor?.shutdownNow()
+            // shutdown(), not shutdownNow(): shutdownNow() drops queued supplyAsync tasks, so
+            // their futures never complete and the pooled threads join()ing/get()ting them
+            // (loadTickets, changeState, queryAllArtifactsParallel) park forever, pinning the
+            // closed Project. Running requests are bounded by the HTTP timeouts, and the
+            // disposed flag keeps their results off the UI.
+            currentClient?.apiExecutor?.shutdown()
             currentClient = null
         }
         searchDebounceTimer.stop()

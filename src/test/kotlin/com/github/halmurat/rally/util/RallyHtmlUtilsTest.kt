@@ -4,6 +4,11 @@ import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
 import org.junit.Assert.assertTrue
 import org.junit.Test
+import java.io.StringReader
+import javax.swing.text.MutableAttributeSet
+import javax.swing.text.html.HTML
+import javax.swing.text.html.HTMLEditorKit
+import javax.swing.text.html.parser.ParserDelegator
 
 class RallyHtmlUtilsTest {
 
@@ -301,5 +306,86 @@ class RallyHtmlUtilsTest {
             """<img src="/slm/attachment/1/my">""",
             RallyHtmlUtils.stripInlineColors("""<img src="/slm/attachment/1/my color=red.png">""")
         )
+    }
+
+    // ── neutralizeActiveContent ──────────────────────────────────
+
+    @Test
+    fun `neutralizeActiveContent removes base, form controls and object tags but keeps their text`() {
+        val out = RallyHtmlUtils.neutralizeActiveContent(
+            """<base href="https://evil.example/"><form action="https://evil.example/x">Key: <input name="k"><button>Go</button></form>""" +
+                """<object classid="javax.swing.JEditorPane" text="x"><param name="a" value="b"></object><p>kept</p>"""
+        )
+        assertFalse(out, Regex("(?i)<(base|form|input|button|object|param)\\b").containsMatchIn(out))
+        assertTrue(out, out.contains("Key: "))
+        assertTrue(out, out.contains("<p>kept</p>"))
+    }
+
+    @Test
+    fun `neutralizeActiveContent drops script, select and textarea together with their content`() {
+        val out = RallyHtmlUtils.neutralizeActiveContent(
+            "a<script>alert(1)</script>b<select><option>opt</option></select>c<textarea>t</textarea>d"
+        )
+        assertEquals("abcd", out)
+    }
+
+    @Test
+    fun `neutralizeActiveContent blanks every non-data src and keeps data URIs`() {
+        assertEquals("""<img src="">""", RallyHtmlUtils.neutralizeActiveContent("""<img src="pixel.gif">"""))
+        assertEquals("""<img src="">""", RallyHtmlUtils.neutralizeActiveContent("""<img src='ftp://evil.example/p.png'>"""))
+        assertEquals("""<img src="" alt="x">""", RallyHtmlUtils.neutralizeActiveContent("""<img src=jar:https://evil.example/a!/x alt="x">"""))
+        assertEquals("", RallyHtmlUtils.neutralizeActiveContent("""<frame src="file:///etc/hosts">"""))
+        val data = """<img src="data:image/png;base64,iVBORw0KGgo=">"""
+        assertEquals(data, RallyHtmlUtils.neutralizeActiveContent(data))
+    }
+
+    @Test
+    fun `neutralizeActiveContent strips CSS url declarations and the background attribute`() {
+        assertEquals(
+            """<p style="font-weight:bold;">x</p>""",
+            RallyHtmlUtils.neutralizeActiveContent("""<p style="background: url(https://evil.example/p.png);font-weight:bold;">x</p>""")
+        )
+        assertEquals(
+            """<td>y</td>""",
+            RallyHtmlUtils.neutralizeActiveContent("""<td background="https://evil.example/bg.png">y</td>""")
+        )
+    }
+
+    @Test
+    fun `neutralizeActiveContent never alters visible text`() {
+        val text = "<p>Set src=\"http://x\" and background: url(a) in the form &lt;base&gt;</p>"
+        assertEquals(text, RallyHtmlUtils.neutralizeActiveContent(text))
+    }
+
+    @Test
+    fun `quoted angle brackets cannot hide an external image source from sanitizing`() {
+        for (html in listOf(
+            """<img alt=">" src="https://example.invalid/tracker.png">""",
+            """<img alt='>' src='//example.invalid/tracker.png'>""",
+        )) {
+            val sanitized = RallyHtmlUtils.neutralizeActiveContent(RallyHtmlUtils.stripInlineColors(html))
+            val sources = mutableListOf<String?>()
+            ParserDelegator().parse(StringReader(sanitized), object : HTMLEditorKit.ParserCallback() {
+                override fun handleSimpleTag(tag: HTML.Tag, attributes: MutableAttributeSet, position: Int) {
+                    if (tag == HTML.Tag.IMG) sources.add(attributes.getAttribute(HTML.Attribute.SRC) as? String)
+                }
+            }, true)
+            assertEquals(sanitized, listOf(""), sources)
+        }
+    }
+
+    @Test
+    fun `quoted angle brackets cannot hide background images or author colors`() {
+        val html = """<p title=">" background="https://example.invalid/bg.png" style="background-image:url(https://example.invalid/css.png);color:red;font-weight:bold;">kept</p>"""
+        assertEquals(
+            """<p title=">" style="font-weight:bold;">kept</p>""",
+            RallyHtmlUtils.neutralizeActiveContent(RallyHtmlUtils.stripInlineColors(html)),
+        )
+    }
+
+    @Test
+    fun `quoted angle brackets preserve resolved inline images and visible text`() {
+        val html = """<p>one &gt; zero</p><img alt=">" src="data:image/png;base64,iVBORw0KGgo=">"""
+        assertEquals(html, RallyHtmlUtils.neutralizeActiveContent(RallyHtmlUtils.stripInlineColors(html)))
     }
 }

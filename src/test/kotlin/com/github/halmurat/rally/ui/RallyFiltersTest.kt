@@ -78,4 +78,14 @@ class RallyFiltersTest {
         val b = RallyUserStory(ref = "r/2")
         assertArrayEquals(intArrayOf(1), selectionIndicesByRef(listOf(a, b), setOf("r/2")))
     }
+
+    // ── myTicketsWithoutUsername ─────────────────────────────────
+
+    @Test
+    fun `My Tickets needs a Username, other scopes don't`() {
+        assertEquals(true, myTicketsWithoutUsername("My Tickets", ""))
+        assertEquals(true, myTicketsWithoutUsername("My Tickets", "   "))
+        assertEquals(false, myTicketsWithoutUsername("My Tickets", "me@example.com"))
+        assertEquals(false, myTicketsWithoutUsername("All Tickets", ""))
+    }
 }

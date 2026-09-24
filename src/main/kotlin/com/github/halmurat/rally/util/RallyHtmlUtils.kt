@@ -43,13 +43,11 @@ object RallyHtmlUtils {
     }
 
     /**
-     * Matches a single HTML tag. Pragmatic — assumes '>' does not appear inside an
-     * attribute value (the same assumption [INLINE_IMG_PATTERN] / the external-src
-     * neutralizer make). We scope all color stripping to tag interiors so we never
-     * mangle visible text content (e.g. a description that literally says
-     * "favorite color: blue") or base64 `data:` image src values.
+     * Match the complete tag, including '>' inside quoted attribute values. Otherwise an
+     * alt/title value can hide later src/style attributes from the per-tag sanitizers.
+     * Possessive runs keep long tags and inline data URIs from causing backtracking.
      */
-    private val TAG_PATTERN = Regex("""<[^>]+>""")
+    private val TAG_PATTERN = Regex("""<(?:[^"'<>]++|"[^"]*"|'[^']*')++>""")
 
     /**
      * A `color:` or `background-color:` declaration inside a style attribute value.
@@ -121,6 +119,57 @@ object RallyHtmlUtils {
                 "style=$quote$body$quote"
             }
             tag
+        }
+    }
+
+    /**
+     * Elements whose content must go with them: Swing renders `<select>`/`<textarea>` as live
+     * form controls, and `<script>` text would otherwise show up as description text.
+     */
+    private val ACTIVE_ELEMENT_WITH_CONTENT =
+        Regex("""(?is)<(script|select|textarea|object|applet|iframe|frameset)\b[^>]*>.*?</\1\s*>""")
+
+    /**
+     * Tags Swing's HTMLEditorKit acts on rather than just draws: `<base>` re-bases every relative
+     * URL onto another host, `<form>` + `<input>` submit to their `action` URL
+     * (FormView → setPage), `<object>` instantiates an arbitrary Swing component with
+     * attribute-supplied properties, `<frame>` loads a nested page, `<meta>` can carry an
+     * http-equiv. Opening and closing tags both go; the text between stays.
+     */
+    private val ACTIVE_TAG = Regex(
+        """(?i)</?(?:base|meta|form|input|button|select|option|textarea|object|param|applet|embed|iframe|frame|frameset|script)\b[^>]*>"""
+    )
+
+    /** An `src` attribute whose value isn't a `data:` URI (quoted or unquoted). */
+    private val NON_DATA_SRC =
+        Regex("""(?i)(\ssrc\s*=\s*)(?:"(?!\s*data:)[^"]*"|'(?!\s*data:)[^']*'|(?!["'])(?!data:)[^\s>]+)""")
+
+    /** The legacy `background="img.png"` attribute on body/table/td, which Swing fetches. */
+    private val BACKGROUND_ATTR = Regex("""(?i)\sbackground\s*=\s*(?:"[^"]*"|'[^']*'|[^\s>"']+)""")
+
+    /** A CSS declaration carrying a `url(...)` (background, background-image, list-style…). */
+    private val STYLE_URL_DECL = Regex("""(?i)[\w-]+\s*:[^;]*url\s*\([^;]*;?""")
+
+    /**
+     * Make a Rally-authored description safe to render in the detail panel's JTextPane, so the
+     * pane never contacts another host or runs anything: active tags are removed, every
+     * non-`data:` image source is blanked (resolveInlineImages has already turned the Rally
+     * images it could fetch into `data:` URIs; anything left would load off-host, or relative
+     * to an injected base), and CSS/attribute image URLs are dropped. Descriptions are
+     * authored by any Rally user who can edit the ticket, so this is an allow-by-omission
+     * pass over the few things Swing's HTML kit acts on. Scoped to tag interiors (plus the
+     * elements dropped whole) so visible text is never altered.
+     */
+    fun neutralizeActiveContent(html: String): String {
+        if (html.isEmpty()) return html
+        val noActiveElements = ACTIVE_TAG.replace(ACTIVE_ELEMENT_WITH_CONTENT.replace(html, ""), "")
+        return TAG_PATTERN.replace(noActiveElements) { tagMatch ->
+            var tag = NON_DATA_SRC.replace(tagMatch.value) { "${it.groupValues[1]}\"\"" }
+            tag = BACKGROUND_ATTR.replace(tag, "")
+            STYLE_ATTR.replace(tag) { styleMatch ->
+                val quote = styleMatch.groupValues[1]
+                "style=$quote${STYLE_URL_DECL.replace(styleMatch.groupValues[2], "")}$quote"
+            }
         }
     }
 }

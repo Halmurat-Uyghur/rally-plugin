@@ -109,5 +109,9 @@ tasks {
 
     withType<org.jetbrains.kotlin.gradle.tasks.KotlinCompile> {
         compilerOptions.jvmTarget.set(org.jetbrains.kotlin.gradle.dsl.JvmTarget.JVM_17)
+        // The plugin runs on the IDE's bundled Kotlin stdlib (not bundled here), which is
+        // 1.9.x on 2024.1/2024.2 (the sinceBuild floor). Pin the API level so a stdlib call
+        // added in 2.0 fails to compile instead of throwing NoSuchMethodError on those IDEs.
+        compilerOptions.apiVersion.set(org.jetbrains.kotlin.gradle.dsl.KotlinVersion.KOTLIN_1_9)
     }
 }
