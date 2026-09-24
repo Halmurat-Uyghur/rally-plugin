@@ -12,6 +12,7 @@ import com.intellij.ui.components.JBScrollPane
 import com.intellij.ui.components.JBTextArea
 import com.intellij.ui.components.JBTextField
 import com.intellij.util.ui.JBUI
+import org.jetbrains.annotations.TestOnly
 import java.awt.BorderLayout
 import java.io.File
 import javax.swing.JButton
@@ -42,8 +43,9 @@ abstract class AbstractCreateArtifactDialog(
     private val owningProject: Project = project
 
     protected val nameField = JBTextField()
-    protected val projectCombo = ComboBox<String>()
-    protected val iterationCombo = ComboBox<String>()
+    // Rally-controlled names: shown as plain text, never as live HTML (see rallyNameCombo).
+    protected val projectCombo = rallyNameCombo()
+    protected val iterationCombo = rallyNameCombo()
     protected val assignToMeCheckbox = javax.swing.JCheckBox("Assign to me")
     protected val descriptionArea = JBTextArea(5, 40)
     protected val attachmentPathField = JBTextField()
@@ -221,4 +223,8 @@ abstract class AbstractCreateArtifactDialog(
     val assignToMe: Boolean get() = assignToMeCheckbox.isSelected
 
     val attachment: File? get() = attachmentFile
+
+    /** The Project and Sprint dropdowns, for a test of how they render Rally-controlled names. */
+    @TestOnly
+    internal fun nameCombosForTest(): List<ComboBox<String>> = listOf(projectCombo, iterationCombo)
 }

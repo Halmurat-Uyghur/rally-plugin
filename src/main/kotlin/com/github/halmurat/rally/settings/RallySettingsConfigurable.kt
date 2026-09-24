@@ -10,6 +10,7 @@ import com.intellij.openapi.ui.Messages
 import com.intellij.openapi.ui.TextFieldWithBrowseButton
 import com.github.halmurat.rally.api.RallyApiClient
 import com.github.halmurat.rally.api.RallyUserNotFoundException
+import com.github.halmurat.rally.util.literalHtmlMessage
 import com.intellij.ui.components.JBLabel
 import com.intellij.ui.components.JBTextField
 import com.intellij.util.ui.FormBuilder
@@ -281,54 +282,46 @@ class RallySettingsConfigurable : Configurable {
                     }
                 }, modality)
 
-                var workspaceProblem = false
-                val workspaceInfo = if (fieldWorkspace.isNotBlank()) {
+                val workspace = if (fieldWorkspace.isNotBlank()) {
                     try {
-                        "\n\nWorkspace: ${client.getWorkspaceName(fieldWorkspace)}"
+                        WorkspaceCheck.Found(client.getWorkspaceName(fieldWorkspace))
                     } catch (e: Exception) {
                         LOG.warn("Workspace check failed for '$fieldWorkspace'", e)
-                        workspaceProblem = true
-                        "\n\nWorkspace Ref '$fieldWorkspace' could not be read: ${e.message ?: e.javaClass.simpleName}\n" +
-                            "Check the Workspace Ref (the workspace's ObjectID), or leave it empty to use your default workspace."
+                        WorkspaceCheck.Unreadable(fieldWorkspace, e.message ?: e.javaClass.simpleName)
                     }
-                } else ""
+                } else null
 
                 // Check if a username is configured and validate it
-                val usernameInfo = if (workspaceProblem) {
-                    "" // the user lookup is workspace-scoped; it would only repeat the error
+                val username = if (workspace is WorkspaceCheck.Unreadable) {
+                    UsernameCheck.Skipped // the user lookup is workspace-scoped; it would only repeat the error
                 } else if (configuredUsername.isNotBlank()) {
                     try {
                         val configuredUser = client.getUserByUsername(configuredUsername)
-                        val name = configuredUser.displayName ?: configuredUser.refObjectName ?: "Unknown"
-                        "\n\nConfigured Username: $configuredUsername\nResolved to: $name (valid)"
+                        UsernameCheck.Resolved(configuredUsername, configuredUser.displayName ?: configuredUser.refObjectName ?: "Unknown")
                     } catch (_: RallyUserNotFoundException) {
-                        "\n\nConfigured Username: $configuredUsername\nWarning: no Rally user has this UserName — " +
-                            "'My Tickets' will be empty and tickets can't be assigned to you."
+                        UsernameCheck.NotFound(configuredUsername)
                     } catch (e: Exception) {
                         // Could be a genuine "no such user" OR a transient network/auth error.
                         // Don't assert the username is wrong — log the cause and word it neutrally.
                         LOG.warn("Username verification failed for '$configuredUsername'", e)
-                        "\n\nConfigured Username: $configuredUsername\nWarning: could not verify this UserName (lookup failed: ${e.message}). If it is correct, 'My Tickets' will still work."
+                        UsernameCheck.LookupFailed(configuredUsername, e.message)
                     }
                 } else {
-                    "\n\nUsername field is empty. Enter your Rally UserName (email) for 'My Tickets' filter."
+                    UsernameCheck.Blank
                 }
 
-                val summary = "API Key Owner: $apiKeyName ($apiKeyUserName)$workspaceInfo$usernameInfo"
+                val report = connectionTestReport(apiKeyName, apiKeyUserName, workspace, username)
                 ApplicationManager.getApplication().invokeLater({
-                    if (workspaceProblem) {
-                        Messages.showWarningDialog("Connected, but the workspace check failed.\n\n$summary", "Rally Connection")
+                    if (report.warning) {
+                        Messages.showWarningDialog(report.message, "Rally Connection")
                     } else {
-                        Messages.showInfoMessage("Connected successfully!\n\n$summary", "Rally Connection")
+                        Messages.showInfoMessage(report.message, "Rally Connection")
                     }
                 }, modality)
             } catch (e: Exception) {
                 LOG.warn("Rally test connection failed", e)
                 ApplicationManager.getApplication().invokeLater({
-                    Messages.showErrorDialog(
-                        "Connection failed: ${e.message}",
-                        "Rally Connection"
-                    )
+                    Messages.showErrorDialog(connectionFailedMessage(e), "Rally Connection")
                 }, modality)
             } finally {
                 client?.apiExecutor?.shutdownNow()
@@ -340,3 +333,66 @@ class RallySettingsConfigurable : Configurable {
         private val LOG = Logger.getInstance(RallySettingsConfigurable::class.java)
     }
 }
+
+/** What Test Connection found for the Workspace Ref (there is no check when the field is blank). */
+internal sealed class WorkspaceCheck {
+    data class Found(val name: String) : WorkspaceCheck()
+    data class Unreadable(val ref: String, val reason: String) : WorkspaceCheck()
+}
+
+/** What Test Connection found for the Username. */
+internal sealed class UsernameCheck {
+    /** No Username to check. */
+    object Blank : UsernameCheck()
+
+    /** Not looked up: the lookup is workspace-scoped, and the workspace check failed. */
+    object Skipped : UsernameCheck()
+    data class Resolved(val username: String, val name: String) : UsernameCheck()
+    data class NotFound(val username: String) : UsernameCheck()
+    data class LookupFailed(val username: String, val reason: String?) : UsernameCheck()
+}
+
+/** The Test Connection result dialog: a warning (the workspace check failed) or not, and its text. */
+internal data class ConnectionTestReport(val warning: Boolean, val message: String)
+
+/**
+ * The Test Connection result for the API key owner's [ownerName] and [ownerUserName] and what the
+ * checks found. IntelliJ renders Messages text as HTML (AlertDialog, with a live-link listener),
+ * and every value here comes from Rally or the server — DisplayNames, the workspace name, error
+ * text — so the text is built plain and shown literally ([literalHtmlMessage]): markup in a Rally
+ * name reads as written instead of rendering, or loading an `<img>` it names.
+ */
+internal fun connectionTestReport(
+    ownerName: String,
+    ownerUserName: String,
+    workspace: WorkspaceCheck?,
+    username: UsernameCheck,
+): ConnectionTestReport {
+    val workspaceInfo = when (workspace) {
+        null -> ""
+        is WorkspaceCheck.Found -> "\n\nWorkspace: ${workspace.name}"
+        is WorkspaceCheck.Unreadable ->
+            "\n\nWorkspace Ref '${workspace.ref}' could not be read: ${workspace.reason}\n" +
+                "Check the Workspace Ref (the workspace's ObjectID), or leave it empty to use your default workspace."
+    }
+    val usernameInfo = when (username) {
+        UsernameCheck.Skipped -> ""
+        UsernameCheck.Blank -> "\n\nUsername field is empty. Enter your Rally UserName (email) for 'My Tickets' filter."
+        is UsernameCheck.Resolved -> "\n\nConfigured Username: ${username.username}\nResolved to: ${username.name} (valid)"
+        is UsernameCheck.NotFound ->
+            "\n\nConfigured Username: ${username.username}\nWarning: no Rally user has this UserName — " +
+                "'My Tickets' will be empty and tickets can't be assigned to you."
+        is UsernameCheck.LookupFailed ->
+            "\n\nConfigured Username: ${username.username}\nWarning: could not verify this UserName " +
+                "(lookup failed: ${username.reason}). If it is correct, 'My Tickets' will still work."
+    }
+    val warning = workspace is WorkspaceCheck.Unreadable
+    val headline = if (warning) "Connected, but the workspace check failed." else "Connected successfully!"
+    return ConnectionTestReport(
+        warning,
+        literalHtmlMessage("$headline\n\nAPI Key Owner: $ownerName ($ownerUserName)$workspaceInfo$usernameInfo")
+    )
+}
+
+/** The Test Connection error dialog's text for [e]: server text, shown literally like [connectionTestReport]'s. */
+internal fun connectionFailedMessage(e: Exception): String = literalHtmlMessage("Connection failed: ${e.message}")

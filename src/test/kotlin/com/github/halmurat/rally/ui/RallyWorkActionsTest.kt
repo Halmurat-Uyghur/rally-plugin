@@ -58,6 +58,23 @@ class RallyWorkActionsTest {
     }
 
     @Test
+    fun `a failed state change names the tickets that didn't move`() {
+        assertEquals(
+            "Updated: 1, Failed: 2\nFailed to move: US2, DE3",
+            stateChangeFailureMessage(1, listOf("US2", "DE3"))
+        )
+    }
+
+    @Test
+    fun `a failed state change lists at most ten tickets`() {
+        val ids = (1..12).map { "US$it" }
+        assertEquals(
+            "Updated: 0, Failed: 12\nFailed to move: ${ids.take(10).joinToString(", ")}, … and 2 more",
+            stateChangeFailureMessage(0, ids)
+        )
+    }
+
+    @Test
     fun `state change status mentions skipped test cases only when there are some`() {
         assertEquals("Updated 3", stateChangeStatus(3, 0))
         assertEquals("Updated 1 (1 test case skipped)", stateChangeStatus(1, 1))
@@ -179,6 +196,59 @@ class RallyWorkActionsTest {
         assertEquals(
             StartWorkingOutcome(null, "Working on US1 (owner unchanged — no Username in Settings)"),
             startWorkingOutcome("US1", "b", true, emptyList(), "owner unchanged — no Username in Settings")
+        )
+    }
+
+    // ── createBlockedByConnectionChange ──────────────────────────
+
+    @Test
+    fun `a create picked from lists of the same connection goes ahead`() {
+        assertFalse(createBlockedByConnectionChange(3, 3, "p/1", "i/1"))
+    }
+
+    @Test
+    fun `a project or sprint picked before the connection changed blocks the create`() {
+        assertTrue(createBlockedByConnectionChange(3, 4, "p/1", "i/1"))
+        assertTrue(createBlockedByConnectionChange(3, 4, "p/1", null))
+        assertTrue(createBlockedByConnectionChange(3, 4, null, "i/1"))
+    }
+
+    @Test
+    fun `a create that names no project or sprint has nothing stale to send`() {
+        assertFalse(createBlockedByConnectionChange(3, 4, null, null))
+    }
+
+    @Test
+    fun `the blocked-create message says nothing was created and what to do`() {
+        assertTrue(CREATE_CONNECTION_CHANGED_MESSAGE.contains("Nothing was created"))
+        assertTrue(CREATE_CONNECTION_CHANGED_MESSAGE.contains("reopen Create"))
+    }
+
+    // ── Create balloons (HTML) ───────────────────────────────────
+
+    @Test
+    fun `the created balloon shows the FormattedID and any warning`() {
+        assertEquals("Created US100", createdBalloonHtml("US100", null))
+        assertEquals(
+            "Created US100 (couldn't resolve user — created without owner)",
+            createdBalloonHtml("US100", "couldn't resolve user — created without owner")
+        )
+    }
+
+    @Test
+    fun `the created balloon escapes a FormattedID with markup`() {
+        assertEquals(
+            "Created US1&lt;img src=http://x/y.png&gt; &amp; co",
+            createdBalloonHtml("US1<img src=http://x/y.png> & co", null)
+        )
+    }
+
+    @Test
+    fun `the upload-failed balloon escapes the FormattedID and the error but keeps its line break`() {
+        assertEquals(
+            "Created US1&lt;b&gt;, but attachment upload failed: &lt;img src=x&gt; denied<br>" +
+                "You can re-attach the file in the Rally web UI.",
+            uploadFailedBalloonHtml("US1<b>", "<img src=x> denied")
         )
     }
 

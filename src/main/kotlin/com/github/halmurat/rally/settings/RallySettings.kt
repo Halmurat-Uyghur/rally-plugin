@@ -10,6 +10,7 @@ import com.intellij.openapi.components.State
 import com.intellij.openapi.components.Storage
 import com.intellij.openapi.diagnostic.ControlFlowException
 import com.intellij.openapi.diagnostic.Logger
+import org.jetbrains.annotations.TestOnly
 
 @State(
     // Opaque persistence key written into RallyPlugin.xml as <component name="…">. The IDE uses
@@ -199,6 +200,33 @@ class RallySettings : PersistentStateComponent<RallySettings.State> {
         if (myState.serverUrl.isBlank()) return false
         val key = cachedApiKey ?: return true   // null = load still in flight
         return key.isNotBlank()
+    }
+
+    /**
+     * The API-key load state as [saveApiKeyState] captures it. Test-only: the settings are
+     * application-level, so a test that publishes a key or simulates a slow keychain puts the
+     * state back afterwards instead of leaving it to the tests that run after it.
+     */
+    internal class ApiKeyState(val key: String?, val loaded: Boolean, val loadFailed: Boolean) {
+        companion object {
+            /** A PasswordSafe read still in flight (a slow keychain). */
+            val LOADING = ApiKeyState(null, loaded = false, loadFailed = false)
+        }
+    }
+
+    @TestOnly
+    internal fun saveApiKeyState(): ApiKeyState =
+        synchronized(apiKeyReady) { ApiKeyState(cachedApiKey, apiKeyLoaded, apiKeyLoadFailed) }
+
+    /** Put back a [saveApiKeyState] snapshot (or [ApiKeyState.LOADING]); waiters re-check it. */
+    @TestOnly
+    internal fun restoreApiKeyState(state: ApiKeyState) {
+        synchronized(apiKeyReady) {
+            cachedApiKey = state.key
+            apiKeyLoaded = state.loaded
+            apiKeyLoadFailed = state.loadFailed
+            apiKeyReady.notifyAll()
+        }
     }
 
     companion object {

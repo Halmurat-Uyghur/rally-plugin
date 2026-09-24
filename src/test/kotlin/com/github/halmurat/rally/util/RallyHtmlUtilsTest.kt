@@ -188,6 +188,17 @@ class RallyHtmlUtilsTest {
     }
 
     @Test
+    fun `stripInlineColors removes the text color attribute`() {
+        // Swing reads the HTML 3.2 text= attribute as a CSS color on any element, not just <body>.
+        assertEquals("<p>x</p>", RallyHtmlUtils.stripInlineColors("<p text=#000000>x</p>"))
+        assertEquals("<span>y</span>", RallyHtmlUtils.stripInlineColors("<span TEXT='black'>y</span>"))
+        assertEquals(
+            """<body lang="EN-US">z</body>""",
+            RallyHtmlUtils.stripInlineColors("""<body lang=EN-US text="#000000" bgcolor="#FFFFFF">z</body>"""),
+        )
+    }
+
+    @Test
     fun `stripInlineColors preserves border-color and background-image`() {
         val out = RallyHtmlUtils.stripInlineColors(
             """<div style="border-color:red;background-image:url(data:image/png;base64,AAAA);color:blue">d</div>"""
@@ -297,13 +308,12 @@ class RallyHtmlUtilsTest {
     }
 
     @Test
-    fun `stripInlineColors cannot unbalance a tag via an unquoted attribute value`() {
-        // Pathological: an attribute value containing " color=…". The unquoted-value
-        // branch must stop at a quote so it can't eat src's closing quote and unbalance
-        // the tag — the value fragment is sacrificed (documented pragmatism), but the
-        // tag stays well-formed.
+    fun `stripInlineColors leaves color text inside a quoted value alone`() {
+        // Pathological: an attribute value containing " color=…". The old regex pass read it as
+        // a color attribute and sacrificed that fragment of the src; the tokenizer knows the
+        // text is inside src's quoted value, so the tag comes back unchanged.
         assertEquals(
-            """<img src="/slm/attachment/1/my">""",
+            """<img src="/slm/attachment/1/my color=red.png">""",
             RallyHtmlUtils.stripInlineColors("""<img src="/slm/attachment/1/my color=red.png">""")
         )
     }
@@ -327,6 +337,23 @@ class RallyHtmlUtilsTest {
             "a<script>alert(1)</script>b<select><option>opt</option></select>c<textarea>t</textarea>d"
         )
         assertEquals("abcd", out)
+    }
+
+    @Test
+    fun `neutralizeActiveContent drops document and table section tags but keeps their content`() {
+        // The description sits inside the pane's own document shell, and Swing's parser recurses
+        // without bound on a table section tag outside a table.
+        assertEquals(
+            "<title>t</title><p>a</p><p>b</p>",
+            RallyHtmlUtils.neutralizeActiveContent("<HTML><head><title>t</title></head><body text=#000><p>a</p></body ></html\n><p>b</p>"),
+        )
+        assertEquals(
+            "<table><tr><th>h</th></tr><tr><td>d</td></tr><tr><td>f</td></tr></table><li>x</li>",
+            RallyHtmlUtils.neutralizeActiveContent(
+                "<table><thead><tr><th>h</th></tr></thead><tbody class=x><tr><td>d</td></tr></tbody>" +
+                    "<tfoot><tr><td>f</td></tr></tfoot></table><TBODY><li>x</li></tbody>"
+            ),
+        )
     }
 
     @Test

@@ -7,9 +7,10 @@ import com.github.halmurat.rally.api.RallyTestCase
 import com.github.halmurat.rally.api.RallyUser
 import com.github.halmurat.rally.api.RallyUserNotFoundException
 import com.github.halmurat.rally.api.RallyUserStory
+import com.github.halmurat.rally.util.escapeHtml
 
-// Decision logic behind the state-change and Start Working toolbar actions, kept out of the
-// Swing panel so it is unit-testable (same pattern as stateChangeAction in RallyLoadStatus.kt).
+// Decision logic behind the state-change, Start Working and Create toolbar actions, kept out of
+// the Swing panel so it is unit-testable (same pattern as stateChangeAction in RallyLoadStatus.kt).
 
 internal const val START_WORKING_TOOLTIP = "<html><b>Start working on the selected ticket</b><br>" +
     "1. Creates (or checks out) a git branch, e.g. <code>feature/US123</code> — you pick the prefix<br>" +
@@ -90,6 +91,16 @@ internal fun stateChangeStatus(updated: Int, skippedTestCases: Int): String =
     "Updated $updated" + if (skippedTestCases > 0) " (${pluralize(skippedTestCases, "test case")} skipped)" else ""
 
 /**
+ * The warning after a state change some tickets didn't make: which ones ([failedIds], their
+ * FormattedIDs, the first ten), so the user knows exactly what to revisit (MED-9). Plain text.
+ */
+internal fun stateChangeFailureMessage(updated: Int, failedIds: List<String>): String {
+    val shown = failedIds.take(10).joinToString(", ")
+    val suffix = if (failedIds.size > 10) ", … and ${failedIds.size - 10} more" else ""
+    return "Updated: $updated, Failed: ${failedIds.size}\nFailed to move: $shown$suffix"
+}
+
+/**
  * Outcome of Start Working's owner step. [error] is an unexpected skip worth a warning;
  * [note] is a skip the Start Working dialog already announced (blank Username), so it only
  * goes in the status bar.
@@ -156,6 +167,39 @@ internal fun startWorkingOutcome(
     }
     return StartWorkingOutcome(null, if (note != null) "Working on $ticketId ($note)" else "Working on $ticketId")
 }
+
+// The Create balloons are HTML (createHtmlTextBalloonBuilder renders its text as markup), so the
+// Rally FormattedID and the server's error text are escaped: markup in them would otherwise render
+// — and fetch any <img> it names — instead of reading as written.
+
+/** The balloon announcing a create, with the assign-to-me [assignWarning] if there was one. */
+internal fun createdBalloonHtml(createdId: String, assignWarning: String?): String =
+    escapeHtml("Created $createdId" + (assignWarning?.let { " ($it)" } ?: ""))
+
+/** The balloon after a create whose attachment upload then failed with [error]. */
+internal fun uploadFailedBalloonHtml(createdId: String, error: String): String =
+    "Created ${escapeHtml(createdId)}, but attachment upload failed: ${escapeHtml(error)}<br>" +
+        "You can re-attach the file in the Rally web UI."
+
+internal const val CREATE_CONNECTION_CHANGED_MESSAGE =
+    "The Rally connection (server, API key or workspace) changed while the Create dialog was open, " +
+        "so its project and sprint lists were out of date. Nothing was created — reopen Create and " +
+        "pick the project again."
+
+/**
+ * Whether a Create must be abandoned because the Rally connection changed after its dialog
+ * captured the project/sprint lists ([listsGenerationAtOpen] vs [listsGenerationNow], bumped
+ * whenever the client is rebuilt for new settings). A ref picked from those lists belongs to
+ * the previous connection, and the create POST carries no workspace of its own, so Rally would
+ * file the artifact under the old project or reject it. A create naming neither a project nor
+ * a sprint sends nothing stale.
+ */
+internal fun createBlockedByConnectionChange(
+    listsGenerationAtOpen: Long,
+    listsGenerationNow: Long,
+    projectRef: String?,
+    iterationRef: String?,
+): Boolean = listsGenerationAtOpen != listsGenerationNow && (projectRef != null || iterationRef != null)
 
 /**
  * Optimistic copy of an artifact with its state field updated — Stories and

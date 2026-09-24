@@ -67,6 +67,22 @@ val activeExcludedStates: Set<String> = setOf("Accepted", "Completed", "Idea")
 internal fun myTicketsWithoutUsername(scope: String?, username: String): Boolean =
     Scope.fromDisplay(scope) == Scope.MY_TICKETS && username.isBlank()
 
+/** What one loadTickets() run does — see [ticketLoadPlan]. */
+internal data class TicketLoadPlan(
+    /** Query Rally for the ticket list. */
+    val queryArtifacts: Boolean,
+)
+
+/**
+ * The Username guard skips only the ticket query ([myTicketsWithoutUsername]: an owner-less
+ * query would list everyone's tickets). Every run still reconciles the client with Settings and
+ * reloads the project/sprint lists as needed: Create and the sprint summary read those lists, so
+ * a load that returned before getClient() left the previous workspace's lists — and their refs —
+ * in place after a Settings change or project switch (audit F3).
+ */
+internal fun ticketLoadPlan(scope: String?, username: String): TicketLoadPlan =
+    TicketLoadPlan(queryArtifacts = !myTicketsWithoutUsername(scope, username))
+
 internal fun buildTicketQuery(scope: String?, selectedIter: String, username: String): String? {
     val conditions = mutableListOf<String>()
 

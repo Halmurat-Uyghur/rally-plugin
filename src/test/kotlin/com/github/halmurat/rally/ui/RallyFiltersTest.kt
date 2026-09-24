@@ -2,7 +2,9 @@ package com.github.halmurat.rally.ui
 
 import org.junit.Assert.assertArrayEquals
 import org.junit.Assert.assertEquals
+import org.junit.Assert.assertFalse
 import org.junit.Assert.assertNull
+import org.junit.Assert.assertTrue
 import org.junit.Test
 import com.github.halmurat.rally.api.RallyUserStory
 
@@ -87,5 +89,24 @@ class RallyFiltersTest {
         assertEquals(true, myTicketsWithoutUsername("My Tickets", "   "))
         assertEquals(false, myTicketsWithoutUsername("My Tickets", "me@example.com"))
         assertEquals(false, myTicketsWithoutUsername("All Tickets", ""))
+    }
+
+    // ── ticketLoadPlan ───────────────────────────────────────────
+
+    @Test
+    fun `My Tickets without a Username sends no ticket query`() {
+        // Without the owner filter it would list everyone's tickets. The load still reconciles the
+        // connection and the project/sprint lists (pinned in RallyToolWindowPanelTest).
+        assertFalse(ticketLoadPlan("My Tickets", "").queryArtifacts)
+        assertFalse(ticketLoadPlan("My Tickets", "   ").queryArtifacts)
+    }
+
+    @Test
+    fun `every other load queries tickets`() {
+        assertTrue(ticketLoadPlan("My Tickets", "me@example.com").queryArtifacts)
+        for (scope in Scope.entries.filter { it != Scope.MY_TICKETS }) {
+            assertTrue(scope.displayName, ticketLoadPlan(scope.displayName, "").queryArtifacts)
+        }
+        assertTrue(ticketLoadPlan(null, "").queryArtifacts)
     }
 }

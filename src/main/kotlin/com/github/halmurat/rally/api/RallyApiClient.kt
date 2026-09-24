@@ -997,7 +997,7 @@ class RallyApiClient(
                 .getNotificationGroup("Rally")
             group.createNotification(
                 "Rally — partial query failure",
-                "Some results couldn't be loaded:\n${errors.joinToString("\n")}",
+                partialFailureNotificationContent(errors),
                 com.intellij.notification.NotificationType.WARNING
             ).notify(null)
         } catch (e: Exception) {
@@ -1006,6 +1006,15 @@ class RallyApiClient(
             LOG.warn("Failed to dispatch partial-failure notification", e)
         }
     }
+
+    /**
+     * The partial-failure notification's content for the failure [errors], one per line.
+     * Notification content is HTML (the IDE builds it with HtmlChunk.raw) and the reasons carry
+     * server text, so they are escaped: markup in an error reads as written instead of rendering,
+     * or loading an `<img>` it names.
+     */
+    internal fun partialFailureNotificationContent(errors: List<String>): String =
+        "Some results couldn't be loaded:<br>" + errors.joinToString("<br>") { com.github.halmurat.rally.util.escapeHtml(it) }
 
     /**
      * Search artifacts server-side using Rally "contains" query.
