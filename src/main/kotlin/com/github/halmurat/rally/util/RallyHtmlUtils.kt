@@ -108,7 +108,8 @@ object RallyHtmlUtils {
      * and `<tfoot>` (content stays), which Swing's HTML 3.2 DTD doesn't define: outside a table,
      * followed by an `<li>`, `<caption>`, `<title>`, another section and a few more, they send
      * Swing's parser into unbounded recursion (a StackOverflowError on any stack), and inside one
-     * Swing lays the table out the same without them.
+     * Swing lays the table out the same without them. `<noscript>` tags go too (content stays):
+     * inside a `<dir>` or `<menu>` they can set off the same recursion.
      *
      * Defense in depth and display hygiene, not the network boundary: that is the detail pane's
      * fail-closed editor kit. This pass keeps descriptions from trying to reach another host in
@@ -167,6 +168,10 @@ object RallyHtmlUtils {
             // Unknown to Swing's DTD; outside a table they can send its parser into unbounded
             // recursion, and a table renders the same without them.
             "thead", "tbody", "tfoot",
+            // Inside a <dir> or <menu>, a <noscript> can send Swing's parser into unbounded
+            // recursion too (Parser.legalElementContext; reached by more element chains since
+            // JDK 21). Swing runs no scripts, so its content shows either way.
+            "noscript",
         ),
     ) { attribute ->
         when (attribute.name) {
@@ -403,14 +408,15 @@ object RallyHtmlUtils {
     private fun isActiveDeclaration(declaration: Declaration): Boolean {
         if (declaration.property in RESOURCE_PROPERTIES) return true
         val lower = declaration.text.lowercase()
-        // An unbalanced quote or parenthesis makes Swing's CSS parser throw inside
+        // An unbalanced quote, parenthesis or bracket makes Swing's CSS parser throw inside
         // JTextPane.setText, which cuts the description off.
         return RESOURCE_MARKERS.any { lower.contains(it) } || !isBalanced(declaration.text)
     }
 
+    /** Whether [css] closes its quotes and its `(`/`[` blocks in order, as Swing's CSS parser requires. */
     private fun isBalanced(css: String): Boolean {
         var quote = NO_QUOTE
-        var depth = 0
+        val open = StringBuilder() // the open blocks, innermost last
         for (c in css) {
             if (quote != NO_QUOTE) {
                 if (c == quote) quote = NO_QUOTE
@@ -418,11 +424,14 @@ object RallyHtmlUtils {
             }
             when (c) {
                 '"', '\'' -> quote = c
-                '(' -> depth++
-                ')' -> if (--depth < 0) return false
+                '(', '[' -> open.append(c)
+                ')', ']' -> {
+                    if (open.isEmpty() || open.last() != (if (c == ')') '(' else '[')) return false
+                    open.setLength(open.length - 1)
+                }
             }
         }
-        return quote == NO_QUOTE && depth == 0
+        return quote == NO_QUOTE && open.isEmpty()
     }
 
     /**
@@ -444,9 +453,9 @@ object RallyHtmlUtils {
     }
 
     /**
-     * Split a style value into declarations on `;` outside quotes and parentheses (so the `;` of
-     * `&quot;` or of `data:image/png;base64,…` doesn't split one), decoding entities first the
-     * way Swing's parser does before its CSS parser ever sees the value.
+     * Split a style value into declarations on `;` outside quotes, parentheses and brackets (so
+     * the `;` of `&quot;` or of `data:image/png;base64,…` doesn't split one), decoding entities
+     * first the way Swing's parser does before its CSS parser ever sees the value.
      */
     private fun splitDeclarations(css: String): List<Declaration> {
         val result = ArrayList<Declaration>(4)
@@ -472,8 +481,8 @@ object RallyHtmlUtils {
                 }
                 when (c) {
                     '"', '\'' -> quote = c
-                    '(' -> depth++
-                    ')' -> if (depth > 0) depth--
+                    '(', '[' -> depth++
+                    ')', ']' -> if (depth > 0) depth--
                     ';' -> if (depth == 0) boundary = true
                 }
             }
@@ -889,7 +898,8 @@ object RallyHtmlUtils {
                             inTagCommentEnd = afterComment(p + 2)
                             break@loop
                         }
-                        p++
+                        // A lone '-': Swing discards the character after it too, whatever it is.
+                        p = minOf(p + 2, n)
                     }
                     isAsciiLetter(c) -> p = attribute(p, attributes, quotedName = false)
                     c == '"'.code -> {

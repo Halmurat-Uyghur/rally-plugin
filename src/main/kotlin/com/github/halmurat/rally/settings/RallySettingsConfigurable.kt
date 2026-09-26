@@ -9,6 +9,8 @@ import com.intellij.openapi.options.Configurable
 import com.intellij.openapi.ui.Messages
 import com.intellij.openapi.ui.TextFieldWithBrowseButton
 import com.github.halmurat.rally.api.RallyApiClient
+import com.github.halmurat.rally.api.RallyApiException
+import com.github.halmurat.rally.api.RallyConnectionException
 import com.github.halmurat.rally.api.RallyUserNotFoundException
 import com.github.halmurat.rally.util.literalHtmlMessage
 import com.intellij.ui.components.JBLabel
@@ -287,13 +289,13 @@ class RallySettingsConfigurable : Configurable {
                         WorkspaceCheck.Found(client.getWorkspaceName(fieldWorkspace))
                     } catch (e: Exception) {
                         LOG.warn("Workspace check failed for '$fieldWorkspace'", e)
-                        WorkspaceCheck.Unreadable(fieldWorkspace, e.message ?: e.javaClass.simpleName)
+                        workspaceCheckFailure(fieldWorkspace, e)
                     }
                 } else null
 
                 // Check if a username is configured and validate it
-                val username = if (workspace is WorkspaceCheck.Unreadable) {
-                    UsernameCheck.Skipped // the user lookup is workspace-scoped; it would only repeat the error
+                val username = if (usernameLookupSkipped(workspace)) {
+                    UsernameCheck.Skipped
                 } else if (configuredUsername.isNotBlank()) {
                     try {
                         val configuredUser = client.getUserByUsername(configuredUsername)
@@ -337,15 +339,42 @@ class RallySettingsConfigurable : Configurable {
 /** What Test Connection found for the Workspace Ref (there is no check when the field is blank). */
 internal sealed class WorkspaceCheck {
     data class Found(val name: String) : WorkspaceCheck()
+
+    /** Rally can't read a workspace for this ref: mistyped, no access, or not a ref at all. */
     data class Unreadable(val ref: String, val reason: String) : WorkspaceCheck()
+
+    /** The read itself failed (connection, 429/5xx after the retries, not Rally JSON): says nothing about the ref. */
+    data class LookupFailed(val ref: String, val reason: String) : WorkspaceCheck()
 }
+
+/**
+ * The [WorkspaceCheck] for a failed `getWorkspaceName` of [ref]. Only Rally's answer about the ref
+ * makes it the ref's fault ([WorkspaceCheck.Unreadable]): 400-404, a 200-with-Errors body or a
+ * missing Workspace object (no status), a malformed ref (`RallySecurityException`). Anything else —
+ * a failed connection, 429/5xx after the retries, a proxy challenge, a reply that isn't Rally JSON —
+ * is a [WorkspaceCheck.LookupFailed]: telling the user to fix or blank a correct ref over a Rally
+ * hiccup would send them to another workspace.
+ */
+internal fun workspaceCheckFailure(ref: String, e: Exception): WorkspaceCheck {
+    val reason = e.message ?: e.javaClass.simpleName
+    val status = (e as? RallyApiException)?.statusCode
+    val refsFault = e is RallyApiException && e !is RallyConnectionException && (status == null || status in 400..404)
+    return if (refsFault) WorkspaceCheck.Unreadable(ref, reason) else WorkspaceCheck.LookupFailed(ref, reason)
+}
+
+/**
+ * The Username lookup is workspace-scoped: for an [WorkspaceCheck.Unreadable] ref it would only
+ * repeat the error. After a [WorkspaceCheck.LookupFailed] it still runs: the outage may be over,
+ * and if not the lookup reports its own neutral failure.
+ */
+internal fun usernameLookupSkipped(workspace: WorkspaceCheck?): Boolean = workspace is WorkspaceCheck.Unreadable
 
 /** What Test Connection found for the Username. */
 internal sealed class UsernameCheck {
     /** No Username to check. */
     object Blank : UsernameCheck()
 
-    /** Not looked up: the lookup is workspace-scoped, and the workspace check failed. */
+    /** Not looked up: the lookup is workspace-scoped, and the Workspace Ref is [WorkspaceCheck.Unreadable]. */
     object Skipped : UsernameCheck()
     data class Resolved(val username: String, val name: String) : UsernameCheck()
     data class NotFound(val username: String) : UsernameCheck()
@@ -374,6 +403,9 @@ internal fun connectionTestReport(
         is WorkspaceCheck.Unreadable ->
             "\n\nWorkspace Ref '${workspace.ref}' could not be read: ${workspace.reason}\n" +
                 "Check the Workspace Ref (the workspace's ObjectID), or leave it empty to use your default workspace."
+        is WorkspaceCheck.LookupFailed ->
+            "\n\nWorkspace Ref '${workspace.ref}' could not be verified (lookup failed: ${workspace.reason}). " +
+                "If it is correct, loads will still work — try Test Connection again."
     }
     val usernameInfo = when (username) {
         UsernameCheck.Skipped -> ""
@@ -386,7 +418,7 @@ internal fun connectionTestReport(
             "\n\nConfigured Username: ${username.username}\nWarning: could not verify this UserName " +
                 "(lookup failed: ${username.reason}). If it is correct, 'My Tickets' will still work."
     }
-    val warning = workspace is WorkspaceCheck.Unreadable
+    val warning = workspace is WorkspaceCheck.Unreadable || workspace is WorkspaceCheck.LookupFailed
     val headline = if (warning) "Connected, but the workspace check failed." else "Connected successfully!"
     return ConnectionTestReport(
         warning,

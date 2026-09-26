@@ -41,6 +41,8 @@ class RallyToolWindowPanelTest : BasePlatformTestCase() {
     private var holdWorkspaceBLists: CountDownLatch? = null
     /** Answers B's project list with Rally's HTTP-200-with-Errors instead. */
     private var failWorkspaceBProjects = false
+    /** Holds A-Team's sprint list back. */
+    private var holdATeamSprints: CountDownLatch? = null
     /** Holds A-Other's sprint list back. */
     private var holdAOtherSprints: CountDownLatch? = null
     /** Answers A-Other's sprint list with Rally's HTTP-200-with-Errors instead. */
@@ -98,6 +100,7 @@ class RallyToolWindowPanelTest : BasePlatformTestCase() {
             holdWorkspaceBCurrentSprint?.countDown()
             currentSprintHolds.values.forEach { it.countDown() }
             holdWorkspaceAProjects?.countDown()
+            holdATeamSprints?.countDown()
             holdAOtherSprints?.countDown()
             TestDialogManager.setTestDialog(savedTestDialog ?: TestDialog.DEFAULT)
             settings.state.serverUrl = savedState.serverUrl
@@ -182,7 +185,7 @@ class RallyToolWindowPanelTest : BasePlatformTestCase() {
         assertEquals(emptyList<URI>(), ticketQueries())
     }
 
-    // ── B2: a project switch whose sprint reload is slow or fails ─
+    // ── B2: a sprint reload that is slow or fails ────────────────
 
     fun testCreateOffersNoSprintsWhileAProjectSwitchReloadsThem() {
         settings.state.selectedProject = "A-Team"
@@ -200,6 +203,23 @@ class RallyToolWindowPanelTest : BasePlatformTestCase() {
         assertNull(midReload.iterationRef)
         assertTrue(waitUntil { hooks.idle })
         assertEquals("A-Other's sprints once loaded", listOf(ref("iteration", 6001)), hooks.createDialogInputs().iterations.map { it.ref })
+    }
+
+    fun testCreateOffersTheProjectsSprintsWhileARefreshRequeriesThem() {
+        settings.state.selectedProject = "A-Team"
+        settings.state.selectedIteration = "Sprint 1"
+        val hooks = loadedPanel()
+        rally.clearRequests()
+        val hold = CountDownLatch(1).also { holdATeamSprints = it }
+
+        hooks.refresh()
+        assertTrue(waitUntil { sprintListQueries().any { FakeRallyServer.queryParam(it, "project") == ref("project", 1001) } })
+        val midRefresh = hooks.createDialogInputs()   // Create opens while the same project's sprints re-query
+        hold.countDown()
+
+        assertEquals("A-Team's sprints while they re-query", listOf(ref("iteration", 5001)), midRefresh.iterations.map { it.ref })
+        assertEquals("the toolbar sprint is still pre-selected", ref("iteration", 5001), midRefresh.iterationRef)
+        assertTrue(waitUntil { hooks.idle })
     }
 
     fun testFailedSprintReloadAfterAProjectSwitchStopsFilteringByTheOldProjectsSprint() {
@@ -332,7 +352,11 @@ class RallyToolWindowPanelTest : BasePlatformTestCase() {
             hold.countDown()
             // The ticket query follows the serial project load, so the list is in by then.
             assertTrue(waitUntil { ticketQueries().isNotEmpty() })
-            assertFalse("the dropdown waits for the dialog to close", hooks.idle)
+            assertEquals(
+                "the list is in cachedProjects", setOf(ref("project", 1001), ref("project", 1002)),
+                hooks.createDialogInputs().projects.map { it.ref }.toSet()
+            )
+            assertFalse("the dropdown waits for the dialog to close", "A-Team" in comboItems(hooks.projectCombo))
         } finally {
             LaterInvocator.leaveModal(dialog)
         }
@@ -341,6 +365,9 @@ class RallyToolWindowPanelTest : BasePlatformTestCase() {
 
         assertEventually({ "status: ${hooks.statusText} dialogs=$dialogs" }) { hooks.statusText.startsWith("Created") }
         assertEquals("\"All Projects\" with no list offered is the toolbar's project", ref("project", 1001), createdProjectRef(storyCreates.single()))
+        // Checked only after the create: pumping the held repopulation before it would hide a
+        // create that read the toolbar project from the dropdown instead of cachedProjects.
+        assertTrue("the dropdown repopulates once the dialog closes", waitUntil { "A-Team" in comboItems(hooks.projectCombo) })
     }
 
     fun testCreateFromADialogOpenedDuringTheFirstProjectLoadNamesNoProjectOfTheNextConnection() {
@@ -690,7 +717,10 @@ class RallyToolWindowPanelTest : BasePlatformTestCase() {
                 }
             }
             when (FakeRallyServer.queryParam(uri, "project")) {
-                ref("project", 1001) -> reply(sprint(5001, "Sprint 1"))
+                ref("project", 1001) -> {
+                    holdATeamSprints?.await(10, TimeUnit.SECONDS)
+                    reply(sprint(5001, "Sprint 1"))
+                }
                 ref("project", 1002) -> {
                     holdAOtherSprints?.await(10, TimeUnit.SECONDS)
                     if (failAOtherSprints) FakeRallyServer.Reply(200, NOT_AUTHORIZED) else reply(sprint(6001, "Sprint 1"))

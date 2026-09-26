@@ -111,6 +111,31 @@ class DataImageLimitsTest {
     }
 
     @Test
+    fun `a GIF is sized from its header alone - a cut-off extension chain is still admitted at its logical screen`() {
+        // ImageIO can't read past a comment chain the stream ends inside; the logical screen is
+        // all AWT sizes by, and for a stream that ends before its first frame it allocates nothing.
+        val whole = TestImages.gifWithCommentChain(1_000)
+        assertEquals("control: the whole GIF is sized by its logical screen", 1 to 1, dataImageSize(TestImages.dataUri(whole, "image/gif")))
+        val cutOff = whole.copyOf(whole.size / 2) // ends inside the comment chain, before any frame
+        assertEquals("control: AWT fails before allocating anything", emptyList<Pair<Int, Int>>(), AwtDecode.declaredSizes(cutOff))
+        assertEquals(1 to 1, dataImageSize(TestImages.dataUri(cutOff, "image/gif")))
+    }
+
+    @Test
+    fun `a GIF with megabytes of extension blocks before its first frame is sized from its header in bounded time`() {
+        // JDK 17's GIFImageReader (IntelliJ 2024.1's runtime) reads every extension block before
+        // frame 0 and copies the whole chain again per 255-byte sub-block (JDK-8270915): ~10 s for
+        // this one, on the EDT, per image — so ImageIO must not be asked about a GIF at all.
+        val uri = TestImages.dataUri(TestImages.gifWithCommentChain(7_500_000), "image/gif") // ~10M chars, half the payload cap
+        dataImageSize(TestImages.dataUri(TestImages.gif(), "image/gif")) // warm-up: class loading isn't what is timed
+        val start = System.nanoTime()
+        val size = dataImageSize(uri)
+        val ms = (System.nanoTime() - start) / 1_000_000
+        assertEquals("sized by the 1x1 logical screen", 1 to 1, size)
+        assertTrue("sizing it took $ms ms on Java ${System.getProperty("java.version")}", ms < 3_000)
+    }
+
+    @Test
     fun `formats AWT can't decode get no URL`() {
         val svg = "<svg xmlns='http://www.w3.org/2000/svg' width='10' height='10'/>".toByteArray()
         val pane = render(img(svg, "image/svg+xml") + img(TestImages.bmp(), "image/bmp") + img("not an image".toByteArray()))

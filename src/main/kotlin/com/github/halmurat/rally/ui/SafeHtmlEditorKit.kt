@@ -240,11 +240,12 @@ private fun declaredPixels(url: URL): Long? = declaredSize(url)?.let { (width, h
  * The size AWT will allocate for [url]'s image (a [DataUrlHandler] URL, so the payload is read
  * exactly as [DataUrlConnection] serves it), or null when it must not be decoded: a payload over
  * [MAX_DATA_IMAGE_PAYLOAD_CHARS], a format AWT doesn't decode (it would only ever show a broken
- * image — SVG, WebP, BMP…), a header ImageIO can't read, headers that don't tell the size AWT
- * will allocate (see [measure]), or dimensions over [MAX_DATA_IMAGE_SIDE] / [MAX_DATA_IMAGE_PIXELS].
+ * image — SVG, WebP, BMP…), a JPEG or PNG header ImageIO can't read, headers that don't tell the
+ * size AWT will allocate (see [measure]), or dimensions over [MAX_DATA_IMAGE_SIDE] / [MAX_DATA_IMAGE_PIXELS].
  * Only headers are read, and the payload is decoded only as far as they go: this runs during
  * layout, on the EDT. For a PNG that is every chunk's header, to the end of the payload (see
- * [pngAllocationSize]) — about 1 ms a MB, 20 ms at the payload cap, once per image.
+ * [pngAllocationSize]) — about 1 ms a MB, 20 ms at the payload cap, once per image; for a GIF
+ * it is the first 10 bytes, whatever follows them.
  */
 private fun declaredSize(url: URL): Pair<Int, Int>? {
     val path = url.path
@@ -272,15 +273,20 @@ private fun declaredSize(url: URL): Pair<Int, Int>? {
 /**
  * Width and height AWT's decoder will allocate for the image [payload] opens (every call opens a
  * fresh stream over the image's bytes), or null when its headers don't tell that, or AWT doesn't
- * decode the format. ImageIO has to read the header, but its answer is only used where it is
- * the one AWT acts on:
+ * decode the format. ImageIO reads the JPEG and PNG headers, but its answer is only used where it
+ * is the one AWT acts on; a GIF is read from its own header, and ImageIO is not asked:
  *  - JPEG: both read the header with the JDK's libjpeg (jpeg_read_header), which takes the first
  *    frame header (SOF) and fails on a second one wherever it comes (JERR_SOF_DUPLICATE), before
  *    the first scan or after it.
  *  - PNG: ImageIO reads the first IHDR, AWT the last one before the pixel data; the chunks are
  *    walked the way AWT reads them, and the two answers must agree ([pngAllocationSize]).
  *  - GIF: AWT allocates the logical screen (bytes 6-9, little-endian), not the frame ImageIO
- *    measures; a frame is clipped to the screen. A zero screen side it takes from its first frame,
+ *    would measure; a frame is clipped to the screen. Asking ImageIO anyway would only cost:
+ *    JDK 17's GIFImageReader (IntelliJ 2024.1's runtime) reads every extension block before
+ *    frame 0 to answer getWidth, copying the whole chain again per 255-byte sub-block
+ *    (JDK-8270915, fixed in JDK 20) — ~10 s on the EDT for a GIF with megabytes of comment or
+ *    application extension in front of its image, and a chain it can't finish reading would
+ *    refuse a GIF AWT allocates nothing for. A zero screen side AWT takes from its first frame,
  *    as its own block walk finds it — not always ImageIO's frame 0 (AWT reads a Plain Text
  *    Extension as a sub-block chain, ImageIO reads 12 fixed bytes first, so a crafted one hides
  *    a 16000x16000 frame from ImageIO behind a 1x1 one) — so such a GIF is refused.
@@ -291,11 +297,9 @@ private fun measure(payload: () -> InputStream): Pair<Int, Int>? {
     input.mark(head.size)
     val headLength = input.readNBytes(head, 0, head.size)
     input.reset()
-    val format = ToolkitImageFormat.of(head, headLength) ?: return null
-    val imageIoSize = imageIoSize(input, format.imageIoName) ?: return null
-    return when (format) {
-        ToolkitImageFormat.JPEG -> imageIoSize
-        ToolkitImageFormat.PNG -> imageIoSize.takeIf { it == pngAllocationSize(payload()) }
+    return when (ToolkitImageFormat.of(head, headLength) ?: return null) {
+        ToolkitImageFormat.JPEG -> imageIoSize(input, "jpeg")
+        ToolkitImageFormat.PNG -> imageIoSize(input, "png")?.takeIf { it == pngAllocationSize(payload()) }
         ToolkitImageFormat.GIF -> (le16(head, 6) to le16(head, 8)).takeIf { (width, height) -> width > 0 && height > 0 }
     }
 }
@@ -382,12 +386,12 @@ private fun le16(bytes: ByteArray, offset: Int): Int = (bytes[offset].toInt() an
  * (InputStreamImageSource.getDecoder — it ignores the media type). XBM, the fourth, has no ImageIO
  * reader to measure it with, so it is refused.
  */
-private enum class ToolkitImageFormat(val imageIoName: String, private val magic: ByteArray, private val minLength: Int = magic.size) {
-    PNG("png", byteArrayOf(0x89.toByte(), 'P'.code.toByte(), 'N'.code.toByte(), 'G'.code.toByte(), 0x0D, 0x0A, 0x1A, 0x0A)),
-    JPEG("jpeg", byteArrayOf(0xFF.toByte(), 0xD8.toByte(), 0xFF.toByte())),
+private enum class ToolkitImageFormat(private val magic: ByteArray, private val minLength: Int = magic.size) {
+    PNG(byteArrayOf(0x89.toByte(), 'P'.code.toByte(), 'N'.code.toByte(), 'G'.code.toByte(), 0x0D, 0x0A, 0x1A, 0x0A)),
+    JPEG(byteArrayOf(0xFF.toByte(), 0xD8.toByte(), 0xFF.toByte())),
 
     // "GIF8" is all AWT checks, but the logical screen size [measure] reads ends at byte 10.
-    GIF("gif", byteArrayOf('G'.code.toByte(), 'I'.code.toByte(), 'F'.code.toByte(), '8'.code.toByte()), minLength = 10);
+    GIF(byteArrayOf('G'.code.toByte(), 'I'.code.toByte(), 'F'.code.toByte(), '8'.code.toByte()), minLength = 10);
 
     companion object {
         fun of(head: ByteArray, length: Int): ToolkitImageFormat? = entries.firstOrNull { format ->

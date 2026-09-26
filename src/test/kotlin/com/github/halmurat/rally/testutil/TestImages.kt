@@ -125,6 +125,29 @@ object TestImages {
     }
 
     /**
+     * A 1x1 GIF whose first frame sits behind a Comment Extension carrying [commentBytes] bytes in
+     * 255-byte sub-blocks — the shape of a GIF with megabytes of metadata before its image (the
+     * XMP bloat behind JDK-8270915). AWT sizes it by the logical screen without reading the comment.
+     */
+    fun gifWithCommentChain(commentBytes: Int): ByteArray {
+        val out = ByteArrayOutputStream(commentBytes + commentBytes / 255 + 32)
+        out.write("GIF89a".toByteArray(Charsets.US_ASCII))
+        out.write(byteArrayOf(1, 0, 1, 0, 0, 0, 0)) // logical screen 1x1, no global color table
+        out.write(byteArrayOf(0x21, 0xFE.toByte())) // Comment Extension
+        val block = ByteArray(255) { 'x'.code.toByte() }
+        var left = commentBytes
+        while (left > 0) {
+            val n = minOf(block.size, left)
+            out.write(n)
+            out.write(block, 0, n)
+            left -= n
+        }
+        out.write(0) // the sub-block chain ends
+        out.write(byteArrayOf(0x2C, 0, 0, 0, 0, 1, 0, 1, 0, 0, 2, 2, 0x44, 0x01, 0, 0x3B)) // a 1x1 frame, then the trailer
+        return out.toByteArray()
+    }
+
+    /**
      * A baseline JPEG of [width]x[height]; with [declaredWidth]/[declaredHeight] its frame header
      * (SOF0) is patched to declare that size instead.
      */

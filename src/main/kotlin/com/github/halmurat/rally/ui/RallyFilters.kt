@@ -49,18 +49,6 @@ enum class StateFilter(val displayName: String) {
 val activeExcludedStates: Set<String> = setOf("Accepted", "Completed", "Idea")
 
 /**
- * Server-side query for the ticket list. Owner filter applies to "My Tickets" only;
- * the sprint filter is expressed per scope (H1): Rally's TestCase type has NO
- * Iteration attribute, so `(Iteration.Name = …)` sent to /testcase comes back as
- * HTTP 200 with a populated Errors array — which requireNoErrors correctly turns
- * into a failed load. Test cases are filtered through their linked work product
- * instead (`WorkProduct.Iteration.Name`); test cases with no WorkProduct won't match,
- * which is the correct reading of "test cases in this sprint". UNVERIFIED against a
- * live workspace: Broadcom KB 57618 says WorkProduct points to the abstract Artifact
- * type, which has no Iteration, so Rally may reject this traversal too.
- * Pure and top-level so it is unit-testable.
- */
-/**
  * "My Tickets" filters on the configured Username; with none it would silently show everyone's
  * tickets under a "My Tickets" label. The tool window shows a "set your Username" state instead.
  */
@@ -83,6 +71,18 @@ internal data class TicketLoadPlan(
 internal fun ticketLoadPlan(scope: String?, username: String): TicketLoadPlan =
     TicketLoadPlan(queryArtifacts = !myTicketsWithoutUsername(scope, username))
 
+/**
+ * Server-side query for the ticket list. Owner filter applies to "My Tickets" only;
+ * the sprint filter is expressed per scope (H1): Rally's TestCase type has NO
+ * Iteration attribute, so `(Iteration.Name = …)` sent to /testcase comes back as
+ * HTTP 200 with a populated Errors array — which requireNoErrors correctly turns
+ * into a failed load. Test cases are filtered through their linked work product
+ * instead (`WorkProduct.Iteration.Name`); test cases with no WorkProduct won't match,
+ * which is the correct reading of "test cases in this sprint". UNVERIFIED against a
+ * live workspace: Broadcom KB 57618 says WorkProduct points to the abstract Artifact
+ * type, which has no Iteration, so Rally may reject this traversal too.
+ * Pure and top-level so it is unit-testable.
+ */
 internal fun buildTicketQuery(scope: String?, selectedIter: String, username: String): String? {
     val conditions = mutableListOf<String>()
 

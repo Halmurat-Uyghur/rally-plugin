@@ -133,8 +133,9 @@ class DescriptionHtmlTest {
     //
     // A thead, tbody or tfoot start tag outside a table, followed by li, caption, thead, tbody,
     // tfoot, title, html or nextid, sends javax.swing.text.html.parser.Parser.legalElementContext
-    // into unbounded recursion: a StackOverflowError on any stack. On a 256 KB thread it comes
-    // quickly and deterministically.
+    // into unbounded recursion: a StackOverflowError on any stack. So does a noscript inside a dir
+    // or menu, in longer chains of elements on JDK 17 and in shorter ones since JDK 21. On a 256 KB
+    // thread it comes quickly and deterministically.
 
     @Test
     fun `plainText never overflows on markup that sends Swing's parser into unbounded recursion`() {
@@ -144,6 +145,26 @@ class DescriptionHtmlTest {
                 assertEquals(html, "Steps<br>Expected<br>More", onSmallStack { DescriptionHtml.plainText(html) })
             }
         }
+    }
+
+    @Test
+    fun `wrap never hands Swing's parser markup it overflows on, and keeps its text`() {
+        for (description in PARSER_OVERFLOWS) {
+            val wrapped = DescriptionHtml.wrap(description, theme)
+            assertFalse("Swing's parser overflows on the wrapped $description", overflowsSwingParser(wrapped))
+            val shown = onSmallStack { swingPlainText(wrapped) }
+            for (word in listOf("Steps", "Expected", "More")) assertTrue("$description: $shown", shown.contains(word))
+        }
+    }
+
+    @Test
+    fun `wrap drops noscript tags and keeps their content`() {
+        // Since JDK 21 (the JBR of IntelliJ 2024.2 and later) this short chain already overflows
+        // Swing's parser; the test runtime's JDK 17 parser reads it fine, so it is pinned here.
+        assertEquals(
+            DescriptionHtml.shell("<p>Steps</p><menu><u><h2>Expected</h2></u></menu><p>More</p>", theme),
+            DescriptionHtml.wrap("<p>Steps</p><menu><u><noscript><h2>Expected</h2></noscript></u></menu><p>More</p>", theme),
+        )
     }
 
     @Test
@@ -275,6 +296,7 @@ class DescriptionHtmlTest {
             "<p>Steps</p><tfoot><title>t</title>Expected<p>More</p>",
             "<p>Steps</p><tbody><html>Expected<p>More</p>",
             "<p>Steps</p><thead><nextid n=z1>Expected<p>More</p>",
+            "<p>Steps</p><table><tr><td><dir><blink><strike>Expected<noscript><blockquote>More</blockquote></noscript></strike></blink></dir></td></tr></table>",
         )
     }
 }

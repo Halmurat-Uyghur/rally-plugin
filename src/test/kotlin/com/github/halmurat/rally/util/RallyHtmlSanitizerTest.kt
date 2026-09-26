@@ -284,6 +284,26 @@ class RallyHtmlSanitizerTest {
     }
 
     @Test
+    fun `an unbalanced or mismatched bracket in a style declaration is dropped`() {
+        // Swing's CSS parser keeps one stack of '(' and '[' blocks and throws on a close that
+        // doesn't match, or on a block left open.
+        for (html in listOf(
+            """<p style="font-family:a]">x</p><p>After</p>""",
+            """<p style="margin:[1px">x</p><p>After</p>""",
+            """<p style="margin:([)]">x</p><p>After</p>""",
+        )) {
+            assertSafe(html)
+            assertTextSurvives(html, "x", "After")
+        }
+        // Balanced brackets, a ';' inside them and a bracket inside a quoted string stay.
+        for (html in listOf(
+            """<p style="margin:[1px]">x</p>""",
+            """<p style="margin:[1px;font-weight:bold]">x</p>""",
+            """<p style="font-family:'a]'">x</p>""",
+        )) assertEquals(html, sanitize(html))
+    }
+
+    @Test
     fun `CSS image urls in well-formed markup are dropped`() {
         for (html in listOf(
             """<p style=background-image:url(http://evil.invalid/u1.png)>x</p>""",
@@ -350,6 +370,20 @@ class RallyHtmlSanitizerTest {
     }
 
     @Test
+    fun `a lone dash inside a tag discards the next character exactly as Swing does`() {
+        // Swing's parser drops the character after a lone '-' in an attribute list too, whatever
+        // it is (a quote, the '>' that ends the tag), so what follows is read from there on.
+        for (html in listOf(
+            """<p class="note" -">Important requirement</p><p>Acceptance criteria</p>""",
+            """<table><tr><td width=50 -">Important requirement</td></tr></table>""",
+            "<b ->hidden</b><p>after</p>",
+            "<p ->Text</p>",
+        )) {
+            assertEquals(html, renderedText(html), renderedText(sanitize(html)))
+        }
+    }
+
+    @Test
     fun `a stray less-than sign is dropped exactly as Swing drops it`() {
         // Text never carries a raw '<' out of the sanitizer; Swing discards a '<' that doesn't
         // open a tag anyway, so what the pane shows is unchanged.
@@ -401,7 +435,7 @@ class RallyHtmlSanitizerTest {
         val alphabet = listOf(
             "<", "<", "<", ">", ">", "\"", "\"", "'", "'", "=", "=", " ", " ", "/", "-", "-", "!", ",", "&", "\n",
             "img", "src", "=", "http://evil.invalid/x.png", "background", "style", "url(", "base", "href",
-            "isindex", "input", "data:image/png;base64,AAAA", "a", "p", ";", "#", "(", ")", ":",
+            "isindex", "input", "data:image/png;base64,AAAA", "a", "p", ";", "#", "(", ")", "[", "]", ":",
             // Compound fragments, so short strings still reach the attribute and style paths.
             "<img ", "<p ", " src=", " src=\"", " src='", "src=http://evil.invalid/x.png", " background=",
             " style=\"", "style=", "background-image:url(http://evil.invalid/x.png)", "&quot;", "<!--", "-->", "--",

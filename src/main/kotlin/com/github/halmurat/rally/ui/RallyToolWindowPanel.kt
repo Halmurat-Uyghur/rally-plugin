@@ -173,8 +173,23 @@ class RallyToolWindowPanel(private val project: Project) : Disposable {
      *  interleave its commit between a newer load's check and write. */
     private val iterationCommitLock = Any()
 
+    /**
+     * [cachedIterations] belong to the current project and connection, so a Create dialog may
+     * offer them. Unlike [iterationsLoaded], it survives a Refresh re-querying that same list
+     * ([requeryIterations]); only [invalidateIterations] (or a failed load that empties the list)
+     * clears it.
+     */
+    @Volatile private var iterationsCurrent = false
+
     /** Invalidate the iteration dropdown AND any in-flight load (see [iterationLoadGeneration]). */
     private fun invalidateIterations() {
+        iterationsLoaded = false
+        iterationsCurrent = false
+        iterationLoadGeneration.incrementAndGet()
+    }
+
+    /** Re-query the same project's iteration list (a Refresh): the loaded one stays [iterationsCurrent]. */
+    private fun requeryIterations() {
         iterationsLoaded = false
         iterationLoadGeneration.incrementAndGet()
     }
@@ -702,10 +717,11 @@ class RallyToolWindowPanel(private val project: Project) : Disposable {
                 if (!projectsLoaded || snapshot != lastSettingsSnapshot || refreshLists) {
                     forceListReload = false
                     lastSettingsSnapshot = snapshot
-                    // invalidateIterations() moved before the load safely: it only flips
-                    // a flag and bumps a generation, so its order relative to loadProjects
-                    // is immaterial.
-                    invalidateIterations()
+                    // A Refresh re-queries the same project's sprints, so Create keeps offering
+                    // them meanwhile; a first load or settings change invalidates them. Either
+                    // only flips flags and bumps a generation, so its order relative to
+                    // loadProjects is immaterial.
+                    if (keepListsOnFailure) requeryIterations() else invalidateIterations()
                     // The serial project load is only needed when a saved project NAME must
                     // be resolved to a ref before the artifact query can be scoped to it. In
                     // the default "All Projects" case the list feeds nothing but the dropdown,
@@ -1008,6 +1024,7 @@ class RallyToolWindowPanel(private val project: Project) : Disposable {
                 }
 
                 iterationsLoaded = true
+                iterationsCurrent = true
 
                 listeners.forEach { iterationCombo.addActionListener(it) }
             }
@@ -1018,7 +1035,10 @@ class RallyToolWindowPanel(private val project: Project) : Disposable {
                 // After a project switch it is the previous project's, and Create, the sprint
                 // filter and the sprint summary would go on resolving the saved sprint in it.
                 synchronized(iterationCommitLock) {
-                    if (generation == iterationLoadGeneration.get()) cachedIterations = emptyList()
+                    if (generation == iterationLoadGeneration.get()) {
+                        cachedIterations = emptyList()
+                        iterationsCurrent = false
+                    }
                 }
             }
             invokeLaterIfAlive {
@@ -1692,11 +1712,12 @@ class RallyToolWindowPanel(private val project: Project) : Disposable {
      * rebuild clears the lists before bumping it, so the lists read afterwards are never older
      * than the recorded generation (a rebuild in between only makes executeCreate refuse a
      * create whose lists were in fact fresh). While the sprint list reloads — after a project
-     * switch it still holds the previous project's sprints — none are offered.
+     * switch it still holds the previous project's sprints — none are offered; a Refresh
+     * re-querying the same project's list keeps offering it ([iterationsCurrent]).
      */
     private fun createDialogInputs(): CreateDialogInputs {
         val generation = listsGeneration.get()
-        val sprintsCurrent = iterationsLoaded
+        val sprintsCurrent = iterationsCurrent
         return CreateDialogInputs(
             generation,
             cachedProjects,
