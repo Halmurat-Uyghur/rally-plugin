@@ -610,6 +610,7 @@ class RallyApiClient(
         handleResponse(response)
 
         val root = JsonParser.parseString(response.body()).asJsonObject
+        throwOnResponseErrors(root, "current user")
 
         // Rally may return {"User": {...}} for direct access
         val userObj = root.getAsJsonObject("User")
@@ -627,6 +628,35 @@ class RallyApiClient(
         }
 
         throw RallyApiException("No user found for the provided API key")
+    }
+
+    /**
+     * The hand-parsed user lookups' equivalent of [requireNoErrors]: Rally answers HTTP 200 with
+     * a populated `Errors` array (bad workspace ref, permissions), which would otherwise read as
+     * "no user found" and send the user to fix the wrong setting.
+     */
+    private fun throwOnResponseErrors(root: JsonObject, context: String) {
+        for (key in listOf("QueryResult", "OperationResult")) {
+            val errors = root.getAsJsonObject(key)?.getAsJsonArray("Errors") ?: continue
+            if (errors.size() > 0) {
+                throw RallyApiException("Rally query error ($context): ${errors.joinToString("; ") { it.asString }}")
+            }
+        }
+    }
+
+    /**
+     * Name of [workspace] (an OID, ref path or full ref URL). Throws when Rally can't read it —
+     * a mistyped ref or a workspace the API key can't see — so Test Connection can flag the
+     * Workspace Ref field instead of reporting success and letting every load fail later.
+     */
+    fun getWorkspaceName(workspace: String): String {
+        val url = normalizeRef("workspace", workspace) + "?fetch=Name"
+        val response = executeGet(url)
+        handleResponse(response)
+        val root = JsonParser.parseString(response.body()).asJsonObject
+        throwOnResponseErrors(root, "workspace")
+        return root.getAsJsonObject("Workspace")?.get("Name")?.takeUnless { it.isJsonNull }?.asString
+            ?: throw RallyApiException("Rally returned no workspace for '$workspace'")
     }
 
     /**
@@ -654,13 +684,14 @@ class RallyApiClient(
         handleResponse(response)
 
         val root = JsonParser.parseString(response.body()).asJsonObject
+        throwOnResponseErrors(root, "user lookup")
         val results = root.getAsJsonObject("QueryResult")?.getAsJsonArray("Results")
         if (results != null && results.size() > 0) {
             val user = gson.fromJson(results.get(0), RallyUser::class.java)
             putCache(cacheKey, user)
             return user
         }
-        throw RallyApiException("No user found with the configured username")
+        throw RallyUserNotFoundException("No user found with the configured username")
     }
 
     /**
@@ -887,6 +918,7 @@ class RallyApiClient(
 
         val results = mutableListOf<RallyArtifact>()
         val reasons = mutableListOf<String>()
+        val failures = mutableListOf<Throwable>()
         var totalAvailable = 0
 
         val fetchStories = scope != "Defects"
@@ -906,6 +938,7 @@ class RallyApiClient(
                 results.addAll(page.items)
                 totalAvailable += page.totalResultCount
             } catch (e: Exception) {
+                failures.add(e)
                 reasons.add("User stories query failed: ${e.message}")
             }
         }
@@ -918,13 +951,20 @@ class RallyApiClient(
             } catch (e: Exception) {
                 // CompletableFuture.get() wraps the real cause in ExecutionException;
                 // surface the underlying message when present.
+                failures.add(e.cause ?: e)
                 reasons.add("Defects query failed: ${(e.cause ?: e).message}")
             }
         }
 
-        // If all queries failed, throw so the UI can show the error.
+        // If all queries failed, preserve actionable failures so the UI can classify them
+        // by type/status. In particular, wrapping a 429 would lose its statusCode and turn
+        // an exhausted rate limit into a generic "Error".
         if (results.isEmpty() && reasons.isNotEmpty()) {
-            throw RallyApiException("Query failed - ${reasons.joinToString("; ")}")
+            failures.firstOrNull {
+                it is RallyAuthenticationException || it is RallyConnectionException || it is RallySecurityException ||
+                    (it as? RallyApiException)?.statusCode == 429
+            }?.let { throw it }
+            throw RallyApiException("Query failed - ${reasons.joinToString("; ")}", failures.first())
         }
 
         val sorted = results.sortedByDescending { it.lastUpdateDate }
@@ -957,7 +997,7 @@ class RallyApiClient(
                 .getNotificationGroup("Rally")
             group.createNotification(
                 "Rally — partial query failure",
-                "Some results couldn't be loaded:\n${errors.joinToString("\n")}",
+                partialFailureNotificationContent(errors),
                 com.intellij.notification.NotificationType.WARNING
             ).notify(null)
         } catch (e: Exception) {
@@ -966,6 +1006,15 @@ class RallyApiClient(
             LOG.warn("Failed to dispatch partial-failure notification", e)
         }
     }
+
+    /**
+     * The partial-failure notification's content for the failure [errors], one per line.
+     * Notification content is HTML (the IDE builds it with HtmlChunk.raw) and the reasons carry
+     * server text, so they are escaped: markup in an error reads as written instead of rendering,
+     * or loading an `<img>` it names.
+     */
+    internal fun partialFailureNotificationContent(errors: List<String>): String =
+        "Some results couldn't be loaded:<br>" + errors.joinToString("<br>") { com.github.halmurat.rally.util.escapeHtml(it) }
 
     /**
      * Search artifacts server-side using Rally "contains" query.
@@ -1134,7 +1183,7 @@ class RallyApiClient(
             val response = try {
                 httpClient.send(request, bodyHandler)
             } catch (ie: InterruptedException) {
-                // dispose()/shutdownNow() interrupts workers parked in send(). Don't
+                // An executor shutdownNow() interrupts workers parked in send(). Don't
                 // burn the interrupt on more retries (up to 3 × 60s against a client
                 // that's being torn down) — restore the flag and abort immediately.
                 Thread.currentThread().interrupt()

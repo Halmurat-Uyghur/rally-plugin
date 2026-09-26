@@ -1,5 +1,14 @@
 package com.github.halmurat.rally.ui
 
+import com.github.halmurat.rally.api.RallyApiException
+import com.github.halmurat.rally.api.RallyAuthenticationException
+import com.github.halmurat.rally.api.RallyConnectionException
+import java.net.ConnectException
+import java.net.UnknownHostException
+import java.net.http.HttpTimeoutException
+import java.util.concurrent.CompletionException
+import java.util.concurrent.ExecutionException
+
 /**
  * Status line for the ticket list (M3). [shownCount] is the currently displayed
  * (scope/state/search-filtered) count; [fetchedCount] is how many rows the last
@@ -43,4 +52,20 @@ internal fun stateChangeAction(lastLoadSucceeded: Boolean, loading: Boolean): St
     loading -> StateChangeAction.REFILTER_KEEP_STATUS
     !lastLoadSucceeded -> StateChangeAction.RELOAD
     else -> StateChangeAction.REFILTER
+}
+
+/**
+ * Short status-bar label for a failed ticket load. Classified by exception type, not by
+ * message text: the client's auth failures read "Authentication failed…" (no "401" in them),
+ * and its connection failures wrap the JDK exception in [RallyConnectionException].
+ */
+internal fun loadErrorLabel(error: Throwable): String {
+    val cause = if (error is ExecutionException || error is CompletionException) error.cause ?: error else error
+    return when {
+        cause is RallyAuthenticationException -> "Auth error"
+        (cause as? RallyApiException)?.statusCode == 429 -> "Rate limited"
+        cause is HttpTimeoutException || cause.cause is HttpTimeoutException -> "Timeout"
+        cause is RallyConnectionException || cause is ConnectException || cause is UnknownHostException -> "Network error"
+        else -> "Error"
+    }
 }

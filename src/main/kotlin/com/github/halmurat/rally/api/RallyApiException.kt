@@ -58,6 +58,12 @@ class RallyConnectionException : RallyApiException {
 }
 
 /**
+ * No Rally user matches the configured username. A distinct type so callers can tell
+ * "that user doesn't exist" apart from a failed lookup.
+ */
+class RallyUserNotFoundException(message: String) : RallyApiException(message)
+
+/**
  * Exception for security violations (e.g., request to unexpected host)
  */
 class RallySecurityException(message: String) : RallyApiException(message)

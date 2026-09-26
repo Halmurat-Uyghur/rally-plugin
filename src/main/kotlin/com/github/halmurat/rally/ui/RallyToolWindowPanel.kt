@@ -32,6 +32,7 @@ import com.github.halmurat.rally.settings.RallySettings
 import com.github.halmurat.rally.settings.RallyApiKeyUnavailableException
 import com.github.halmurat.rally.settings.RallySettingsListener
 import com.github.halmurat.rally.util.RallyGitOps
+import com.github.halmurat.rally.util.literalHtmlMessage
 
 import com.intellij.ui.awt.RelativePoint
 import com.intellij.ui.JBColor
@@ -40,8 +41,8 @@ import com.intellij.ui.components.JBLabel
 import com.intellij.ui.components.JBList
 import com.intellij.ui.components.JBScrollPane
 import com.intellij.util.ui.JBUI
+import org.jetbrains.annotations.TestOnly
 import java.awt.BorderLayout
-import java.awt.Component
 import java.awt.FlowLayout
 import java.awt.event.KeyAdapter
 import java.awt.event.KeyEvent
@@ -94,17 +95,13 @@ class RallyToolWindowPanel(private val project: Project) : Disposable {
     private val statusLabel = JBLabel("Ready")
     /** Cached at construction time so the EDT-side selection listener doesn't reflectively probe Class.forName on every selection change. */
     private val gitAvailable: Boolean = RallyGitOps.isAvailable()
-    private val startWorkingButton = JButton("Start Working", AllIcons.Actions.Execute).apply {
-        isFocusable = true
-        // Start Working creates a git branch; if the IDE ships without Git4Idea,
-        // there's nothing the button can do — keep it visible but disabled so the
-        // affordance is obvious.
-        if (!gitAvailable) {
-            isEnabled = false
-            toolTipText = "Git integration is not available in this IDE"
-        }
+    /** True while a Start Working run is in progress (EDT-confined); blocks a concurrent second run. */
+    private var startWorkingInFlight = false
+    private val startWorkingButton = createButton("Start Working", AllIcons.Actions.Execute, START_WORKING_TOOLTIP) {
+        startWorking()
+    }.apply {
+        accessibleContext.accessibleDescription = START_WORKING_DESCRIPTION
     }
-    private val finishWorkingButton = JButton("Finish Working", AllIcons.Actions.Checked).apply { isFocusable = true }
 
 
     private val detailPanel = RallyDetailPanel(project)
@@ -114,7 +111,8 @@ class RallyToolWindowPanel(private val project: Project) : Disposable {
     // Sprint-summary state. Metadata (name/dates/velocity) comes from the resolved
     // iteration; the counts/points are derived from `displayedArtifacts` so they track
     // the active Scope/State/Search filter. `sprintIteration` is written on a pooled
-    // thread and read on the EDT (hence @Volatile); `displayedArtifacts` is EDT-confined.
+    // thread and read on the EDT (hence @Volatile), and only by commitSprint or a client
+    // rebuild's clear (see sprintSummaryGeneration); `displayedArtifacts` is EDT-confined.
     @Volatile private var sprintIteration: RallyIteration? = null
     private var displayedArtifacts: List<RallyArtifact> = emptyList()
     // Whether the last loadTickets() returned a partial result (one of stories/defects failed).
@@ -146,6 +144,13 @@ class RallyToolWindowPanel(private val project: Project) : Disposable {
     @Volatile private var iterationsLoaded = false
 
     /**
+     * Set by a manual Refresh ([refreshAll]) and consumed by the next loadTickets() run that
+     * reaches the list-reload step: forces the project/sprint lists to re-query even though
+     * they're already loaded, and keeps the current lists if that re-query fails.
+     */
+    @Volatile private var forceListReload = false
+
+    /**
      * Monotonic ticket for iteration loads. loadTickets() releases its `loading`
      * lock as soon as the artifact list arrives, while the iterations fetch may
      * still be in flight — so a project switch can start a new iterations load
@@ -168,8 +173,23 @@ class RallyToolWindowPanel(private val project: Project) : Disposable {
      *  interleave its commit between a newer load's check and write. */
     private val iterationCommitLock = Any()
 
+    /**
+     * [cachedIterations] belong to the current project and connection, so a Create dialog may
+     * offer them. Unlike [iterationsLoaded], it survives a Refresh re-querying that same list
+     * ([requeryIterations]); only [invalidateIterations] (or a failed load that empties the list)
+     * clears it.
+     */
+    @Volatile private var iterationsCurrent = false
+
     /** Invalidate the iteration dropdown AND any in-flight load (see [iterationLoadGeneration]). */
     private fun invalidateIterations() {
+        iterationsLoaded = false
+        iterationsCurrent = false
+        iterationLoadGeneration.incrementAndGet()
+    }
+
+    /** Re-query the same project's iteration list (a Refresh): the loaded one stays [iterationsCurrent]. */
+    private fun requeryIterations() {
         iterationsLoaded = false
         iterationLoadGeneration.incrementAndGet()
     }
@@ -189,6 +209,32 @@ class RallyToolWindowPanel(private val project: Project) : Disposable {
     /** Guards the generation-check + cachedProjects write so a stale load can't
      *  interleave its commit between a newer load's check and write. */
     private val projectCommitLock = Any()
+
+    /**
+     * Bumped each time [getClient] replaces the client for new settings, right after it drops the
+     * previous connection's project/sprint lists ([dropConnectionLists]) — not when it builds the
+     * first one, which replaces no lists. A Create dialog records it on opening; if it moved by
+     * the time the create runs, the refs picked in the dialog came from another connection's
+     * lists and executeCreate refuses to send them ([createBlockedByConnectionChange]).
+     */
+    private val listsGeneration = java.util.concurrent.atomic.AtomicLong()
+
+    /**
+     * Monotonic ticket for the footer sprint summary ([sprintIteration] and [sprintLabel]) — the
+     * same hazard as [iterationLoadGeneration]: loadTickets() releases `loading` when its tickets
+     * arrive, BEFORE it joins its current-sprint lookup, and a client rebuild's shutdown() lets
+     * the old client's lookup run on. So a newer load can resolve its sprint while an older one's
+     * lookup is still out, and that late answer would overwrite the newer footer: a failure with
+     * "unable to load" (and no sprint), a success with the previous connection's or project's
+     * sprint — which every later re-filter would render again. Bumped by each loadTickets() run
+     * once it has its client, and by [dropConnectionLists]; a load commits its sprint only under
+     * the generation it took ([commitSprint]).
+     */
+    private val sprintSummaryGeneration = java.util.concurrent.atomic.AtomicLong()
+
+    /** Guards [commitSprint]'s generation check + [sprintIteration] write against a rebuild's
+     *  bump-and-clear in [dropConnectionLists] landing in between. */
+    private val sprintCommitLock = Any()
     @Volatile private var lastSettingsSnapshot: String = ""
     private var lastScope: String = ""
     private var lastState: String = ""
@@ -256,11 +302,41 @@ class RallyToolWindowPanel(private val project: Project) : Disposable {
         }
     }
 
+    /**
+     * A load that stops before querying leaves the lists as they were: undo refreshAll()'s
+     * disable so the dropdowns don't stay greyed out. forceListReload stays set, so the next
+     * real load still re-queries them.
+     */
+    private fun reenableLoadedLists() {
+        if (projectsLoaded) projectCombo.isEnabled = true
+        if (iterationsLoaded) iterationCombo.isEnabled = true
+    }
+
     private fun showNotConfigured() {
+        reenableLoadedLists()
         lastLoadSucceeded = false
         statusLabel.icon = AllIcons.General.Error
         statusLabel.text = "Not configured"
         val placeholder = "Configure Rally in Settings → Tools → Rally"
+        loadFailurePlaceholder = placeholder
+        artifactList.emptyText.text = placeholder
+    }
+
+    /**
+     * "My Tickets" with no Username in Settings: show an empty list that says why, rather than
+     * everyone's tickets. Marked as a failed load so a State change retries (and re-checks).
+     * The dropdowns are left alone: that load still reconciles the project/sprint lists
+     * ([ticketLoadPlan]), and each list re-enables its dropdown when its reload commits.
+     */
+    private fun showUsernameNeeded() {
+        lastLoadSucceeded = false
+        allArtifacts = emptyList()
+        detailPanel.clear()
+        updateListModel(emptyList())
+        updateStats(emptyList())
+        statusLabel.icon = AllIcons.General.Warning
+        statusLabel.text = "Username not set"
+        val placeholder = "My Tickets needs your Rally Username — set it in Settings → Tools → Rally"
         loadFailurePlaceholder = placeholder
         artifactList.emptyText.text = placeholder
     }
@@ -289,27 +365,29 @@ class RallyToolWindowPanel(private val project: Project) : Disposable {
     private fun setupUI() {
         // Toolbar
         val toolbar = JPanel(FlowLayout(FlowLayout.LEFT, 4, 2))
-        toolbar.add(createButton("Refresh", AllIcons.Actions.Refresh) { currentClient?.clearCache(); loadTickets() })
-        val createButton = createButton("Create", AllIcons.General.Add) {}
-        createButton.addActionListener {
+        toolbar.add(createButton("Refresh", AllIcons.Actions.Refresh,
+            "Clear the cache and reload tickets, projects, and sprints from Rally") { refreshAll() })
+        val createMenuButton = createButton("Create", AllIcons.General.Add, "Create a new User Story or Defect in Rally") {}
+        createMenuButton.addActionListener {
             val menu = JPopupMenu()
             menu.add(JMenuItem("User Story").apply { addActionListener { showCreateUserStoryDialog() } })
             menu.add(JMenuItem("Defect").apply { addActionListener { showCreateDefectDialog() } })
-            menu.show(createButton, 0, createButton.height)
+            menu.show(createMenuButton, 0, createMenuButton.height)
         }
-        toolbar.add(createButton)
+        toolbar.add(createMenuButton)
         toolbar.add(JSeparator(SwingConstants.VERTICAL).apply { preferredSize = java.awt.Dimension(2, 24) })
-        toolbar.add(createButton("Defined", AllIcons.Actions.MoveToButton) { changeState("Defined") })
-        toolbar.add(createButton("In-Progress", AllIcons.Actions.Execute) { changeState("In-Progress") })
-        toolbar.add(createButton("Completed", AllIcons.Actions.Checked) { changeState("Completed") })
+        toolbar.add(createButton("Defined", AllIcons.Actions.MoveToButton,
+            "Move the selected ticket(s) to Defined") { changeState("Defined") })
+        toolbar.add(createButton("In-Progress", AllIcons.Actions.Execute,
+            "Move the selected ticket(s) to In-Progress (state only — no branch, no owner change)") { changeState("In-Progress") })
+        toolbar.add(createButton("Completed", AllIcons.Actions.Checked,
+            "Move the selected ticket(s) to Completed (asks for confirmation)") { changeState("Completed") })
         toolbar.add(JSeparator(SwingConstants.VERTICAL).apply { preferredSize = java.awt.Dimension(2, 24) })
-        toolbar.add(createButton("Export", AllIcons.ToolbarDecorator.Export) { exportSelectedArtifact() })
+        toolbar.add(createButton("Export", AllIcons.ToolbarDecorator.Export,
+            "Export the selected ticket(s) and their linked test cases (or selected test cases with their steps) to JSON and Markdown") { exportSelectedArtifact() })
         toolbar.add(JSeparator(SwingConstants.VERTICAL).apply { preferredSize = java.awt.Dimension(2, 24) })
         toolbar.add(startWorkingButton)
-        toolbar.add(finishWorkingButton)
-
-        startWorkingButton.addActionListener { startWorking() }
-        finishWorkingButton.addActionListener { finishWorking() }
+        updateStartWorkingButton()
 
         toolbar.add(Box.createHorizontalGlue())
         toolbar.add(statsLabel)
@@ -324,16 +402,7 @@ class RallyToolWindowPanel(private val project: Project) : Disposable {
         filterPanel.add(JBLabel("Project:").apply { labelFor = projectCombo })
         projectCombo.apply {
             preferredSize = java.awt.Dimension(250, preferredSize.height)
-            renderer = object : DefaultListCellRenderer() {
-                override fun getListCellRendererComponent(
-                    list: JList<*>?, value: Any?, index: Int,
-                    isSelected: Boolean, cellHasFocus: Boolean
-                ): Component {
-                    val comp = super.getListCellRendererComponent(list, value, index, isSelected, cellHasFocus)
-                    toolTipText = value?.toString()
-                    return comp
-                }
-            }
+            renderer = RallyNameComboRenderer()
             // Show full-width popup regardless of combo box width
             isSwingPopup = false
         }
@@ -341,33 +410,7 @@ class RallyToolWindowPanel(private val project: Project) : Disposable {
         filterPanel.add(JBLabel("Sprint:").apply { labelFor = iterationCombo })
         iterationCombo.apply {
             preferredSize = java.awt.Dimension(250, preferredSize.height)
-            renderer = object : DefaultListCellRenderer() {
-                override fun getListCellRendererComponent(
-                    list: JList<*>?, value: Any?, index: Int,
-                    isSelected: Boolean, cellHasFocus: Boolean
-                ): Component {
-                    val comp = super.getListCellRendererComponent(list, value, index, isSelected, cellHasFocus)
-                    val name = value?.toString() ?: ""
-                    // Snapshot cachedIterations into a local — a project switch on a
-                    // background thread could replace the list out from under us
-                    // between the bounds check and the index access.
-                    val snapshot = cachedIterations
-                    // Look up iteration dates from cache (index 0 = "All Sprints", so offset by 1)
-                    val iterIndex = if (index > 0) index - 1 else -1
-                    if (iterIndex in snapshot.indices) {
-                        val iter = snapshot[iterIndex]
-                        val start = iter.startDate?.take(10) ?: ""
-                        val end = iter.endDate?.take(10) ?: ""
-                        if (start.isNotBlank() && end.isNotBlank()) {
-                            text = "$name  ($start → $end)"
-                            toolTipText = "$name: $start to $end"
-                        }
-                    } else {
-                        toolTipText = name
-                    }
-                    return comp
-                }
-            }
+            renderer = SprintComboRenderer { cachedIterations }
             isSwingPopup = false
         }
         filterPanel.add(iterationCombo)
@@ -422,11 +465,42 @@ class RallyToolWindowPanel(private val project: Project) : Disposable {
         mainPanel.add(bottomPanel, BorderLayout.SOUTH)
     }
 
-    private fun createButton(text: String, icon: Icon, action: () -> Unit): JButton {
+    private fun createButton(text: String, icon: Icon, tooltip: String, action: () -> Unit): JButton {
         return JButton(text, icon).apply {
             isFocusable = true
+            toolTipText = tooltip
             addActionListener { action() }
         }
+    }
+
+    /**
+     * Keeps Start Working's enabled state AND tooltip in step with the selection and any running
+     * Start Working (see [startWorkingButtonState]). Runs on every selection change, including a
+     * cleared selection, so a button disabled by a test case doesn't stay disabled after that
+     * row disappears on reload.
+     */
+    private fun updateStartWorkingButton() {
+        val state = startWorkingButtonState(gitAvailable, startWorkingInFlight, artifactList.selectedValuesList)
+        startWorkingButton.isEnabled = state.enabled
+        startWorkingButton.toolTipText = state.tooltip
+        startWorkingButton.accessibleContext.accessibleDescription = state.accessibleDescription
+    }
+
+    /**
+     * Manual Refresh: drop the query cache AND force the project/sprint dropdowns to re-query,
+     * so projects or sprints created in Rally since the tool window opened show up. loadTickets()
+     * alone only reloads those lists when they were never loaded or the settings changed.
+     *
+     * Both dropdowns are disabled until the reload commits (loadProjects/loadIterations re-enable
+     * them on success and failure): a pick made mid-reload would otherwise be silently reverted
+     * when the refreshed list restores the saved selection.
+     */
+    private fun refreshAll() {
+        currentClient?.clearCache()
+        forceListReload = true
+        projectCombo.isEnabled = false
+        iterationCombo.isEnabled = false
+        loadTickets()
     }
 
     private fun setupListeners() {
@@ -509,6 +583,7 @@ class RallyToolWindowPanel(private val project: Project) : Disposable {
                     detailPanel.showArtifactHeader(selected, currentClient)
                     if (selected != null) selectionDebounceTimer.restart()
                 }
+                updateStartWorkingButton()
                 val sp = mainSplitPane ?: return@addListSelectionListener
                 if (selected != null) {
                     // Auto-expand detail panel if collapsed
@@ -517,11 +592,6 @@ class RallyToolWindowPanel(private val project: Project) : Disposable {
                         sp.dividerSize = DIVIDER_THICKNESS
                         sp.dividerLocation = (sp.width * 0.55).toInt()
                     }
-                    val isTc = selected is RallyTestCase
-                    // Start Working stays disabled when Git4Idea is absent regardless of selection
-                    // — clicking it has nowhere to go without git operations.
-                    startWorkingButton.isEnabled = !isTc && gitAvailable
-                    finishWorkingButton.isEnabled = !isTc
                 } else {
                     // Auto-collapse detail panel when nothing is selected
                     sp.dividerSize = 0
@@ -576,15 +646,20 @@ class RallyToolWindowPanel(private val project: Project) : Disposable {
             menu.add(JMenuItem("Set Completed").apply { addActionListener { changeState("Completed") } })
             menu.add(JMenuItem("Set Defined").apply { addActionListener { changeState("Defined") } })
             menu.add(JMenuItem("Edit Points").apply { addActionListener { editPoints() } })
-            menu.addSeparator()
-            menu.add(JMenuItem("Export to JSON/Markdown").apply { addActionListener { exportSelectedArtifact() } })
         }
+        menu.addSeparator()
+        menu.add(JMenuItem("Export to JSON/Markdown").apply { addActionListener { exportSelectedArtifact() } })
         menu.show(artifactList, e.x, e.y)
     }
 
     // ── Data Loading ─────────────────────────────────────────────
 
     fun loadTickets() {
+        // Scope/settings changes supersede any server search, even when this load stops
+        // early (Rally not configured), queues behind another load, or skips the ticket
+        // query (My Tickets without a Username).
+        ++searchGeneration
+        activeServerSearch = null
         val settings = RallySettings.getInstance()
         if (!settings.isConfiguredOrLoading()) {
             showNotConfigured()
@@ -595,18 +670,36 @@ class RallyToolWindowPanel(private val project: Project) : Disposable {
             pendingReload = true
             return
         }
-        loading = true
-        pendingReload = false
-        clearStatusIcon()
-        statusLabel.text = "Loading..."
 
         // Capture all UI state on the EDT before dispatching to background thread
         val scope = scopeCombo.selectedItem as? String ?: "My Tickets"
+        // My Tickets without a Username skips ONLY the ticket query. Returning before getClient()
+        // (as it once did) also skipped the client rebuild and the project/sprint reloads below,
+        // so after a Settings change, Refresh or project switch Create kept offering — and
+        // posting — the previous workspace's or project's refs (audit F3). The Username is read
+        // once, here: the query below must filter by the same one the plan was decided on, or a
+        // Username cleared mid-load would send My Tickets with no owner filter.
+        val username = settings.username
+        val plan = ticketLoadPlan(scope, username)
+
+        loading = true
+        pendingReload = false
+        if (plan.queryArtifacts) {
+            clearStatusIcon()
+            statusLabel.text = "Loading..."
+        } else {
+            // Say why the list is empty at once, rather than flashing "Loading..." for a list
+            // that is never loaded.
+            showUsernameNeeded()
+        }
         val pageSize = if (Scope.fromDisplay(scope) == Scope.RECENT_ACTIVITY) 20 else settings.pageSize
 
         ApplicationManager.getApplication().executeOnPooledThread {
             try {
                 val client = getClient()
+                // From here this load owns the footer: an older load's current-sprint lookup still
+                // in flight (same client, or the one getClient() just replaced) commits nothing.
+                val sprintGeneration = sprintSummaryGeneration.incrementAndGet()
 
                 // Load projects if not yet loaded or settings changed.
                 // Use a non-sensitive SHA-256 fingerprint of the API key instead of String.hashCode()
@@ -615,12 +708,20 @@ class RallyToolWindowPanel(private val project: Project) : Disposable {
                 val savedProject = RallySettings.getInstance().selectedProject
                 val projectScoped = savedProject.isNotBlank() && savedProject != "All Projects"
                 var projectsFuture: java.util.concurrent.CompletableFuture<Void>? = null
-                if (!projectsLoaded || snapshot != lastSettingsSnapshot) {
+                val refreshLists = forceListReload
+                // A Refresh of lists already loaded for these same settings keeps them if the
+                // re-query fails, so the dropdowns keep matching cachedProjects/cachedIterations
+                // (which a failed load never overwrites) — and so the scoped query below.
+                val keepListsOnFailure = refreshLists && projectsLoaded && snapshot == lastSettingsSnapshot
+                val iterationsWereLoaded = iterationsLoaded
+                if (!projectsLoaded || snapshot != lastSettingsSnapshot || refreshLists) {
+                    forceListReload = false
                     lastSettingsSnapshot = snapshot
-                    // invalidateIterations() moved before the load safely: it only flips
-                    // a flag and bumps a generation, so its order relative to loadProjects
-                    // is immaterial.
-                    invalidateIterations()
+                    // A Refresh re-queries the same project's sprints, so Create keeps offering
+                    // them meanwhile; a first load or settings change invalidates them. Either
+                    // only flips flags and bumps a generation, so its order relative to
+                    // loadProjects is immaterial.
+                    if (keepListsOnFailure) requeryIterations() else invalidateIterations()
                     // The serial project load is only needed when a saved project NAME must
                     // be resolved to a ref before the artifact query can be scoped to it. In
                     // the default "All Projects" case the list feeds nothing but the dropdown,
@@ -628,10 +729,10 @@ class RallyToolWindowPanel(private val project: Project) : Disposable {
                     // the iterations list uses. Saves a full RTT on cold open.
                     val generation = projectLoadGeneration.incrementAndGet()
                     if (projectScoped) {
-                        loadProjects(client, generation)
+                        loadProjects(client, generation, keepListsOnFailure)
                     } else {
                         projectsFuture = java.util.concurrent.CompletableFuture.runAsync({
-                            loadProjects(client, generation)
+                            loadProjects(client, generation, keepListsOnFailure)
                         }, client.apiExecutor)
                     }
                 }
@@ -654,18 +755,18 @@ class RallyToolWindowPanel(private val project: Project) : Disposable {
                 var iterationsFuture: java.util.concurrent.CompletableFuture<Void>? = null
                 if (!iterationsLoaded) {
                     val generation = iterationLoadGeneration.incrementAndGet()
+                    val keepIterations = keepListsOnFailure && iterationsWereLoaded
                     if (needsIterationValidation) {
-                        loadIterations(client, generation)
+                        loadIterations(client, generation, keepIterations)
                     } else {
                         iterationsFuture = java.util.concurrent.CompletableFuture.runAsync({
-                            loadIterations(client, generation)
+                            loadIterations(client, generation, keepIterations)
                         }, client.apiExecutor)
                     }
                 }
 
                 val effectiveIter = if (needsIterationValidation &&
                     cachedIterations.any { it.name == savedIter }) savedIter else ""
-                val query = buildQuery(scope, effectiveIter, settings)
                 val hasIterationFilter = effectiveIter.isNotBlank() && effectiveIter != "All Sprints"
 
                 // Sprint summary (apiExecutor) — submit FIRST so it runs concurrently with the
@@ -676,53 +777,71 @@ class RallyToolWindowPanel(private val project: Project) : Disposable {
                 val sprintFuture = if (!hasIterationFilter) {
                     // "All Sprints" — resolve the current iteration (by today's date) for metadata.
                     java.util.concurrent.CompletableFuture.runAsync({
-                        loadSprintSummary(client, settings)
+                        loadSprintSummary(client, settings, sprintGeneration)
                     }, client.apiExecutor)
                 } else null
 
-                // Load artifacts. queryAllArtifactsParallel runs user stories + defects
-                // concurrently (defects on apiExecutor, stories inline on THIS unbounded pooled
-                // thread), halving the two serial round trips the old sequential story-then-defect
-                // path paid on every cold load (MED-2/P1). It returns an ArtifactQueryResult carrying
-                // any partial-failure reasons (MED-8). Run it directly on this executeOnPooledThread
-                // thread — NOT on apiExecutor — because it blocks on one apiExecutor slot internally.
-                val result: ArtifactQueryResult = if (Scope.fromDisplay(scope) == Scope.TEST_CASES) {
-                    val page = client.queryAllTestCases(query, pageSize, maxResults = pageSize)
-                    ArtifactQueryResult(page.items, totalAvailable = page.totalResultCount)
+                if (!plan.queryArtifacts) {
+                    // My Tickets without a Username: the client, lists and sprint summary are
+                    // reconciled above, but no ticket query is sent — without the owner filter it
+                    // would list everyone's tickets. lastLoadSucceeded stays false (set by
+                    // showUsernameNeeded), so a State change retries and re-checks the Username.
+                    if (hasIterationFilter) resolveSelectedSprint(effectiveIter, sprintGeneration)
+                    invokeLaterIfAlive {
+                        loading = false
+                        showUsernameNeeded()
+                        if (pendingReload) {
+                            pendingReload = false
+                            loadTickets()
+                        }
+                    }
                 } else {
-                    client.queryAllArtifactsParallel(query, pageSize, scope = scope, maxResults = pageSize)
-                }
-                val artifacts = result.artifacts
+                    val query = buildQuery(scope, effectiveIter, username)
 
-                // A specific sprint is selected — resolve its metadata from cache (no API call).
-                if (hasIterationFilter) {
-                    resolveSelectedSprint(effectiveIter)
-                }
+                    // Load artifacts. queryAllArtifactsParallel runs user stories + defects
+                    // concurrently (defects on apiExecutor, stories inline on THIS unbounded pooled
+                    // thread), halving the two serial round trips the old sequential story-then-defect
+                    // path paid on every cold load (MED-2/P1). It returns an ArtifactQueryResult carrying
+                    // any partial-failure reasons (MED-8). Run it directly on this executeOnPooledThread
+                    // thread — NOT on apiExecutor — because it blocks on one apiExecutor slot internally.
+                    val result: ArtifactQueryResult = if (Scope.fromDisplay(scope) == Scope.TEST_CASES) {
+                        val page = client.queryAllTestCases(query, pageSize, maxResults = pageSize)
+                        ArtifactQueryResult(page.items, totalAvailable = page.totalResultCount)
+                    } else {
+                        client.queryAllArtifactsParallel(query, pageSize, scope = scope, maxResults = pageSize)
+                    }
+                    val artifacts = result.artifacts
 
-                // Apply only the scope (type) filter now; the state filter is applied at display
-                // time in applySearchFilter so a state-combo change re-filters in memory with no
-                // re-fetch (P6/LOW-9).
-                val scopeFiltered = applyScopeFilter(scope, artifacts)
+                    // A specific sprint is selected — resolve its metadata from cache (no API call).
+                    if (hasIterationFilter) {
+                        resolveSelectedSprint(effectiveIter, sprintGeneration)
+                    }
 
-                invokeLaterIfAlive {
-                    allArtifacts = scopeFiltered
-                    lastLoadSucceeded = true
-                    lastLoadIncomplete = result.isPartial
-                    lastLoadFetched = artifacts.size
-                    lastLoadTotal = result.totalAvailable
-                    detailPanel.clear()
-                    applySearchFilter()
-                    loading = false
-                    // Count with the State filter selected NOW, not the one captured when the load
-                    // started: a State change mid-load only re-filters. A partial result (one of
-                    // stories/defects failed) is flagged "(incomplete)" (MED-8). A server search
-                    // started by applySearchFilter() owns the status line.
-                    if (activeServerSearch == null) refreshLoadedStatus()
-                    // applySearchFilter() above already refreshes the empty placeholder when the
-                    // displayed list is empty (updateEmptyText), covering search + state filters.
-                    if (pendingReload) {
-                        pendingReload = false
-                        loadTickets()
+                    // Apply only the scope (type) filter now; the state filter is applied at display
+                    // time in applySearchFilter so a state-combo change re-filters in memory with no
+                    // re-fetch (P6/LOW-9).
+                    val scopeFiltered = applyScopeFilter(scope, artifacts)
+
+                    invokeLaterIfAlive {
+                        allArtifacts = scopeFiltered
+                        lastLoadSucceeded = true
+                        lastLoadIncomplete = result.isPartial
+                        lastLoadFetched = artifacts.size
+                        lastLoadTotal = result.totalAvailable
+                        detailPanel.clear()
+                        applySearchFilter()
+                        loading = false
+                        // Count with the State filter selected NOW, not the one captured when the load
+                        // started: a State change mid-load only re-filters. A partial result (one of
+                        // stories/defects failed) is flagged "(incomplete)" (MED-8). A server search
+                        // started by applySearchFilter() owns the status line.
+                        if (activeServerSearch == null) refreshLoadedStatus()
+                        // applySearchFilter() above already refreshes the empty placeholder when the
+                        // displayed list is empty (updateEmptyText), covering search + state filters.
+                        if (pendingReload) {
+                            pendingReload = false
+                            loadTickets()
+                        }
                     }
                 }
 
@@ -755,6 +874,11 @@ class RallyToolWindowPanel(private val project: Project) : Disposable {
                 invokeLaterIfAlive {
                     loading = false
                     lastLoadSucceeded = false
+                    // A Refresh disabled the dropdowns; if this load failed before re-querying
+                    // them (e.g. no client), lists that are still loaded must become usable again.
+                    // A list mid-reload re-enables itself when its own load finishes.
+                    if (projectsLoaded) projectCombo.isEnabled = true
+                    if (iterationsLoaded) iterationCombo.isEnabled = true
                     if (pendingReload) {
                         pendingReload = false
                         loadTickets()
@@ -763,13 +887,7 @@ class RallyToolWindowPanel(private val project: Project) : Disposable {
                     } else {
                         statusLabel.icon = AllIcons.General.Error
                         val cause = if (e is java.util.concurrent.ExecutionException) e.cause ?: e else e
-                        val errorMsg = when {
-                            cause.message?.contains("401") == true || cause.message?.contains("403") == true -> "Auth error"
-                            cause.message?.contains("429") == true -> "Rate limited"
-                            cause is java.net.ConnectException || cause is java.net.UnknownHostException -> "Network error"
-                            cause.message?.contains("timeout", ignoreCase = true) == true -> "Timeout"
-                            else -> "Error"
-                        }
+                        val errorMsg = loadErrorLabel(cause)
                         statusLabel.text = errorMsg
                         val placeholder = "$errorMsg: ${cause.message}"
                         loadFailurePlaceholder = placeholder
@@ -801,7 +919,11 @@ class RallyToolWindowPanel(private val project: Project) : Disposable {
         }
     }
 
-    private fun loadProjects(client: RallyApiClient, generation: Long) {
+    /**
+     * @param keepOnFailure a Refresh of an already-loaded list: on failure keep the current
+     *   dropdown items (which still match [cachedProjects]) instead of resetting to "All Projects".
+     */
+    private fun loadProjects(client: RallyApiClient, generation: Long, keepOnFailure: Boolean = false) {
         try {
             val projects = client.queryProjects()
             // Check-and-commit atomically: without the lock, a stale load could pass
@@ -846,16 +968,24 @@ class RallyToolWindowPanel(private val project: Project) : Disposable {
             invokeLaterIfAlive {
                 // A stale failure must not clobber a newer load's dropdown either.
                 if (generation != projectLoadGeneration.get()) return@invokeLaterIfAlive
-                projectCombo.removeAllItems()
-                projectCombo.addItem("All Projects")
-                projectCombo.isEnabled = false
-                // Leave projectsLoaded = false so next loadTickets() retries
+                if (keepOnFailure) {
+                    projectCombo.isEnabled = true
+                } else {
+                    projectCombo.removeAllItems()
+                    projectCombo.addItem("All Projects")
+                    projectCombo.isEnabled = false
+                    // Leave projectsLoaded = false so next loadTickets() retries
+                }
                 notifyLoadFailure("projects", e)
             }
         }
     }
 
-    private fun loadIterations(client: RallyApiClient, generation: Long) {
+    /**
+     * @param keepOnFailure a Refresh of an already-loaded list: on failure keep the current
+     *   dropdown items (which still match [cachedIterations]) instead of resetting to "All Sprints".
+     */
+    private fun loadIterations(client: RallyApiClient, generation: Long, keepOnFailure: Boolean = false) {
         try {
             // Dedupe by name: the combo is name-keyed and the create dialogs map
             // combo index → cachedIterations[index-1], so duplicate names (possible
@@ -894,18 +1024,36 @@ class RallyToolWindowPanel(private val project: Project) : Disposable {
                 }
 
                 iterationsLoaded = true
+                iterationsCurrent = true
 
                 listeners.forEach { iterationCombo.addActionListener(it) }
             }
         } catch (e: Exception) {
             LOG.warn("Failed to load iterations", e)
+            if (!keepOnFailure) {
+                // The dropdown is reset to "All Sprints" below, so drop the list behind it too.
+                // After a project switch it is the previous project's, and Create, the sprint
+                // filter and the sprint summary would go on resolving the saved sprint in it.
+                synchronized(iterationCommitLock) {
+                    if (generation == iterationLoadGeneration.get()) {
+                        cachedIterations = emptyList()
+                        iterationsCurrent = false
+                    }
+                }
+            }
             invokeLaterIfAlive {
                 // A stale failure must not clobber a newer load's dropdown either.
                 if (generation != iterationLoadGeneration.get()) return@invokeLaterIfAlive
-                iterationCombo.removeAllItems()
-                iterationCombo.addItem("All Sprints")
-                iterationCombo.isEnabled = false
-                // Leave iterationsLoaded = false so next loadTickets() retries
+                if (keepOnFailure) {
+                    // The refresh invalidated the list; the kept items are still the loaded ones.
+                    iterationsLoaded = true
+                    iterationCombo.isEnabled = true
+                } else {
+                    iterationCombo.removeAllItems()
+                    iterationCombo.addItem("All Sprints")
+                    iterationCombo.isEnabled = false
+                    // Leave iterationsLoaded = false so next loadTickets() retries
+                }
                 notifyLoadFailure("iterations", e)
             }
         }
@@ -948,12 +1096,12 @@ class RallyToolWindowPanel(private val project: Project) : Disposable {
         }
     }
 
-    private fun buildQuery(scope: String, selectedIter: String, settings: RallySettings): String? {
+    private fun buildQuery(scope: String, selectedIter: String, username: String): String? {
         // workspace/project are passed as URL params by the API client, not as query conditions.
         // State/type filtering is done client-side since ScheduleState vs State differs by type.
         // Query construction lives in buildTicketQuery (RallyFilters.kt) so the per-scope
         // iteration-field choice (H1) is unit-tested.
-        val query = buildTicketQuery(scope, selectedIter, settings.username)
+        val query = buildTicketQuery(scope, selectedIter, username)
         LOG.info("Rally query built (scope=$scope, iteration='$selectedIter', hasQuery=${query != null})")
         return query
     }
@@ -994,51 +1142,50 @@ class RallyToolWindowPanel(private val project: Project) : Disposable {
     /**
      * Load sprint summary via API. Called only when no iteration is selected
      * (so we need to find the current sprint by date and fetch its artifacts separately).
+     * [generation] is the [sprintSummaryGeneration] the calling load took.
      */
-    private fun loadSprintSummary(client: RallyApiClient, settings: RallySettings) {
+    private fun loadSprintSummary(client: RallyApiClient, settings: RallySettings, generation: Long) {
         try {
             val iteration = client.queryCurrentIteration(
                 if (settings.workspaceRef.isNotBlank()) settings.workspaceRef else null,
                 getSelectedProjectRef()
             )
-
-            if (iteration == null) {
-                sprintIteration = null
-                invokeLaterIfAlive {
-                    sprintLabel.text = "No active sprint"
-                }
-                return
-            }
-
-            setSprintIteration(iteration)
+            commitSprint(generation, iteration, noSprintText = "No active sprint")
         } catch (e: Exception) {
             LOG.warn("Failed to load sprint summary", e)
-            invokeLaterIfAlive {
-                sprintLabel.text = "Sprint: unable to load"
-            }
+            // Forget the previous sprint too, not just its text: it belongs to the previous
+            // project or workspace, and every later re-filter (updateStats) would render it again.
+            commitSprint(generation, null, noSprintText = "Sprint: unable to load")
         }
     }
 
     /**
      * Resolve the selected sprint's metadata from the cached iteration list (no API call).
      * The summary counts are rendered from the filtered list in renderSprintSummary().
+     * [generation] is the [sprintSummaryGeneration] the calling load took.
      */
-    private fun resolveSelectedSprint(iterationName: String) {
+    private fun resolveSelectedSprint(iterationName: String, generation: Long) {
         val iteration = cachedIterations.firstOrNull { it.name == iterationName }
-        if (iteration == null) {
-            sprintIteration = null
-            invokeLaterIfAlive {
-                sprintLabel.text = "No active sprint"
-            }
-            return
-        }
-        setSprintIteration(iteration)
+        commitSprint(generation, iteration, noSprintText = "No active sprint")
     }
 
-    /** Cache the resolved sprint's metadata, then re-render the summary from the filtered list. */
-    private fun setSprintIteration(iteration: RallyIteration) {
-        sprintIteration = iteration
-        invokeLaterIfAlive { renderSprintSummary() }
+    /**
+     * Commit the footer sprint a load resolved under [generation]: [iteration]'s metadata,
+     * re-rendered from the filtered list, or — when null — no sprint, with [noSprintText]. Dropped
+     * once a newer load or a client rebuild has moved [sprintSummaryGeneration] on (a late answer
+     * to an older load, see there). Checked twice: before [sprintIteration] is written, under
+     * [sprintCommitLock] so a rebuild's clear can't slip in between; and again on the EDT, where
+     * a newer load may have taken the footer since this update was queued.
+     */
+    private fun commitSprint(generation: Long, iteration: RallyIteration?, noSprintText: String) {
+        synchronized(sprintCommitLock) {
+            if (generation != sprintSummaryGeneration.get()) return
+            sprintIteration = iteration
+        }
+        invokeLaterIfAlive {
+            if (generation != sprintSummaryGeneration.get()) return@invokeLaterIfAlive
+            if (iteration != null) renderSprintSummary() else sprintLabel.text = noSprintText
+        }
     }
 
     /**
@@ -1122,8 +1269,11 @@ class RallyToolWindowPanel(private val project: Project) : Disposable {
         updateStats(filtered)
         if (filtered.isEmpty()) updateEmptyText()
 
-        // Server-side fallback: fire when client-side returns 0 results and query >= 3 chars
-        if (filtered.isEmpty() && query.length >= 3) {
+        // Server-side fallback: fire when client-side returns 0 results and query >= 3 chars.
+        // Not for My Tickets without a Username: the search couldn't filter by owner.
+        val searchScope = scopeCombo.selectedItem as? String
+        if (filtered.isEmpty() && query.length >= 3 &&
+            !myTicketsWithoutUsername(searchScope, RallySettings.getInstance().username)) {
             activeServerSearch = query
             statusLabel.text = "Searching Rally..."
             val scope = scopeCombo.selectedItem as? String ?: "All Tickets"
@@ -1192,6 +1342,8 @@ class RallyToolWindowPanel(private val project: Project) : Disposable {
      * short-circuit. When the selection is gone, the detail split is collapsed
      * explicitly: the listener never fires for the implicit deselection of a model
      * clear, so the auto-collapse otherwise never runs and a blank pane stays open.
+     * Start Working is refreshed last for the same reason — otherwise a button disabled
+     * for a test case or a multi-selection stays disabled after those rows are gone.
      */
     private fun updateListModel(artifacts: List<RallyArtifact>) {
         val selectedRefs = artifactList.selectedValuesList.mapNotNull { it.ref }.toSet()
@@ -1212,6 +1364,7 @@ class RallyToolWindowPanel(private val project: Project) : Disposable {
                 sp.dividerLocation = sp.width
             }
         }
+        updateStartWorkingButton()
     }
 
     /**
@@ -1246,19 +1399,6 @@ class RallyToolWindowPanel(private val project: Project) : Disposable {
         if (patched) updateStats(java.util.Collections.list(listModel.elements()))
     }
 
-    /**
-     * Optimistic copy of an artifact with its state field updated — Stories and
-     * Defects carry ScheduleState, Tasks carry State. Shared by changeState /
-     * startWorking / finishWorking so the three paths can't drift (the missing
-     * RallyTaskItem branch once had to be fixed in all three separately).
-     */
-    private fun withState(artifact: RallyArtifact, newState: String): RallyArtifact = when (artifact) {
-        is RallyUserStory -> artifact.copy(scheduleState = newState)
-        is RallyDefect -> artifact.copy(scheduleState = newState)
-        is RallyTaskItem -> artifact.copy(state = newState)
-        else -> artifact
-    }
-
     private fun updateStats(artifacts: List<RallyArtifact>) {
         var totalPoints = 0.0
         for (artifact in artifacts) {
@@ -1271,30 +1411,62 @@ class RallyToolWindowPanel(private val project: Project) : Disposable {
         renderSprintSummary()
     }
 
+    // ── Dialogs ──────────────────────────────────────────────────
+    // IntelliJ renders Messages dialog text as HTML (AlertDialog, with a live-link listener), so a
+    // FormattedID, a local file name or Rally's error text carrying markup would render — and fetch
+    // any <img> it names — instead of reading as written. Every dialog here takes plain text and
+    // goes through these, which show it literally (literalHtmlMessage).
+
+    private fun showInfo(text: String, title: String = "Rally") =
+        Messages.showInfoMessage(project, literalHtmlMessage(text), title)
+
+    private fun showError(text: String, title: String = "Rally") =
+        Messages.showErrorDialog(project, literalHtmlMessage(text), title)
+
+    private fun showWarning(text: String, title: String = "Rally") =
+        Messages.showWarningDialog(project, literalHtmlMessage(text), title)
+
+    private fun confirm(question: String, title: String): Boolean =
+        Messages.showYesNoDialog(project, literalHtmlMessage(question), title, Messages.getQuestionIcon()) == Messages.YES
+
     // ── Actions ──────────────────────────────────────────────────
 
     private fun showCreateDefectDialog() {
         val settings = RallySettings.getInstance()
         if (!settings.isConfiguredOrLoading()) {
-            Messages.showErrorDialog(project, "Configure Rally in Settings → Tools → Rally first.", "Rally")
+            showError("Configure Rally in Settings → Tools → Rally first.")
             return
         }
 
+        val inputs = createDialogInputs()
         val dialog = CreateDefectDialog(
-            project, cachedProjects, cachedIterations,
-            getSelectedProjectRef(), getSelectedIterationRef()
+            project, inputs.projects, inputs.iterations,
+            inputs.projectRef, inputs.iterationRef
         )
         if (!dialog.showAndGet()) return
 
-        val name = dialog.artifactName
-        val description = dialog.descriptionText
-        // Dialog "All Projects" falls back to the toolbar's current project (original behavior).
-        val projectRef = dialog.selectedProjectRef ?: getSelectedProjectRef()
-        val iterationRef = dialog.selectedIterationRef
-        val severity = dialog.severity
-        val priority = dialog.priority
+        createDefect(
+            inputs, dialog.artifactName, dialog.descriptionText, dialog.selectedProjectRef,
+            dialog.selectedIterationRef, dialog.severity, dialog.priority, dialog.assignToMe, dialog.attachment
+        )
+    }
 
-        executeCreate("defect", dialog.assignToMe, dialog.attachment) { client, ownerRef ->
+    /** Create the defect a Create Defect dialog opened with [inputs] was OK'd for (see [createUserStory]). */
+    private fun createDefect(
+        inputs: CreateDialogInputs,
+        name: String,
+        description: String?,
+        dialogProjectRef: String?,
+        iterationRef: String?,
+        severity: String?,
+        priority: String?,
+        assignToMe: Boolean,
+        attachment: java.io.File?,
+    ) {
+        val projectRef = createProjectRef(inputs, dialogProjectRef)
+        executeCreate(
+            "defect", assignToMe, attachment, inputs.listsGeneration, projectRef, iterationRef
+        ) { client, ownerRef ->
             client.createDefect(
                 name, projectRef, ownerRef = ownerRef, description = description,
                 iterationRef = iterationRef, severity = severity, priority = priority
@@ -1305,26 +1477,73 @@ class RallyToolWindowPanel(private val project: Project) : Disposable {
     private fun showCreateUserStoryDialog() {
         val settings = RallySettings.getInstance()
         if (!settings.isConfiguredOrLoading()) {
-            Messages.showErrorDialog(project, "Configure Rally in Settings → Tools → Rally first.", "Rally")
+            showError("Configure Rally in Settings → Tools → Rally first.")
             return
         }
 
+        val inputs = createDialogInputs()
         val dialog = CreateUserStoryDialog(
-            project, cachedProjects, cachedIterations,
-            getSelectedProjectRef(), getSelectedIterationRef()
+            project, inputs.projects, inputs.iterations,
+            inputs.projectRef, inputs.iterationRef
         )
         if (!dialog.showAndGet()) return
 
-        val name = dialog.artifactName
-        val description = dialog.descriptionText
-        val projectRef = dialog.selectedProjectRef ?: getSelectedProjectRef()
-        val iterationRef = dialog.selectedIterationRef
+        createUserStory(
+            inputs, dialog.artifactName, dialog.descriptionText, dialog.selectedProjectRef,
+            dialog.selectedIterationRef, dialog.assignToMe, dialog.attachment
+        )
+    }
 
-        executeCreate("user story", dialog.assignToMe, dialog.attachment) { client, ownerRef ->
+    /**
+     * Create the user story a Create User Story dialog opened with [inputs] was OK'd for.
+     * [dialogProjectRef] and [iterationRef] are the dialog's picks (null for "All Projects" /
+     * "Unscheduled").
+     */
+    private fun createUserStory(
+        inputs: CreateDialogInputs,
+        name: String,
+        description: String?,
+        dialogProjectRef: String?,
+        iterationRef: String?,
+        assignToMe: Boolean,
+        attachment: java.io.File?,
+    ) {
+        val projectRef = createProjectRef(inputs, dialogProjectRef)
+        executeCreate(
+            "user story", assignToMe, attachment, inputs.listsGeneration, projectRef, iterationRef
+        ) { client, ownerRef ->
             client.createUserStory(
                 name, projectRef, ownerRef = ownerRef, description = description, iterationRef = iterationRef
             )
         }
+    }
+
+    /**
+     * The project a create names: the dialog's pick, or for "All Projects" the toolbar's project
+     * (original behavior) — as recorded when the dialog opened, not read again after it closed.
+     * Every ref sent then comes from lists read under [CreateDialogInputs.listsGeneration], which
+     * is what executeCreate's connection check compares; a toolbar project re-read after OK could
+     * come from lists loaded since under another connection.
+     *
+     * One exception: a dialog opened before any project list had loaded (the key or the first
+     * list still loading) offered nothing but "All Projects", so it recorded no toolbar project
+     * even when one is saved — and the list may well have committed while the modal dialog was
+     * open (loadProjects writes [cachedProjects] off the EDT). Sending no Project then would file
+     * the artifact in the workspace default instead of the toolbar's project, so the toolbar
+     * project is read again, as the original code did. That is safe only on the same connection:
+     * the ref is read BEFORE [listsGeneration] is compared (a rebuild clears the lists, then bumps
+     * it), so an unchanged generation means it came from lists that connection loaded — building
+     * the first client bumps nothing, and the dialog had no refs of an earlier one. After a
+     * rebuild the dialog's "All Projects" names nothing, as before. executeCreate's connection
+     * check still runs on top, and refuses a project ref if the client is rebuilt after this.
+     */
+    private fun createProjectRef(inputs: CreateDialogInputs, dialogProjectRef: String?): String? {
+        dialogProjectRef?.let { return it }
+        inputs.projectRef?.let { return it }
+        // The dialog offered a list, so its "All Projects" is what was recorded: no project.
+        if (inputs.projects.isNotEmpty()) return null
+        val toolbarProjectRef = getSelectedProjectRef()
+        return if (inputs.listsGeneration == listsGeneration.get()) toolbarProjectRef else null
     }
 
     /**
@@ -1338,11 +1557,16 @@ class RallyToolWindowPanel(private val project: Project) : Disposable {
      * message instead of the old "Create failed", which hid the created artifact and invited a
      * duplicate create (HIGH-2). [createFn] performs the type-specific create call (its second
      * argument is the resolved owner ref); [typeLabel] names the artifact type for messages.
+     * [dialogListsGeneration] is the [listsGeneration] the dialog was opened under, and
+     * [projectRef]/[iterationRef] are the refs [createFn] will send.
      */
     private fun executeCreate(
         typeLabel: String,
         assignToMe: Boolean,
         attachment: java.io.File?,
+        dialogListsGeneration: Long,
+        projectRef: String?,
+        iterationRef: String?,
         createFn: (RallyApiClient, String?) -> RallyArtifact
     ) {
         val settings = RallySettings.getInstance()
@@ -1351,6 +1575,18 @@ class RallyToolWindowPanel(private val project: Project) : Disposable {
         ApplicationManager.getApplication().executeOnPooledThread {
             try {
                 val client = getClient()
+                // The client may have been rebuilt for new settings while the dialog was open —
+                // by a load, or by the getClient() call just above. The refs picked from its lists
+                // then belong to the previous connection, and the create POST names no workspace
+                // to catch that: don't send them.
+                if (createBlockedByConnectionChange(dialogListsGeneration, listsGeneration.get(), projectRef, iterationRef)) {
+                    LOG.info("Create $typeLabel cancelled: the Rally connection changed while its dialog was open")
+                    invokeLaterIfAlive {
+                        statusLabel.text = "Create cancelled"
+                        showWarning(CREATE_CONNECTION_CHANGED_MESSAGE)
+                    }
+                    return@executeOnPooledThread
+                }
                 // Re-check the attachment just before creating anything: doValidate()
                 // sampled the size at OK-press time on the EDT, but the file can be
                 // appended to or deleted before this task runs — discovering that
@@ -1358,11 +1594,9 @@ class RallyToolWindowPanel(private val project: Project) : Disposable {
                 if (attachment != null && (!attachment.exists() || attachment.length() > RallyApiClient.MAX_UPLOAD_BYTES)) {
                     invokeLaterIfAlive {
                         statusLabel.text = "Create cancelled"
-                        Messages.showErrorDialog(
-                            project,
+                        showError(
                             "Attachment '${attachment.name}' is missing or exceeds the " +
-                                "${RallyApiClient.MAX_UPLOAD_BYTES / (1024 * 1024)} MB upload limit.",
-                            "Rally"
+                                "${RallyApiClient.MAX_UPLOAD_BYTES / (1024 * 1024)} MB upload limit."
                         )
                     }
                     return@executeOnPooledThread
@@ -1386,8 +1620,9 @@ class RallyToolWindowPanel(private val project: Project) : Disposable {
                 val created = createFn(client, ownerRef)
                 val createdId = created.formattedID ?: "?"
                 invokeLaterIfAlive {
-                    val warningMsg = assignWarning?.let { " ($it)" } ?: ""
-                    val messageType = if (assignWarning != null) MessageType.WARNING else MessageType.INFO
+                    val warning = assignWarning
+                    val warningMsg = warning?.let { " ($it)" } ?: ""
+                    val messageType = if (warning != null) MessageType.WARNING else MessageType.INFO
                     client.clearArtifactCache()
                     // Optimistic update: prepend the new item instead of a full reload — but only
                     // if it belongs in the current view, and make it visible if a filter would hide
@@ -1422,7 +1657,7 @@ class RallyToolWindowPanel(private val project: Project) : Disposable {
                     // durable confirmation.
                     statusLabel.text = "Created $createdId$warningMsg"
                     val balloon = JBPopupFactory.getInstance()
-                        .createHtmlTextBalloonBuilder("Created $createdId$warningMsg", messageType, null)
+                        .createHtmlTextBalloonBuilder(createdBalloonHtml(createdId, warning), messageType, null)
                         .setFadeoutTime(3000)
                         .createBalloon()
                     balloon.show(RelativePoint.getSouthWestOf(statusLabel), Balloon.Position.above)
@@ -1451,13 +1686,9 @@ class RallyToolWindowPanel(private val project: Project) : Disposable {
                         LOG.warn("Attachment upload failed for $createdId", e)
                         invokeLaterIfAlive {
                             statusLabel.text = "Created $createdId — attachment upload failed"
-                            val safeMsg = com.intellij.openapi.util.text.StringUtil.escapeXmlEntities(
-                                e.message ?: e.javaClass.simpleName
-                            )
                             val balloon = JBPopupFactory.getInstance()
                                 .createHtmlTextBalloonBuilder(
-                                    "Created $createdId, but attachment upload failed: $safeMsg<br>" +
-                                        "You can re-attach the file in the Rally web UI.",
+                                    uploadFailedBalloonHtml(createdId, e.message ?: e.javaClass.simpleName),
                                     MessageType.WARNING, null
                                 )
                                 .setFadeoutTime(6000)
@@ -1470,10 +1701,30 @@ class RallyToolWindowPanel(private val project: Project) : Disposable {
                 LOG.warn("Failed to create $typeLabel", e)
                 invokeLaterIfAlive {
                     statusLabel.text = "Create failed"
-                    Messages.showErrorDialog(project, "Failed to create $typeLabel: ${e.message}", "Rally - Error")
+                    showError("Failed to create $typeLabel: ${e.message}", "Rally - Error")
                 }
             }
         }
+    }
+
+    /**
+     * What a Create dialog opened now is given. The lists generation is read FIRST: a client
+     * rebuild clears the lists before bumping it, so the lists read afterwards are never older
+     * than the recorded generation (a rebuild in between only makes executeCreate refuse a
+     * create whose lists were in fact fresh). While the sprint list reloads — after a project
+     * switch it still holds the previous project's sprints — none are offered; a Refresh
+     * re-querying the same project's list keeps offering it ([iterationsCurrent]).
+     */
+    private fun createDialogInputs(): CreateDialogInputs {
+        val generation = listsGeneration.get()
+        val sprintsCurrent = iterationsCurrent
+        return CreateDialogInputs(
+            generation,
+            cachedProjects,
+            if (sprintsCurrent) cachedIterations else emptyList(),
+            getSelectedProjectRef(),
+            if (sprintsCurrent) getSelectedIterationRef() else null,
+        )
     }
 
     /** Selected toolbar iteration's ref (null for "All Sprints"), read off the persisted selection. */
@@ -1486,7 +1737,7 @@ class RallyToolWindowPanel(private val project: Project) : Disposable {
     private fun openInBrowser() {
         val selected = artifactList.selectedValue
         if (selected == null) {
-            Messages.showInfoMessage(project, "Select a ticket first.", "Rally")
+            showInfo("Select a ticket first.")
             return
         }
         // A selected row implies a loaded list, hence a client; building the URL needs only the
@@ -1508,7 +1759,7 @@ class RallyToolWindowPanel(private val project: Project) : Disposable {
     private fun exportSelectedArtifact() {
         val selected = artifactList.selectedValuesList
         if (selected.isEmpty()) {
-            Messages.showInfoMessage(project, "Select one or more tickets to export.", "Rally")
+            showInfo("Select one or more tickets to export.")
             return
         }
 
@@ -1547,6 +1798,21 @@ class RallyToolWindowPanel(private val project: Project) : Disposable {
                 val id = artifact.formattedID ?: return@mapNotNull null
                 val ref = artifact.ref
                 java.util.concurrent.CompletableFuture.runAsync({
+                    // A selected test case (Test Cases scope) exports as a test case — with its
+                    // steps — and has no linked test cases of its own: querying
+                    // (WorkProduct = <test case ref>) would be a wasted round trip at best and a
+                    // bogus "with errors" lookup failure at worst.
+                    if (artifact is RallyTestCase) {
+                        try {
+                            exporter.exportTestCaseJson(id, outputDir)
+                            exporter.exportTestCaseMarkdown(id, outputDir)
+                            tcExported.incrementAndGet()
+                        } catch (e: Exception) {
+                            LOG.warn("Failed to export test case $id", e)
+                            tcFailed.incrementAndGet()
+                        }
+                        return@runAsync
+                    }
                     try {
                         // Pass the in-memory artifact so the exporter resolves Description via a
                         // cheap ref GET instead of re-running a FormattedID search query (MED-3/P4).
@@ -1619,6 +1885,7 @@ class RallyToolWindowPanel(private val project: Project) : Disposable {
                 LOG.warn("Export aborted", e)
                 invokeLaterIfAlive {
                     statusLabel.text = "Export failed"
+                    showError("Export failed: ${e.message}", "Rally - Export")
                 }
             }
         }
@@ -1635,9 +1902,11 @@ class RallyToolWindowPanel(private val project: Project) : Disposable {
 
         val currentPoints = selected.storyPoints
 
+        // literalHtmlMessage like every dialog here (see showInfo): 2024.1's input dialog renders
+        // only <html> text as HTML, but the escaped form reads the same on either path.
         val input = Messages.showInputDialog(
             project,
-            "Enter story points for ${selected.formattedID}:",
+            literalHtmlMessage("Enter story points for ${selected.formattedID}:"),
             "Rally - Edit Points",
             null,
             currentPoints?.let { if (it == it.toLong().toDouble()) it.toLong().toString() else it.toString() } ?: "",
@@ -1646,7 +1915,7 @@ class RallyToolWindowPanel(private val project: Project) : Disposable {
 
         val points = input.trim().toDoubleOrNull()
         if (points == null && input.trim().isNotEmpty()) {
-            Messages.showErrorDialog(project, "Invalid number: $input", "Rally")
+            showError("Invalid number: $input")
             return
         }
 
@@ -1680,7 +1949,7 @@ class RallyToolWindowPanel(private val project: Project) : Disposable {
                 LOG.warn("Failed to update points", e)
                 invokeLaterIfAlive {
                     statusLabel.text = "Update failed"
-                    Messages.showErrorDialog(project, "Failed to update points: ${e.message}", "Rally")
+                    showError("Failed to update points: ${e.message}")
                 }
             }
         }
@@ -1689,7 +1958,7 @@ class RallyToolWindowPanel(private val project: Project) : Disposable {
     private fun changeState(newState: String) {
         val rawSelected = artifactList.selectedValuesList
         if (rawSelected.isEmpty()) {
-            Messages.showInfoMessage(project, "Select one or more tickets first.", "Rally")
+            showInfo("Select one or more tickets first.")
             return
         }
         // Test cases have no ScheduleState/State. The context menu already hides state
@@ -1697,23 +1966,14 @@ class RallyToolWindowPanel(private val project: Project) : Disposable {
         // otherwise the Rally API rejects the write and the user sees a confusing error.
         val selected = rawSelected.filterNot { it is RallyTestCase }
         if (selected.isEmpty()) {
-            Messages.showInfoMessage(project, "State changes don't apply to test cases.", "Rally")
+            showInfo("State changes don't apply to test cases.")
             return
         }
+        val skippedTestCases = rawSelected.size - selected.size
 
-        // Single-item state changes are a one-click reversible action — confirming
-        // every one of them gets in the way. Only ask when bulk-changing more than
-        // one ticket so a stray multi-select doesn't move 50 stories at once.
-        if (selected.size > 1) {
-            val ids = selected.mapNotNull { it.formattedID }.joinToString(", ")
-            val confirm = Messages.showYesNoDialog(
-                project,
-                "Move ${selected.size} tickets to '$newState'?\n$ids",
-                "Rally - Change State",
-                Messages.getQuestionIcon()
-            )
-            if (confirm != Messages.YES) return
-        }
+        // See stateChangeConfirmation for when (and why) a change is confirmed.
+        val question = stateChangeConfirmation(selected.map { it.formattedID }, skippedTestCases, newState)
+        if (question != null && !confirm(question, "Rally - Change State")) return
 
         statusLabel.text = "Updating..."
 
@@ -1749,16 +2009,7 @@ class RallyToolWindowPanel(private val project: Project) : Disposable {
 
             invokeLaterIfAlive {
                 if (failures.get() > 0) {
-                    // List the failed IDs (truncated) so the user knows exactly which tickets
-                    // didn't move and need attention (MED-9).
-                    val ids = failedIds.toList()
-                    val shown = ids.take(10).joinToString(", ")
-                    val suffix = if (ids.size > 10) ", … and ${ids.size - 10} more" else ""
-                    Messages.showWarningDialog(
-                        project,
-                        "Updated: ${results.get()}, Failed: ${failures.get()}\nFailed to move: $shown$suffix",
-                        "Rally - State Change"
-                    )
+                    showWarning(stateChangeFailureMessage(results.get(), failedIds.toList()), "Rally - Change State")
                 }
                 // Optimistic update: patch in-memory list instead of full reload.
                 allArtifacts = allArtifacts.map { if (it.ref in successfulRefs) withState(it, newState) else it }
@@ -1770,21 +2021,36 @@ class RallyToolWindowPanel(private val project: Project) : Disposable {
                 artifactList.selectedValue?.let { sel ->
                     if (sel.ref in successfulRefs) detailPanel.showArtifact(sel, client)
                 }
-                statusLabel.text = "Updated ${results.get()}"
+                statusLabel.text = stateChangeStatus(results.get(), skippedTestCases)
             }
             } catch (e: Exception) {
                 LOG.warn("State change aborted", e)
                 invokeLaterIfAlive {
                     statusLabel.text = "State change failed"
+                    showError("Failed to change state: ${e.message}", "Rally - Change State")
                 }
             }
         }
     }
 
     private fun startWorking() {
-        val selected = artifactList.selectedValue
-        if (selected == null) {
-            Messages.showInfoMessage(project, "Select a ticket first.", "Rally")
+        // The button is disabled while a run is in progress; guard the call path too. Two
+        // concurrent runs would race GitBrancher tasks on the same repository.
+        if (startWorkingInFlight) return
+        val selectedValues = artifactList.selectedValuesList
+        if (selectedValues.isEmpty()) {
+            showInfo("Select a ticket first.")
+            return
+        }
+        // One branch per ticket: with a multi-selection, selectedValue would silently pick the
+        // lowest-index row (not the one last clicked) and drop the rest.
+        if (selectedValues.size > 1) {
+            showInfo("Select a single ticket to start working on.")
+            return
+        }
+        val selected = selectedValues.single()
+        if (selected is RallyTestCase) {
+            showInfo("Start Working doesn't apply to test cases.")
             return
         }
 
@@ -1792,7 +2058,7 @@ class RallyToolWindowPanel(private val project: Project) : Disposable {
         val ticketRef = selected.ref
         val ticketType = selected.type
         if (ticketId == null || ticketRef == null || ticketType == null) {
-            Messages.showErrorDialog(project, "Selected ticket is missing required data.", "Rally")
+            showError("Selected ticket is missing required data.")
             return
         }
 
@@ -1833,7 +2099,7 @@ class RallyToolWindowPanel(private val project: Project) : Disposable {
                     }
 
                     gbc.gridx = 0; gbc.gridy = 0; gbc.weightx = 0.0
-                    add(javax.swing.JLabel("Branch prefix:"), gbc)
+                    add(javax.swing.JLabel("Branch prefix:").apply { labelFor = prefixCombo }, gbc)
                     gbc.gridx = 1; gbc.weightx = 1.0
                     add(prefixCombo, gbc)
 
@@ -1841,9 +2107,14 @@ class RallyToolWindowPanel(private val project: Project) : Disposable {
                     add(previewLabel, gbc)
 
                     gbc.gridy = 2
+                    // Say up front when the owner step can't happen, rather than only
+                    // reporting it afterwards.
+                    val ownerItem = if (username.isNotBlank()) "<li>Assign it to you (${
+                        com.intellij.openapi.util.text.StringUtil.escapeXmlEntities(username)})</li>"
+                        else "<li>Owner unchanged — set Username in Settings → Tools → Rally to be assigned</li>"
                     add(javax.swing.JLabel("<html><br>This will also:<ul>" +
-                            "<li>Move ticket to In-Progress</li>" +
-                            "<li>Assign you as owner</li>" +
+                            "<li>Move the ticket to In-Progress</li>" +
+                            ownerItem +
                             "</ul></html>"), gbc)
                 }
             }
@@ -1854,6 +2125,8 @@ class RallyToolWindowPanel(private val project: Project) : Disposable {
         val branchName = "${dialog.prefixCombo.selectedItem}/$safeBranchId"
 
         statusLabel.text = "Starting work on $ticketId..."
+        startWorkingInFlight = true
+        updateStartWorkingButton()
 
         ApplicationManager.getApplication().executeOnPooledThread {
             try {
@@ -1881,8 +2154,7 @@ class RallyToolWindowPanel(private val project: Project) : Disposable {
             // Only proceed with Rally state changes if branch was created successfully
             if (!branchSucceeded) {
                 invokeLaterIfAlive {
-                    Messages.showErrorDialog(
-                        project,
+                    showError(
                         "Could not create/checkout branch $branchName:\n\n${errors.joinToString("\n")}\n\nRally ticket state was not changed.",
                         "Rally - Start Working"
                     )
@@ -1901,95 +2173,55 @@ class RallyToolWindowPanel(private val project: Project) : Disposable {
                 errors.add("State change failed: ${e.message}")
             }
 
-            // 3. Assign owner
-            if (username.isNotBlank()) {
-                try {
-                    val user = client.getUserByUsername(username)
-                    val userRef = user.ref
-                    if (userRef != null) {
-                        client.updateArtifactOwner(ticketRef, ticketType, userRef)
-                    }
-                } catch (e: Exception) {
-                    LOG.warn("Failed to assign owner for $ticketId", e)
-                    errors.add("Owner assignment failed: ${e.message}")
-                }
+            // 3. Assign owner (see runOwnerStep: only after the state change, every skip reported).
+            val ownerStep = runOwnerStep(
+                stateChangeSucceeded,
+                username,
+                lookup = { client.getUserByUsername(it) },
+                assign = { userRef -> client.updateArtifactOwner(ticketRef, ticketType, userRef) },
+            )
+            ownerStep.error?.let {
+                LOG.warn("Owner not assigned for $ticketId: $it")
+                errors.add(it)
             }
+            val assignedOwner = ownerStep.assigned
 
             invokeLaterIfAlive {
-                // Only update local state if Rally accepted the state change
+                // Only update local state for what Rally accepted. The owner is patched too,
+                // so the row, the detail header and "My Tickets" reflect the claim at once.
+                val transform: (RallyArtifact) -> RallyArtifact = { artifact ->
+                    withState(artifact, "In-Progress").let { a -> assignedOwner?.let { withOwner(a, it) } ?: a }
+                }
                 if (stateChangeSucceeded) {
-                    allArtifacts = allArtifacts.map { if (it.ref == ticketRef) withState(it, "In-Progress") else it }
+                    allArtifacts = allArtifacts.map { if (it.ref == ticketRef) transform(it) else it }
                 }
                 client.clearArtifactCache()
                 if (stateChangeSucceeded) {
-                    patchArtifactsInModel(listOf(ticketRef)) { withState(it, "In-Progress") }
+                    patchArtifactsInModel(listOf(ticketRef), transform)
                     // Keep the open detail panel's header in sync (see changeState).
                     artifactList.selectedValue?.let { sel ->
                         if (sel.ref == ticketRef) detailPanel.showArtifact(sel, client)
                     }
                 }
 
-                if (errors.isNotEmpty()) {
-                    Messages.showWarningDialog(
-                        project,
-                        "Started working on $ticketId with issues:\n\n${errors.joinToString("\n")}",
-                        "Rally - Start Working"
-                    )
+                val outcome = startWorkingOutcome(ticketId, branchName, stateChangeSucceeded, errors, ownerStep.note)
+                statusLabel.text = outcome.status
+                if (outcome.warning != null) {
+                    showWarning(outcome.warning, "Rally - Start Working")
                 }
-                statusLabel.text = if (errors.isEmpty()) "Working on $ticketId"
-                    else "Working on $ticketId (with issues)"
             }
             } catch (e: Exception) {
                 LOG.warn("Start working aborted", e)
                 invokeLaterIfAlive {
                     statusLabel.text = "Start working failed"
+                    showError("Failed to start working on $ticketId: ${e.message}", "Rally - Start Working")
                 }
-            }
-        }
-    }
-
-    private fun finishWorking() {
-        val selected = artifactList.selectedValue
-        if (selected == null) {
-            Messages.showInfoMessage(project, "Select a ticket first.", "Rally")
-            return
-        }
-        if (selected is RallyTestCase) return
-
-        val ticketId = selected.formattedID ?: return
-        val ticketRef = selected.ref ?: return
-        val ticketType = selected.type ?: return
-
-        val confirm = Messages.showYesNoDialog(
-            project,
-            "Finish working on $ticketId?\n\nThis will move the ticket to Completed.",
-            "Rally - Finish Working",
-            Messages.getQuestionIcon()
-        )
-        if (confirm != Messages.YES) return
-
-        statusLabel.text = "Finishing $ticketId..."
-
-        ApplicationManager.getApplication().executeOnPooledThread {
-            try {
-                val client = getClient()
-                client.updateArtifactState(ticketRef, ticketType, "Completed")
-
+            } finally {
+                // Queued after the result/error runnable above; the non-modal invokeLater also
+                // waits for its dialog to close, so the button can't be re-clicked under it.
                 invokeLaterIfAlive {
-                    allArtifacts = allArtifacts.map { if (it.ref == ticketRef) withState(it, "Completed") else it }
-                    client.clearArtifactCache()
-                    patchArtifactsInModel(listOf(ticketRef)) { withState(it, "Completed") }
-                    // Keep the open detail panel's header in sync (see changeState).
-                    artifactList.selectedValue?.let { sel ->
-                        if (sel.ref == ticketRef) detailPanel.showArtifact(sel, client)
-                    }
-                    statusLabel.text = "Finished $ticketId"
-                }
-            } catch (e: Exception) {
-                LOG.warn("Failed to finish working on $ticketId", e)
-                invokeLaterIfAlive {
-                    statusLabel.text = "Finish failed"
-                    Messages.showErrorDialog(project, "Failed to finish working: ${e.message}", "Rally")
+                    startWorkingInFlight = false
+                    updateStartWorkingButton()
                 }
             }
         }
@@ -1999,7 +2231,12 @@ class RallyToolWindowPanel(private val project: Project) : Disposable {
         synchronized(clientLock) {
             disposed = true
             currentClient?.clearCache()
-            currentClient?.apiExecutor?.shutdownNow()
+            // shutdown(), not shutdownNow(): shutdownNow() drops queued supplyAsync tasks, so
+            // their futures never complete and the pooled threads join()ing/get()ting them
+            // (loadTickets, changeState, queryAllArtifactsParallel) park forever, pinning the
+            // closed Project. Running requests are bounded by the HTTP timeouts, and the
+            // disposed flag keeps their results off the UI.
+            currentClient?.apiExecutor?.shutdown()
             currentClient = null
         }
         searchDebounceTimer.stop()
@@ -2025,9 +2262,10 @@ class RallyToolWindowPanel(private val project: Project) : Disposable {
 
         return synchronized(clientLock) {
             check(!disposed) { "RallyToolWindowPanel has been disposed" }
-            if (currentClient?.matchesSettings(serverUrl, apiKey, workspaceRef) != true) {
+            val previous = currentClient
+            if (previous?.matchesSettings(serverUrl, apiKey, workspaceRef) != true) {
                 // Shut down the old client's thread pool to prevent thread leaks
-                currentClient?.apiExecutor?.shutdown()
+                previous?.apiExecutor?.shutdown()
                 currentClient = RallyApiClient(serverUrl, apiKey)
                 // Reset caches when client changes. Bumping the project generation
                 // also invalidates any in-flight async project load against the OLD
@@ -2035,6 +2273,10 @@ class RallyToolWindowPanel(private val project: Project) : Disposable {
                 projectsLoaded = false
                 projectLoadGeneration.incrementAndGet()
                 invalidateIterations()
+                // Only a replaced client leaves another connection's lists behind. The first one
+                // (built once the API key loads) has none to drop, and moving listsGeneration for
+                // it would make a Create dialog opened while the key loaded refuse its create.
+                if (previous != null) dropConnectionLists()
             }
             // Workspace always comes from settings
             currentClient!!.workspaceRef = workspaceRef
@@ -2042,4 +2284,101 @@ class RallyToolWindowPanel(private val project: Project) : Disposable {
             currentClient!!
         }
     }
+
+    /**
+     * The client was replaced for new settings: the project/sprint lists, their refs and the
+     * dropdowns built from them belong to the previous connection. Resetting only the flags left
+     * them in place — and if the re-query then failed, Create, the scoped query and the sprint
+     * summary kept using them. Called by [getClient] under clientLock after the load generations
+     * were bumped, so no old load can commit after the clear; a same-settings Refresh never gets
+     * here, so its keep-on-failure lists survive.
+     */
+    private fun dropConnectionLists() {
+        synchronized(projectCommitLock) { cachedProjects = emptyList() }
+        synchronized(iterationCommitLock) { cachedIterations = emptyList() }
+        // After the clear: whoever reads the new generation also sees the emptied lists.
+        listsGeneration.incrementAndGet()
+        // The footer's sprint is the previous connection's too; the new one's resolves with the
+        // load (commitSprint). The bump drops the old client's lookups still in flight — their
+        // late answers would put that connection's sprint back — and together with the clear under
+        // sprintCommitLock, so none of them can commit between the two.
+        synchronized(sprintCommitLock) {
+            sprintSummaryGeneration.incrementAndGet()
+            sprintIteration = null
+        }
+        // getClient() runs off the EDT. Queued under clientLock, so ahead of the repopulation by
+        // any load on the new client (it can only get that client from getClient() after this).
+        // The label clear below is therefore not generation-checked: every commit it could erase
+        // is either stale (skipped by its own check) or queued after it.
+        invokeLaterIfAlive {
+            resetToPlaceholder(projectCombo, "All Projects")
+            resetToPlaceholder(iterationCombo, "All Sprints")
+            sprintLabel.text = ""
+        }
+    }
+
+    /** EDT. Leave only [placeholder], disabled until the list reloads (as a failed loadProjects does). */
+    private fun resetToPlaceholder(combo: JComboBox<String>, placeholder: String) {
+        // Detach the listeners while repopulating so the change doesn't trigger loadTickets.
+        val listeners = combo.actionListeners
+        listeners.forEach { combo.removeActionListener(it) }
+        combo.removeAllItems()
+        combo.addItem(placeholder)
+        combo.isEnabled = false
+        listeners.forEach { combo.addActionListener(it) }
+    }
+
+    // ── Test hooks ───────────────────────────────────────────────
+
+    /** Handles on the real wiring for RallyToolWindowPanelTest (see [TestHooks]). */
+    @TestOnly
+    internal fun testHooks(): TestHooks = TestHooks()
+
+    /**
+     * What RallyToolWindowPanelTest drives and observes against a fake Rally server. The
+     * regressions it pins live in how the load, the client rebuild and the dropdowns interact,
+     * which no pure function covers.
+     */
+    internal inner class TestHooks {
+        val scopeCombo: JComboBox<String> get() = this@RallyToolWindowPanel.scopeCombo
+        val stateCombo: JComboBox<String> get() = this@RallyToolWindowPanel.stateCombo
+        val projectCombo: JComboBox<String> get() = this@RallyToolWindowPanel.projectCombo
+        val iterationCombo: JComboBox<String> get() = this@RallyToolWindowPanel.iterationCombo
+        val artifactList: JList<RallyArtifact> get() = this@RallyToolWindowPanel.artifactList
+        val startWorkingButton: JButton get() = this@RallyToolWindowPanel.startWorkingButton
+        val statusText: String get() = statusLabel.text
+        /** The footer sprint summary. */
+        val sprintText: String get() = sprintLabel.text ?: ""
+        val loadInFlight: Boolean get() = loading
+        /** The current client (null before the first load builds one). */
+        val client: RallyApiClient? get() = currentClient
+        /** No load running, and both lists committed to their dropdowns. */
+        val idle: Boolean get() = !loading && projectsLoaded && iterationsLoaded
+        fun refresh() = refreshAll()
+        /** The lists and pre-selected refs a Create dialog opened now would be given. */
+        fun createDialogInputs(): CreateDialogInputs = this@RallyToolWindowPanel.createDialogInputs()
+        /**
+         * What OK in a Create User Story dialog opened with [inputs] runs: the real create flow,
+         * with [dialogProjectRef]/[dialogIterationRef] as the dialog's picks (null for "All
+         * Projects" / "Unscheduled"), no owner and no attachment.
+         */
+        fun createUserStory(inputs: CreateDialogInputs, name: String, dialogProjectRef: String?, dialogIterationRef: String?) =
+            this@RallyToolWindowPanel.createUserStory(
+                inputs, name, null, dialogProjectRef, dialogIterationRef, assignToMe = false, attachment = null
+            )
+        /** A state-change toolbar button, on the current selection. */
+        fun changeState(newState: String) = this@RallyToolWindowPanel.changeState(newState)
+    }
 }
+
+/**
+ * What a Create dialog is opened with: the project/sprint lists it offers, the toolbar's
+ * pre-selected refs, and the lists generation they were read under.
+ */
+internal data class CreateDialogInputs(
+    val listsGeneration: Long,
+    val projects: List<RallyProject>,
+    val iterations: List<RallyIteration>,
+    val projectRef: String?,
+    val iterationRef: String?,
+)

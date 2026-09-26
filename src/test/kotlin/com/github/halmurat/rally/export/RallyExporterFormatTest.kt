@@ -213,4 +213,19 @@ class RallyExporterFormatTest {
     fun `stripHtml still decodes simple entities`() {
         assertEquals("a & b < c", RallyExporter.stripHtml("a &amp; b &lt; c"))
     }
+
+    // ── markdownLinkTarget ───────────────────────────────────────
+
+    @Test
+    fun `markdownLinkTarget percent-encodes spaces, parentheses and brackets but keeps separators`() {
+        assertEquals(
+            "US1_attachments/42_Screenshot%202025-01-01%20at%2010.00%20%281%29%5Bv2%5D.png",
+            RallyExporter.markdownLinkTarget("US1_attachments/42_Screenshot 2025-01-01 at 10.00 (1)[v2].png")
+        )
+    }
+
+    @Test
+    fun `markdownLinkTarget leaves plain names alone`() {
+        assertEquals("US1_attachments/42_log.txt", RallyExporter.markdownLinkTarget("US1_attachments/42_log.txt"))
+    }
 }

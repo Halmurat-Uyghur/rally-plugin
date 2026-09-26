@@ -8,9 +8,11 @@ import com.github.halmurat.rally.api.RallyDefect
 import com.github.halmurat.rally.api.RallyType
 import com.github.halmurat.rally.api.RallyUserStory
 import com.github.halmurat.rally.api.effectiveState
+import com.github.halmurat.rally.util.literalHtmlTooltip
 import java.awt.BorderLayout
 import java.awt.Component
 import java.awt.FlowLayout
+import javax.swing.JComponent
 import javax.swing.JLabel
 import javax.swing.JList
 import javax.swing.JPanel
@@ -25,9 +27,9 @@ internal class ArtifactCellRenderer : ListCellRenderer<RallyArtifact> {
 
     private val panel = JPanel(BorderLayout(8, 0)).apply { border = JBUI.Borders.empty(4, 6) }
     private val iconLabel = JLabel()
-    private val textLabel = JLabel()
+    private val textLabel = rallyTextLabel()
     private val stateBadge = StatusBadge()
-    private val ownerLabel = JLabel()
+    private val ownerLabel = rallyTextLabel()
     private val rightPanel = JPanel(FlowLayout(FlowLayout.RIGHT, 8, 0)).apply { isOpaque = false }
 
     init {
@@ -54,7 +56,8 @@ internal class ArtifactCellRenderer : ListCellRenderer<RallyArtifact> {
             else -> AllIcons.FileTypes.Any_type
         }
 
-        textLabel.text = "${value.formattedID ?: "?"}: ${value.name ?: "Untitled"}"
+        val title = "${value.formattedID ?: "?"}: ${value.name ?: "Untitled"}"
+        textLabel.text = title
 
         // Show blocked indicator
         val isBlocked = when (value) {
@@ -76,8 +79,31 @@ internal class ArtifactCellRenderer : ListCellRenderer<RallyArtifact> {
         ownerLabel.text = value.owner?.displayName ?: value.owner?.refObjectName ?: ""
         ownerLabel.foreground = if (isSelected) list.selectionForeground else JBColor.GRAY
 
-        panel.toolTipText = "${value.formattedID}: ${value.name}"
+        // Set on every render: the panel is shared by all rows, and the list's accessible row
+        // reads the renderer's name.
+        panel.describeLiterally(title)
 
         return panel
     }
+}
+
+/**
+ * A label for text that is, or can start with, a Rally string (IDs, names, owner and file
+ * names). A JLabel whose text starts with `<html>` renders it as live HTML (BasicHTML) — and
+ * loads any `<img>` in it, synchronously, on the EDT — so these labels have HTML switched off.
+ * Set once at construction: BasicHTML reads the property when the text changes.
+ */
+internal fun rallyTextLabel(): JLabel = JLabel().apply { putClientProperty("html.disable", true) }
+
+/**
+ * Describe this renderer component by [text] (a Rally string, or null for none): as its tooltip,
+ * escaped ([literalHtmlTooltip] — the IDE renders tooltips as HTML), and to screen readers as the
+ * plain text. The accessible description would otherwise fall back to that escaped-HTML tooltip,
+ * and macOS reads the description as the name when there is none, so markup and entities would be
+ * read out.
+ */
+internal fun JComponent.describeLiterally(text: String?) {
+    toolTipText = text?.let(::literalHtmlTooltip)
+    accessibleContext.accessibleName = text
+    accessibleContext.accessibleDescription = text
 }

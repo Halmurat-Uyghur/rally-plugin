@@ -73,6 +73,29 @@ class RallyExporter(private val client: RallyApiClient) : AutoCloseable {
          * Lives on the companion so unit tests can exercise it without constructing
          * a RallyExporter (which needs a real RallyApiClient).
          */
+        /**
+         * A relative path usable as a Markdown link destination. Sanitized file names keep
+         * spaces, parentheses and brackets, and CommonMark ends a bare destination at a space
+         * (so "Screenshot 1.png" rendered as literal text) or an unbalanced ')'. Percent-encode
+         * them, per path segment so the '/' separators stay.
+         */
+        internal fun markdownLinkTarget(path: String): String =
+            path.split('/').joinToString("/") { segment ->
+                buildString {
+                    for (c in segment) when (c) {
+                        ' ' -> append("%20")
+                        '(' -> append("%28")
+                        ')' -> append("%29")
+                        '[' -> append("%5B")
+                        ']' -> append("%5D")
+                        '%' -> append("%25")
+                        '<' -> append("%3C")
+                        '>' -> append("%3E")
+                        else -> append(c)
+                    }
+                }
+            }
+
         internal fun escapeMarkdown(text: String): String {
             if (text.isEmpty()) return text
             return text
@@ -858,15 +881,17 @@ class RallyExporter(private val client: RallyApiClient) : AutoCloseable {
             if (savedPath != null) {
                 // Use the actual saved filename (may differ from attName due to sanitization/dedup)
                 val savedFileName = File(savedPath).name
+                val target = markdownLinkTarget("$attachDirName/$savedFileName")
+                val label = escapeMarkdown(attName)
                 if (contentType.startsWith("image/")) {
-                    md.appendLine("### $attName")
-                    md.appendLine("![$attName]($attachDirName/$savedFileName)")
+                    md.appendLine("### $label")
+                    md.appendLine("![$label]($target)")
                     md.appendLine()
                 } else {
-                    md.appendLine("- [$attName]($attachDirName/$savedFileName)")
+                    md.appendLine("- [$label]($target)")
                 }
             } else {
-                md.appendLine("- $attName *(download failed)*")
+                md.appendLine("- ${escapeMarkdown(attName)} *(download failed)*")
             }
         }
         md.appendLine()

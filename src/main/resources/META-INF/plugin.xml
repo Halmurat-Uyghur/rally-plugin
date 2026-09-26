@@ -14,7 +14,7 @@
             <li><b>Detail panel:</b> HTML description with inline images, plus tabs for linked Test Cases, Tasks, and Attachments. Double-click a test case to see its steps.</li>
             <li><b>Create:</b> User Stories and Defects (with project, sprint, severity, priority, and an optional attachment), and Tasks under a story or defect.</li>
             <li><b>Update:</b> move tickets to Defined, In-Progress, or Completed (multi-select supported) and edit story points.</li>
-            <li><b>Start / Finish Working:</b> create and check out a Git branch for the ticket, move it to In-Progress and assign it to you; mark it Completed when done.</li>
+            <li><b>Start Working:</b> create and check out a Git branch for the ticket, move it to In-Progress and assign it to you.</li>
             <li><b>Export:</b> save tickets and their linked test cases to JSON and Markdown, including attachments and inline images.</li>
             <li><b>Sprint summary:</b> ticket counts, story points, planned velocity, and days remaining.</li>
             <li>Open any ticket in the Rally web UI or copy its ID.</li>

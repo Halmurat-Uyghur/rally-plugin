@@ -58,7 +58,7 @@ intellijPlatform {
                 <li>Detail panel with description, linked test cases (and their steps), tasks, and attachments</li>
                 <li>Create User Stories, Defects, and Tasks</li>
                 <li>Change ticket state (multi-select) and edit story points</li>
-                <li>Start / Finish Working with Git branch creation</li>
+                <li>Start Working: create a Git branch, move the ticket to In-Progress, and assign it to you</li>
                 <li>Export tickets and linked test cases to JSON and Markdown, with attachments and images</li>
                 <li>Sprint summary with points, planned velocity, and days remaining</li>
             </ul>
@@ -109,5 +109,9 @@ tasks {
 
     withType<org.jetbrains.kotlin.gradle.tasks.KotlinCompile> {
         compilerOptions.jvmTarget.set(org.jetbrains.kotlin.gradle.dsl.JvmTarget.JVM_17)
+        // The plugin runs on the IDE's bundled Kotlin stdlib (not bundled here), which is
+        // 1.9.x on 2024.1/2024.2 (the sinceBuild floor). Pin the API level so a stdlib call
+        // added in 2.0 fails to compile instead of throwing NoSuchMethodError on those IDEs.
+        compilerOptions.apiVersion.set(org.jetbrains.kotlin.gradle.dsl.KotlinVersion.KOTLIN_1_9)
     }
 }

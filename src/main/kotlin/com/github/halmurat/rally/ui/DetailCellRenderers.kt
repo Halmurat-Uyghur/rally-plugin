@@ -25,7 +25,8 @@ import javax.swing.ListCellRenderer
 // while the per-row painting lives here. These are reusable rubber-stamp
 // renderers (project convention: one shared instance, no per-paint allocation)
 // and reference only package-level/static state — RallyColors, StatusBadge,
-// the model types, and RallyDetailPanel.formatFileSize. None of them touch
+// rallyTextLabel (labels showing Rally strings never render them as HTML), the
+// model types, and RallyDetailPanel.formatFileSize. None of them touch
 // RallyDetailPanel instance state, so they are plain top-level classes.
 
 // ── Test Case Cell Renderer ─────────────────────────────────
@@ -33,7 +34,7 @@ import javax.swing.ListCellRenderer
 class TestCaseCellRenderer : ListCellRenderer<RallyTestCase> {
     private val panel = JPanel(BorderLayout(8, 0)).apply { border = JBUI.Borders.empty(3, 6) }
     private val iconLabel = JLabel()
-    private val textLabel = JLabel()
+    private val textLabel = rallyTextLabel()
     private val methodBadge = StatusBadge()
     private val verdictBadge = StatusBadge()
     private val rightPanel = JPanel(FlowLayout(FlowLayout.RIGHT, 6, 0)).apply { isOpaque = false }
@@ -76,9 +77,9 @@ class TestCaseCellRenderer : ListCellRenderer<RallyTestCase> {
 class TaskCellRenderer : ListCellRenderer<RallyTaskItem> {
     private val panel = JPanel(BorderLayout(8, 0)).apply { border = JBUI.Borders.empty(3, 6) }
     private val iconLabel = JLabel(AllIcons.FileTypes.Any_type)
-    private val textLabel = JLabel()
+    private val textLabel = rallyTextLabel()
     private val stateBadge = StatusBadge()
-    private val ownerLabel = JLabel()
+    private val ownerLabel = rallyTextLabel()
     private val todoLabel = JLabel()
     private val rightPanel = JPanel(FlowLayout(FlowLayout.RIGHT, 6, 0)).apply { isOpaque = false }
 
@@ -135,8 +136,10 @@ class StepCellRenderer : ListCellRenderer<RallyTestCaseStep> {
         layout = BoxLayout(this, BoxLayout.Y_AXIS)
         isOpaque = false
     }
-    private val inputLabel = JLabel()
-    private val expectedLabel = JLabel().apply {
+    // stripHtml below means this text can't start with <html> today; the labels are pinned to
+    // plain text anyway, so a change to that stripping can't turn a step into live HTML.
+    private val inputLabel = rallyTextLabel()
+    private val expectedLabel = rallyTextLabel().apply {
         font = font.deriveFont(font.size2D - 1f)
     }
 
@@ -181,7 +184,7 @@ class StepCellRenderer : ListCellRenderer<RallyTestCaseStep> {
 class AttachmentCellRenderer : ListCellRenderer<RallyAttachment> {
     private val panel = JPanel(BorderLayout(8, 0)).apply { border = JBUI.Borders.empty(3, 6) }
     private val iconLabel = JLabel()
-    private val textLabel = JLabel()
+    private val textLabel = rallyTextLabel()
     private val sizeLabel = JLabel()
     private val rightPanel = JPanel(FlowLayout(FlowLayout.RIGHT, 6, 0)).apply { isOpaque = false }
 

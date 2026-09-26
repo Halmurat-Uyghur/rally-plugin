@@ -19,8 +19,8 @@ Works with IntelliJ-based IDEs 2024.1 through 2026.2.
   under a story or defect.
 - **Update** — move tickets to Defined, In-Progress, or Completed (multi-select supported) and edit story
   points.
-- **Start / Finish Working** — creates and checks out a Git branch for the ticket (`feature/`, `bugfix/`, …),
-  moves it to In-Progress and assigns it to you; Finish Working marks it Completed.
+- **Start Working** — creates and checks out a Git branch for the ticket (`feature/`, `bugfix/`, …),
+  moves it to In-Progress and assigns it to you.
 - **Export** — saves tickets and their linked test cases to JSON and Markdown, including attachments and
   inline images. Any failed download is reported, never silently skipped.
 - **Sprint summary** — ticket counts, story points, planned velocity, and days remaining.

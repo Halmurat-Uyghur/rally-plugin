@@ -49,6 +49,29 @@ enum class StateFilter(val displayName: String) {
 val activeExcludedStates: Set<String> = setOf("Accepted", "Completed", "Idea")
 
 /**
+ * "My Tickets" filters on the configured Username; with none it would silently show everyone's
+ * tickets under a "My Tickets" label. The tool window shows a "set your Username" state instead.
+ */
+internal fun myTicketsWithoutUsername(scope: String?, username: String): Boolean =
+    Scope.fromDisplay(scope) == Scope.MY_TICKETS && username.isBlank()
+
+/** What one loadTickets() run does — see [ticketLoadPlan]. */
+internal data class TicketLoadPlan(
+    /** Query Rally for the ticket list. */
+    val queryArtifacts: Boolean,
+)
+
+/**
+ * The Username guard skips only the ticket query ([myTicketsWithoutUsername]: an owner-less
+ * query would list everyone's tickets). Every run still reconciles the client with Settings and
+ * reloads the project/sprint lists as needed: Create and the sprint summary read those lists, so
+ * a load that returned before getClient() left the previous workspace's lists — and their refs —
+ * in place after a Settings change or project switch (audit F3).
+ */
+internal fun ticketLoadPlan(scope: String?, username: String): TicketLoadPlan =
+    TicketLoadPlan(queryArtifacts = !myTicketsWithoutUsername(scope, username))
+
+/**
  * Server-side query for the ticket list. Owner filter applies to "My Tickets" only;
  * the sprint filter is expressed per scope (H1): Rally's TestCase type has NO
  * Iteration attribute, so `(Iteration.Name = …)` sent to /testcase comes back as

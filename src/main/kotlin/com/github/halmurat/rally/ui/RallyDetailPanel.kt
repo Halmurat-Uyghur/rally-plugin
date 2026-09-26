@@ -16,8 +16,10 @@ import com.intellij.openapi.ui.popup.JBPopupFactory
 import com.github.halmurat.rally.api.*
 import com.github.halmurat.rally.export.RallyExporter
 import com.github.halmurat.rally.settings.RallySettings
+import com.github.halmurat.rally.util.DescriptionHtml
 import com.github.halmurat.rally.util.RallyFileUtils
 import com.github.halmurat.rally.util.RallyHtmlUtils
+import com.github.halmurat.rally.util.literalHtmlMessage
 import com.intellij.ui.ColorUtil
 import com.intellij.ui.JBColor
 import com.intellij.ui.OnePixelSplitter
@@ -37,7 +39,6 @@ import java.util.concurrent.CompletableFuture
 import java.util.concurrent.ExecutorService
 import java.util.concurrent.Executors
 import java.util.concurrent.atomic.AtomicLong
-import java.util.regex.Pattern
 import javax.swing.*
 
 class RallyDetailPanel(private val project: Project) : com.intellij.openapi.Disposable {
@@ -71,13 +72,6 @@ class RallyDetailPanel(private val project: Project) : com.intellij.openapi.Disp
             "<span class='rally-error'><b>Couldn't load the description.</b></span> " +
             "<a href='$RETRY_HREF'>Retry</a> (details are in idea.log)"
 
-        // Colors are defined in RallyColors object
-        // Matches external src attributes (double- or single-quoted, protocol-relative included)
-        // so JTextPane doesn't fetch them over the network before we neutralize the description.
-        private val EXTERNAL_SRC_PATTERN = Pattern.compile(
-            """src\s*=\s*(["'])(?:https?:)?//[^"']*\1""",
-            Pattern.CASE_INSENSITIVE
-        )
 
         fun formatFileSize(bytes: Long?): String {
             if (bytes == null || bytes <= 0) return ""
@@ -88,21 +82,94 @@ class RallyDetailPanel(private val project: Project) : com.intellij.openapi.Disp
                 else -> String.format("%.1f GB", bytes / (1024.0 * 1024.0 * 1024.0))
             }
         }
+
+        /** Last resort when neither a description nor its plain text will render. */
+        private const val RENDER_ERROR_HTML =
+            "<span class='rally-error'><b>Couldn't display the description.</b></span> (details are in idea.log)"
+
+        /**
+         * The description pane: read-only HTML through [SafeHtmlEditorKit], the fail-closed
+         * boundary that keeps Rally-authored markup from loading anything or acting on the pane
+         * (RallyHtmlUtils' regex passes run first, in wrapHtml, but they can't be the last line).
+         * The kit is set directly — `contentType = "text/html"` would install Swing's stock kit.
+         */
+        internal fun newDescriptionPane(): JTextPane = JTextPane().apply {
+            editorKit = SafeHtmlEditorKit()
+            isEditable = false
+            border = JBUI.Borders.empty(4)
+        }
+
+        /**
+         * Put [html] (a wrapped description, or "" to clear) into [pane] — the only way the
+         * detail panel sets description text. Each render gets a fresh document, so a style rule
+         * one description adds can't restyle the next ticket's, and a render that failed halfway
+         * leaves nothing behind for the fallback.
+         *
+         * Swing's HTML renderer can throw on author markup (its CSS parser throws
+         * EmptyStackException on some malformed style values; building the views for ~900 nested
+         * tables — 13 KB of markup — overflows the EDT's stack), and on the EDT that would surface
+         * as an IDE error report blaming the plugin for a Rally user's content. So a failure is
+         * logged at WARN and the description's plain text is shown instead; if even that won't
+         * render, a short error message. Each attempt starts from a fresh document, so a render
+         * that died halfway (an overflow leaves the views out of step with the document, and every
+         * later layout would throw) is replaced whole.
+         *
+         * This guards setting the text only. Something Swing throws later, while laying out or
+         * painting a document that did load, happens outside this call and is not caught here.
+         */
+        internal fun setDescriptionHtml(pane: JEditorPane, html: String, theme: DescriptionHtml.Theme) {
+            val failure = renderInFreshDocument(pane, html) ?: return
+            LOG.warn("Couldn't render a Rally description; showing its plain text instead", failure)
+            val fallbackFailure = (
+                try {
+                    renderInFreshDocument(pane, DescriptionHtml.shell(DescriptionHtml.plainText(html), theme))
+                } catch (e: Exception) {
+                    e
+                } catch (e: StackOverflowError) {
+                    e
+                }
+            ) ?: return
+            LOG.warn("Couldn't render the description's plain text either", fallbackFailure)
+            renderInFreshDocument(pane, DescriptionHtml.shell(RENDER_ERROR_HTML, theme))?.let { e ->
+                LOG.warn("Couldn't render the description error message", e)
+                renderInFreshDocument(pane, "")
+            }
+        }
+
+        /**
+         * Render [html] into a new document on [pane]; returns what Swing threw, or null.
+         * StackOverflowError is caught too — deep nesting is Rally content, not a plugin bug —
+         * but no other Error: an OutOfMemoryError or a linkage error must still surface.
+         */
+        private fun renderInFreshDocument(pane: JEditorPane, html: String): Throwable? = try {
+            pane.document = pane.editorKit.createDefaultDocument()
+            pane.text = html
+            null
+        } catch (e: Exception) {
+            e
+        } catch (e: StackOverflowError) {
+            e
+        }
     }
 
     val component: JPanel = JPanel(BorderLayout())
 
-    private val headerLabel = JBLabel("Select a ticket to view details")
+    // Shows "$id: $name", led by a Rally string, so HTML is off like on the list renderers'
+    // labels (see rallyTextLabel): a leading "<html>" must not make it live markup.
+    private val headerLabel = JBLabel("Select a ticket to view details").apply {
+        putClientProperty("html.disable", true)
+    }
     private val stateBadge = StatusBadge()
+    // Lists Rally values (owner, sprint and release names, the blocked reason). Every part starts
+    // with a fixed "Owner: "-style prefix, so it can't open with "<html>" today; HTML is off anyway,
+    // so a reordering can't make a Rally name live markup.
     private val metadataLabel = JBLabel("").apply {
+        putClientProperty("html.disable", true)
         font = font.deriveFont(Font.PLAIN, 11f)
         foreground = JBColor.GRAY
         border = JBUI.Borders.empty(0, 8, 4, 8)
     }
-    private val descriptionPane = JTextPane().apply {
-        contentType = "text/html"
-        isEditable = false
-        border = JBUI.Borders.empty(4)
+    private val descriptionPane = newDescriptionPane().apply {
         addHyperlinkListener { e ->
             // e.url is null for the custom scheme; match on the raw href.
             if (e.eventType == javax.swing.event.HyperlinkEvent.EventType.ACTIVATED &&
@@ -394,10 +461,10 @@ class RallyDetailPanel(private val project: Project) : com.intellij.openapi.Disp
         // Show description if already available, otherwise show loading state
         val desc = artifact.description
         if (!desc.isNullOrBlank()) {
-            descriptionPane.text = wrapHtml(desc)
+            showDescriptionHtml(wrapHtml(desc))
             descriptionPane.caretPosition = 0
         } else {
-            descriptionPane.text = wrapHtml("<i>Loading description...</i>")
+            showDescriptionHtml(wrapHtml("<i>Loading description...</i>"))
         }
 
         if (artifact is RallyTestCase) {
@@ -619,7 +686,7 @@ class RallyDetailPanel(private val project: Project) : com.intellij.openapi.Disp
                 val wrapped = wrapHtml(text)
                 ApplicationManager.getApplication().invokeLater {
                     if (generation.get() != gen || disposed) return@invokeLater
-                    descriptionPane.text = wrapped
+                    showDescriptionHtml(wrapped)
                     descriptionPane.caretPosition = 0
                 }
             }
@@ -643,7 +710,7 @@ class RallyDetailPanel(private val project: Project) : com.intellij.openapi.Disp
         metadataLabel.isVisible = false
         copyButton.isVisible = false
         browserButton.isVisible = false
-        descriptionPane.text = ""
+        showDescriptionHtml("")
         testCaseListModel.clear()
         testCaseSummaryLabel.text = ""
         taskListModel.clear()
@@ -786,6 +853,7 @@ class RallyDetailPanel(private val project: Project) : com.intellij.openapi.Disp
             ApplicationManager.getApplication().invokeLater {
                 if (disposed || project.isDisposed) return@invokeLater
                 val failed = selected.size - success
+                // Messages texts render as HTML; a path is shown literally (literalHtmlMessage).
                 if (failed > 0 || downloadsFailed > 0) {
                     val problems = buildList {
                         if (failed > 0) add("$failed test case(s) failed")
@@ -793,14 +861,16 @@ class RallyDetailPanel(private val project: Project) : com.intellij.openapi.Disp
                     }.joinToString("; ")
                     Messages.showWarningDialog(
                         project,
-                        "Exported $success/${selected.size} test case(s) to:\n$outputDir\n\n" +
-                            "$problems — details are in idea.log.",
+                        literalHtmlMessage(
+                            "Exported $success/${selected.size} test case(s) to:\n$outputDir\n\n" +
+                                "$problems — details are in idea.log."
+                        ),
                         "Rally - Export"
                     )
                 } else {
                     Messages.showMessageDialog(
                         project,
-                        "Exported $success/${selected.size} test case(s) to:\n$outputDir",
+                        literalHtmlMessage("Exported $success/${selected.size} test case(s) to:\n$outputDir"),
                         "Rally - Export",
                         AllIcons.General.InspectionsOK
                     )
@@ -952,7 +1022,8 @@ class RallyDetailPanel(private val project: Project) : com.intellij.openapi.Disp
                 LOG.warn("Failed to create task", e)
                 ApplicationManager.getApplication().invokeLater {
                     if (disposed) return@invokeLater
-                    Messages.showErrorDialog(project, "Failed to create task: ${e.message}", "Rally")
+                    // The message carries Rally's error text; Messages would render markup in it.
+                    Messages.showErrorDialog(project, literalHtmlMessage("Failed to create task: ${e.message}"), "Rally")
                 }
             }
         }
@@ -1054,7 +1125,8 @@ class RallyDetailPanel(private val project: Project) : com.intellij.openapi.Disp
                     if (disposed || project.isDisposed) return@invokeLater
                     Messages.showMessageDialog(
                         project,
-                        "Saved to: ${targetFile.absolutePath}",
+                        // The file name defaults to the Rally attachment's name.
+                        literalHtmlMessage("Saved to: ${targetFile.absolutePath}"),
                         "Rally - Attachment Saved",
                         AllIcons.General.InspectionsOK
                     )
@@ -1065,7 +1137,7 @@ class RallyDetailPanel(private val project: Project) : com.intellij.openapi.Disp
                     if (disposed || project.isDisposed) return@invokeLater
                     Messages.showErrorDialog(
                         project,
-                        "Failed to download: ${e.message}",
+                        literalHtmlMessage("Failed to download: ${e.message}"),
                         "Rally - Download Error"
                     )
                 }
@@ -1093,59 +1165,34 @@ class RallyDetailPanel(private val project: Project) : com.intellij.openapi.Disp
         return projectRef?.trimEnd('/')?.substringAfterLast('/')
     }
 
-    private fun wrapHtml(html: String): String {
+    /**
+     * Wrap a Rally description (or one of the panel's own messages) for the description pane:
+     * [DescriptionHtml.wrap] with the current IDE theme. Runs on a pooled thread for freshly
+     * fetched descriptions and on the EDT for the already-loaded fast path (showArtifactHeader).
+     */
+    private fun wrapHtml(html: String): String = DescriptionHtml.wrap(html, currentDescriptionTheme())
+
+    /** Show [html] (from [wrapHtml], or "" to clear) — every description pane update goes through here. */
+    private fun showDescriptionHtml(html: String) =
+        setDescriptionHtml(descriptionPane, html, currentDescriptionTheme())
+
+    /**
+     * The IDE-theme values the description shell pins. ColorUtil.toHex returns 6 hex digits with
+     * no leading '#'. These UIManager-backed reads are cheap and thread-safe, so both the pooled
+     * thread (wrapHtml) and the EDT (the render guard's fallback) can call this. An open
+     * description won't recolor live on a theme switch; reselecting the ticket re-renders it.
+     */
+    private fun currentDescriptionTheme() = DescriptionHtml.Theme(
         // Use the IDE's label font size so HiDPI displays don't render the
         // description at 11 device pixels (effectively a 5-6pt font on Retina).
         // JBUI.scale converts logical pixels to scaled physical pixels.
-        val fontSize = com.intellij.util.ui.JBUI.scaleFontSize(11f)
-        // Neutralize any literal </body> or </html> in the Rally description so
-        // HTMLEditorKit doesn't truncate the render at the embedded closing tag.
-        // We can't fully sanitize the HTML here (Rally lets users author rich
-        // descriptions), but escaping these two structural tags is enough to
-        // keep our outer wrapper intact.
-        val safe = html
-            .replace("</body>", "&lt;/body&gt;", ignoreCase = true)
-            .replace("</html>", "&lt;/html&gt;", ignoreCase = true)
-        // Strip Rally's baked-in inline colors so the theme colors below win. Rally
-        // descriptions carry colors authored for its light web UI; on a dark IDE theme
-        // those render as white blocks and invisible dark-on-dark text (see
-        // RallyHtmlUtils.stripInlineColors). Done before the src neutralizer — they
-        // target disjoint attributes, so order is irrelevant.
-        val decolored = RallyHtmlUtils.stripInlineColors(safe)
-        // Neutralize external http(s):// (and protocol-relative) image src attributes so
-        // JTextPane never makes an off-host network fetch when rendering a Rally-authored
-        // description (tracking pixels / SSRF-style leaks). This is the single chokepoint:
-        // every non-empty descriptionPane.text assignment goes through wrapHtml, including the early
-        // "description already loaded" path and descriptions with only external images
-        // (which skip resolveInlineImages' own pass). data:…;base64 URIs produced by
-        // resolveInlineImages are left intact — the pattern only matches http(s):// or //.
-        val neutralized = EXTERNAL_SRC_PATTERN.matcher(decolored).replaceAll("src=\"\"")
-        // Pin text + link colors to the current IDE theme. With inline colors stripped
-        // above, the body color cascades to every span, so the description renders in one
-        // consistent, readable color on the pane's theme background (and adapts to a Light
-        // theme too). Swing anchors keep their own color and ignore the body color, so they
-        // get their own rule. ColorUtil.toHex returns 6 hex digits with no leading '#'.
-        // These UIManager-backed reads are cheap and thread-safe; wrapHtml runs on a pooled
-        // thread for freshly fetched descriptions and on the EDT for the already-loaded fast
-        // path (showArtifact) — both are fine. An open description won't recolor live on a
-        // theme switch; reselecting the ticket re-renders it.
-        val fg = ColorUtil.toHex(UIUtil.getLabelForeground())
-        val link = ColorUtil.toHex(JBUI.CurrentTheme.Link.Foreground.ENABLED)
+        fontSizePx = JBUI.scaleFontSize(11f),
+        foregroundHex = ColorUtil.toHex(UIUtil.getLabelForeground()),
+        linkHex = ColorUtil.toHex(JBUI.CurrentTheme.Link.Foreground.ENABLED),
         // The error red must be theme-derived too — a hardcoded #c00 is dim on dark
-        // themes, the same low-contrast problem this whole strip exists to fix.
-        val err = ColorUtil.toHex(JBColor.namedColor("Label.errorForeground", JBColor.RED))
-        // The theme-variable body color lives in the per-document inline <body style>, so it
-        // is discarded with the document on the next setText and can never accumulate stale
-        // entries in the shared HTMLEditorKit stylesheet across ticket selections / theme
-        // switches. The static <style> selectors (link, error class) can't be expressed
-        // inline; they're idempotent, so repeated identical inserts are harmless.
-        return "<html><head><style>" +
-            "a{color:#$link;}" +
-            ".rally-error{color:#$err;}" +
-            "</style></head>" +
-            "<body style='font-family:sans-serif;font-size:${fontSize}px;margin:4px;color:#$fg;'>" +
-            "$neutralized</body></html>"
-    }
+        // themes, the same low-contrast problem the color strip exists to fix.
+        errorHex = ColorUtil.toHex(JBColor.namedColor("Label.errorForeground", JBColor.RED)),
+    )
 
     /**
      * Download Rally inline images and replace src URLs with base64 data URIs
@@ -1216,9 +1263,9 @@ class RallyDetailPanel(private val project: Project) : com.intellij.openapi.Disp
             val replacement = match.fullMatch.replace(match.originalSrc, dataUri)
             sb.replace(match.start, match.end, replacement)
         }
-        // External-src neutralization happens in wrapHtml — the documented single
-        // chokepoint every non-empty descriptionPane.text assignment goes through — so a second
-        // multi-MB regex pass here would be pure duplicate work.
+        // External-src neutralization happens in wrapHtml, which every description passes
+        // through before showDescriptionHtml (and SafeHtmlEditorKit refuses non-data: images
+        // anyway), so a second multi-MB regex pass here would be pure duplicate work.
         return sb.toString()
     }
 }
