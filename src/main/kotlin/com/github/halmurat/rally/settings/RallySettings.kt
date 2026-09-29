@@ -1,6 +1,5 @@
 package com.github.halmurat.rally.settings
 
-import com.intellij.credentialStore.CredentialAttributes
 import com.intellij.credentialStore.Credentials
 import com.intellij.credentialStore.generateServiceName
 import com.intellij.ide.passwordSafe.PasswordSafe
@@ -241,13 +240,13 @@ class RallySettings : PersistentStateComponent<RallySettings.State> {
         internal const val CREDENTIAL_SERVICE_SUBSYSTEM = "RallyPlugin"
         internal const val CREDENTIAL_SERVICE_KEY = "apiKey"
 
-        // The single-arg CredentialAttributes(serviceName) constructor compiles (against the
-        // 2024.1 SDK) to a synthetic default-args constructor that is marked deprecated in
-        // newer platforms. We deliberately do NOT add a userName here: PasswordSafe keychain
-        // backends key on serviceName+userName, so changing it would orphan already-stored
-        // API keys and force users to re-enter them. serviceName-only is the correct, stable key.
-        @Suppress("DEPRECATION")
-        private val credentialAttributes = CredentialAttributes(
+        // Built in Java (CredentialAttributesCompat): a Kotlin call to CredentialAttributes(name)
+        // compiles against the 2024.1 SDK to the synthetic default-args constructor that takes a
+        // `requestor` Class, deprecated in newer platforms; javac binds the plain (String)
+        // overload, present and non-deprecated across 241–262. We deliberately do NOT add a
+        // userName: PasswordSafe keychain backends key on serviceName+userName, so changing it
+        // would orphan already-stored API keys. serviceName-only is the correct, stable key.
+        private val credentialAttributes = CredentialAttributesCompat.serviceOnly(
             generateServiceName(CREDENTIAL_SERVICE_SUBSYSTEM, CREDENTIAL_SERVICE_KEY)
         )
 

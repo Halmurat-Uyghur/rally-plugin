@@ -1,4 +1,5 @@
 import org.jetbrains.intellij.platform.gradle.TestFrameworkType
+import org.jetbrains.intellij.platform.gradle.tasks.VerifyPluginTask
 
 plugins {
     id("java")
@@ -7,7 +8,7 @@ plugins {
 }
 
 group = "com.github.halmurat"
-version = "1.0.0"
+version = "1.0.1"
 
 repositories {
     mavenCentral()
@@ -38,8 +39,9 @@ intellijPlatform {
     buildSearchableOptions = providers.gradleProperty("skipSearchableOptions")
         .map { !it.toBoolean() }
         .orElse(true)
-    // This module is all-Kotlin with zero .java and zero .form files, so the form
-    // binding / @NotNull bytecode instrumentation pass has nothing to do — disabling
+    // This module has zero .form files and no @NotNull-annotated Java (its one .java file,
+    // CredentialAttributesCompat, exists only to bind a non-deprecated constructor), so the
+    // form binding / @NotNull bytecode instrumentation pass has nothing to do — disabling
     // it removes pure build overhead.
     instrumentCode = false
     sandboxContainer = layout.projectDirectory.dir(".sandbox")
@@ -51,6 +53,10 @@ intellijPlatform {
         }
 
         changeNotes = """
+            <h3>1.0.1</h3>
+            <ul>
+                <li>Replaced deprecated platform APIs</li>
+            </ul>
             <h3>1.0.0</h3>
             <p>First public release.</p>
             <ul>
@@ -66,21 +72,20 @@ intellijPlatform {
     }
 
     pluginVerification {
+        // Deprecated and scheduled-for-removal API usages fail verifyPlugin, not just
+        // incompatibilities, so a new deprecation shows up before Marketplace flags it.
+        failureLevel = listOf(
+            VerifyPluginTask.FailureLevel.COMPATIBILITY_PROBLEMS,
+            VerifyPluginTask.FailureLevel.INVALID_PLUGIN,
+            VerifyPluginTask.FailureLevel.DEPRECATED_API_USAGES,
+            VerifyPluginTask.FailureLevel.SCHEDULED_FOR_REMOVAL_API_USAGES,
+            VerifyPluginTask.FailureLevel.INTERNAL_API_USAGES,
+            VerifyPluginTask.FailureLevel.OVERRIDE_ONLY_API_USAGES,
+            VerifyPluginTask.FailureLevel.NON_EXTENDABLE_API_USAGES,
+            VerifyPluginTask.FailureLevel.MISSING_DEPENDENCIES,
+        )
         ides {
-            // Pinned instead of the default dynamic recommended() list: that feed now
-            // serves 2025.3.x distributions, whose layout drops
-            // modules/module-descriptors.jar — the newest Plugin Verifier (1.405) cannot
-            // read them (InvalidIdeException) and the whole verifyPlugin task dies before
-            // verifying anything else. This list covers the declared 241–262 range minus
-            // that one unreadable release line; re-add 2025.3 (or go back to
-            // recommended()) once the verifier understands the new layout.
-            create("IC", "2024.1.7")
-            create("IC", "2024.2.6")
-            create("IC", "2024.3.7.1")
-            create("IC", "2025.1.7.1")
-            create("IC", "2025.2.6.2")
-            create("IU", "2026.1.3")
-            create("IU", "2026.2.3")
+            recommended()
         }
     }
 

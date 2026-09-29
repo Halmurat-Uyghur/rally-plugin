@@ -1102,8 +1102,9 @@ class RallyDetailPanel(private val project: Project) : com.intellij.openapi.Disp
         val fileName = RallyFileUtils.sanitizeFileName(selected.name ?: "attachment")
 
         // FileSaverDescriptor's only public constructor through 2024.x is the vararg
-        // (title, description, vararg extensions) form, which newer platforms deprecate.
-        // No alternative exists at sinceBuild=241, so suppress until the floor is raised.
+        // (title, description, vararg extensions) form, which 251+ deprecates in favor of
+        // FileSaverDescriptor(title, description), added in 251. No alternative exists at
+        // sinceBuild=241, so this stays until the floor is raised to 251.
         @Suppress("DEPRECATION")
         val descriptor = FileSaverDescriptor("Save Attachment", "Choose where to save the attachment")
         val wrapper = FileChooserFactory.getInstance().createSaveFileDialog(descriptor, project)

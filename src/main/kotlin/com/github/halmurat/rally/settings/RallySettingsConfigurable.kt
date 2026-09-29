@@ -7,6 +7,7 @@ import com.intellij.openapi.diagnostic.Logger
 import com.intellij.openapi.fileChooser.FileChooserDescriptorFactory
 import com.intellij.openapi.options.Configurable
 import com.intellij.openapi.ui.Messages
+import com.intellij.openapi.ui.TextBrowseFolderListener
 import com.intellij.openapi.ui.TextFieldWithBrowseButton
 import com.github.halmurat.rally.api.RallyApiClient
 import com.github.halmurat.rally.api.RallyApiException
@@ -15,12 +16,12 @@ import com.github.halmurat.rally.api.RallyUserNotFoundException
 import com.github.halmurat.rally.util.literalHtmlMessage
 import com.intellij.ui.components.JBLabel
 import com.intellij.ui.components.JBTextField
-import com.intellij.util.ui.FormBuilder
+import com.intellij.ui.dsl.builder.AlignX
+import com.intellij.ui.dsl.builder.panel
 import com.intellij.util.ui.NamedColorUtil
 import com.intellij.util.ui.UIUtil
 import javax.swing.JButton
 import javax.swing.JComponent
-import javax.swing.JPanel
 import javax.swing.JPasswordField
 import javax.swing.event.DocumentEvent
 import javax.swing.event.DocumentListener
@@ -42,11 +43,6 @@ class RallySettingsConfigurable : Configurable {
 
     override fun getDisplayName(): String = "Rally"
 
-    // The 4-arg addBrowseFolderListener(title, description, project, descriptor) used below
-    // is deprecated in newer platforms in favor of a 2-arg overload that does not exist in
-    // 2024.1/2024.2. Suppressed at the method level to keep sinceBuild=241; migrate to
-    // addBrowseFolderListener(project, descriptor.withTitle(...)) once the floor is raised to 243+.
-    @Suppress("DEPRECATION")
     override fun createComponent(): JComponent {
         serverUrlField = JBTextField().apply {
             toolTipText = "Rally server URL (e.g., https://rally1.rallydev.com)"
@@ -70,11 +66,16 @@ class RallySettingsConfigurable : Configurable {
             toolTipText = "Your Rally UserName (email address, e.g. john.doe@company.com). Used for 'My Tickets' filter and 'Assign to me'. Use Test Connection to validate."
         }
         exportDirField = TextFieldWithBrowseButton().apply {
+            // TextBrowseFolderListener exists and is non-deprecated across 241–262, unlike the
+            // 4-arg (title, description, project, descriptor) overload (scheduled for removal)
+            // and the 2-arg (project, descriptor) one (243+).
             addBrowseFolderListener(
-                "Select Export Directory",
-                "Directory where Rally exports (JSON/Markdown) will be saved",
-                null,
-                FileChooserDescriptorFactory.createSingleFolderDescriptor()
+                TextBrowseFolderListener(
+                    FileChooserDescriptorFactory.createSingleFolderDescriptor()
+                        .withTitle("Select Export Directory")
+                        .withDescription("Directory where Rally exports (JSON/Markdown) will be saved"),
+                    null
+                )
             )
             textField.toolTipText = "Export directory (leave empty for project_root/rally_testcases)"
         }
@@ -105,30 +106,24 @@ class RallySettingsConfigurable : Configurable {
         val exportDirLabel = JBLabel("Export Directory:").apply { labelFor = exportDirField!!.textField }
         val pageSizeLabel = JBLabel("Page Size:").apply { labelFor = pageSizeField }
 
-        // Help text uses createCommentComponent (small, gray, auto-wrapping). The class is
-        // deprecated in newer platforms in favor of the Kotlin UI DSL, but that would mean
-        // rewriting this whole FormBuilder page; the factory is present and functional through
-        // 261, so we reference it fully-qualified inside this @Suppress("DEPRECATION") method
-        // (an import would warn outside the method scope). No hard-coded URL: the Rally server
-        // is per-user (incl. on-prem), so a static path/link could be wrong.
-        val apiKeyHelp = com.intellij.openapi.ui.panel.ComponentPanelBuilder.createCommentComponent(
-            "First time? Generate an API key on your Rally API Keys page, then paste it into the API Key field.",
-            true
-        )
-
-        return FormBuilder.createFormBuilder()
-            .addLabeledComponent(serverUrlLabel, serverUrlField!!)
-            .addLabeledComponent(apiKeyLabel, apiKeyField!!)
-            // Right column = aligned under the password field (not the label).
-            .addComponentToRightColumn(apiKeyStatusLabel!!)
-            .addComponentToRightColumn(apiKeyHelp)
-            .addLabeledComponent(workspaceLabel, workspaceRefField!!)
-            .addLabeledComponent(usernameLabel, usernameField!!)
-            .addLabeledComponent(exportDirLabel, exportDirField!!)
-            .addLabeledComponent(pageSizeLabel, pageSizeField!!)
-            .addComponent(testButton)
-            .addComponentFillVertically(JPanel(), 0)
-            .panel
+        // Kotlin UI DSL v2 (label column + field column). The API-key help is a DSL comment
+        // (small, gray, wrapping) under the status line, both aligned with the password field.
+        // No hard-coded URL: the Rally server is per-user (incl. on-prem), so a static
+        // path/link could be wrong.
+        return panel {
+            row(serverUrlLabel) { cell(serverUrlField!!).align(AlignX.FILL) }
+            row(apiKeyLabel) { cell(apiKeyField!!).align(AlignX.FILL) }
+            row("") {
+                cell(apiKeyStatusLabel!!).comment(
+                    "First time? Generate an API key on your Rally API Keys page, then paste it into the API Key field."
+                )
+            }
+            row(workspaceLabel) { cell(workspaceRefField!!).align(AlignX.FILL) }
+            row(usernameLabel) { cell(usernameField!!).align(AlignX.FILL) }
+            row(exportDirLabel) { cell(exportDirField!!).align(AlignX.FILL) }
+            row(pageSizeLabel) { cell(pageSizeField!!).align(AlignX.FILL) }
+            row { cell(testButton) }
+        }
     }
 
     override fun isModified(): Boolean {
