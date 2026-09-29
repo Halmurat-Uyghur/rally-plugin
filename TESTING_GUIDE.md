@@ -39,7 +39,7 @@ This will take a few moments on first run as it downloads IntelliJ.
 Once IntelliJ opens:
 1. Go to **Settings/Preferences** (Cmd+, or Ctrl+Alt+S)
 2. Navigate to **Plugins**
-3. Look for **Rally Integration** in the installed plugins list
+3. Look for **Rally Work Items** in the installed plugins list
 4. You should see it enabled ✅
 
 ### 3. Configure Rally Connection

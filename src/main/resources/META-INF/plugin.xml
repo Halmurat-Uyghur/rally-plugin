@@ -1,12 +1,12 @@
 <idea-plugin>
     <id>com.github.halmuratuyghur.rally</id>
-    <name>Rally Integration</name>
+    <name>Rally Work Items</name>
     <vendor url="https://github.com/Halmurat-Uyghur/rally-plugin">Halmurat Tahir</vendor>
 
     <description><![CDATA[
-        <p>Browse and manage Rally (Broadcom Agile Central) work items without leaving your IDE.
-        A dedicated tool window lists your User Stories, Defects, and Test Cases, shows their details,
-        and lets you create, update, and export them.</p>
+        <p>Browse, update, and export Rally work items in the IDE. A dedicated tool window lists your
+        User Stories, Defects, and Test Cases from Rally (Broadcom Agile Central), shows their details,
+        and lets you create tickets, change their state, and start a Git branch for one.</p>
 
         <h3>Features</h3>
         <ul>
@@ -28,6 +28,9 @@
             <li>Enter your workspace and username, then click <b>Test Connection</b>.</li>
             <li>Open the <b>Rally</b> tool window.</li>
         </ol>
+
+        <p><a href="https://github.com/Halmurat-Uyghur/rally-plugin/issues">Report an issue</a> ·
+        <a href="https://github.com/Halmurat-Uyghur/rally-plugin">Source code</a></p>
 
         <p><i>This is an independent, community-built plugin. It is not affiliated with, endorsed by,
         or sponsored by Broadcom Inc. Rally and Agile Central are trademarks of Broadcom Inc.</i></p>

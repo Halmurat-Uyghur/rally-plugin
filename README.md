@@ -1,4 +1,4 @@
-# Rally Integration for IntelliJ IDEA
+# Rally Work Items for IntelliJ IDEA
 
 [![License: MIT](https://img.shields.io/badge/license-MIT-blue)](LICENSE)
 
@@ -28,7 +28,7 @@ Works with IntelliJ-based IDEs 2024.1 through 2026.2.
 
 ## Installation
 
-**From JetBrains Marketplace:** Settings → Plugins → Marketplace → search for **Rally Integration** →
+**From JetBrains Marketplace:** Settings → Plugins → Marketplace → search for **Rally Work Items** →
 Install.
 
 **From a ZIP:** download the ZIP from the releases page (or build it — see below), then Settings → Plugins →
