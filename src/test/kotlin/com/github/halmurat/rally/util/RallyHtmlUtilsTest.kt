@@ -160,13 +160,13 @@ class RallyHtmlUtilsTest {
     }
 
     @Test
-    fun `stripInlineColors removes the TC2609759-style white-on-dark span`() {
+    fun `stripInlineColors removes a Rally-style white-on-dark span`() {
         // Regression for the screenshot: a span with an explicit white background and
         // black text rendered as a jarring white block on the dark IDE theme.
         val out = RallyHtmlUtils.stripInlineColors(
-            """<span style="background-color:#ffffff;color:#000000">TC2609759: Pricing</span>"""
+            """<span style="background-color:#ffffff;color:#000000">TC1234: Sample test case</span>"""
         )
-        assertTrue("text preserved", out.contains("TC2609759: Pricing"))
+        assertTrue("text preserved", out.contains("TC1234: Sample test case"))
         assertFalse("white background gone", out.contains("#ffffff"))
         assertFalse("black text color gone", out.contains("#000000"))
     }
