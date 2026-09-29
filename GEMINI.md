@@ -29,8 +29,6 @@ The project uses the Gradle wrapper for all build and execution tasks:
 - **Run in a test IDE:**
   ```bash
   ./gradlew runIde
-  # Alternatively, use the provided shell script:
-  ./run-test-ide.sh
   ```
 
 - **Run unit tests:**

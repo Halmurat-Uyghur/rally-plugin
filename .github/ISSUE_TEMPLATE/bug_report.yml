@@ -1,0 +1,54 @@
+name: Bug report
+description: Something in the plugin doesn't work as expected
+labels: [bug]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Thanks for reporting! **Don't paste your Rally API key, `zsessionid` headers, or ticket
+        content you aren't allowed to share.** For security problems, use
+        [private vulnerability reporting](https://github.com/Halmurat-Uyghur/rally-plugin/security/advisories/new) instead.
+  - type: textarea
+    id: what-happened
+    attributes:
+      label: What happened?
+      description: What you did, what you expected, and what happened instead.
+    validations:
+      required: true
+  - type: textarea
+    id: steps
+    attributes:
+      label: Steps to reproduce
+      placeholder: |
+        1. Select "My Tickets"
+        2. Click a defect
+        3. ...
+  - type: input
+    id: plugin-version
+    attributes:
+      label: Plugin version
+      description: Settings → Plugins → Rally Work Items
+      placeholder: "1.0.0"
+    validations:
+      required: true
+  - type: input
+    id: ide-version
+    attributes:
+      label: IDE and version
+      description: Help → About (for example, IntelliJ IDEA 2025.2.3 Community)
+    validations:
+      required: true
+  - type: dropdown
+    id: rally-host
+    attributes:
+      label: Rally server
+      options:
+        - Rally SaaS (rally1.rallydev.com)
+        - Other / on-premises
+        - Behind a proxy or reverse proxy
+  - type: textarea
+    id: logs
+    attributes:
+      label: Relevant log lines
+      description: Help → Show Log in Finder/Explorer, search for `rally`. Remove keys and workspace IDs first.
+      render: text
