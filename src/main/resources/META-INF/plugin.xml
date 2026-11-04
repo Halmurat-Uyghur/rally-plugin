@@ -37,6 +37,7 @@
     ]]></description>
 
     <depends>com.intellij.modules.platform</depends>
+    <depends optional="true" config-file="rally-vcs.xml">com.intellij.platform.vcs</depends>
     <depends optional="true" config-file="rally-git.xml">Git4Idea</depends>
 
     <extensions defaultExtensionNs="com.intellij">
