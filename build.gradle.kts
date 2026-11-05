@@ -8,7 +8,7 @@ plugins {
 }
 
 group = "com.github.halmurat"
-version = "1.0.1"
+version = "1.0.2"
 
 repositories {
     mavenCentral()
@@ -49,10 +49,14 @@ intellijPlatform {
     pluginConfiguration {
         ideaVersion {
             sinceBuild = "241"
-            untilBuild = "262.*"
+            untilBuild = "263.*"
         }
 
         changeNotes = """
+            <h3>1.0.2</h3>
+            <ul>
+                <li>Added support for IntelliJ IDEA 2026.3 (build 263)</li>
+            </ul>
             <h3>1.0.1</h3>
             <ul>
                 <li>Replaced deprecated platform APIs</li>

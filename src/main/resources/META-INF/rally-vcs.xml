@@ -1,0 +1,10 @@
+<idea-plugin>
+    <!--
+        Loaded only when the com.intellij.platform.vcs plugin exists, which is from 2026.3
+        (build 263); older builds keep these classes in the core and skip this optional
+        dependency. git4idea's repository types extend com.intellij.dvcs.repo.* classes that
+        moved to that plugin. Start Working already links without this file, but Plugin
+        Verifier reports the package as missing unless the plugin is declared, and the
+        com.intellij.modules.vcs alias does not satisfy it. No extensions are registered here.
+    -->
+</idea-plugin>
